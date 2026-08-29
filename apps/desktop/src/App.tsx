@@ -46,6 +46,7 @@ import {
   Plus,
   RotateCw,
   Search,
+  Server,
   File,
   Folder,
   Plug,
@@ -580,6 +581,7 @@ function storedChatPreferences(key: string): ChatRunPreferences {
     const parsed = JSON.parse(stored) as Partial<ChatRunPreferences>;
     return {
       provider_id: parsed.provider_id,
+      model_provider: parsed.model_provider,
       model_id: parsed.model_id,
       model_label: parsed.model_label,
       reasoning_effort: parsed.reasoning_effort ?? "medium",
@@ -1005,9 +1007,10 @@ function TechnicalDetails({ title, summary, children }: { title: string; summary
   </details>;
 }
 
-type ChatRunPanel = "root" | "model" | "effort" | "speed" | "team" | "search" | "features" | "config" | "output";
+type ChatRunPanel = "root" | "provider" | "model" | "effort" | "speed" | "team" | "search" | "features" | "config" | "output";
 
 function ChatRunPanelIcon({ panel }: { panel: Exclude<ChatRunPanel, "root"> }) {
+  if (panel === "provider") return <Server aria-hidden="true" />;
   if (panel === "model") return <Cpu aria-hidden="true" />;
   if (panel === "effort") return <BrainCircuit aria-hidden="true" />;
   if (panel === "speed") return <Gauge aria-hidden="true" />;
@@ -1103,6 +1106,7 @@ function ChatRunChoice({
 function ChatRunSelector({
   providers,
   codexModels = [],
+  codexConfigurationStatus,
   value,
   onChange,
   discovering,
@@ -1116,6 +1120,7 @@ function ChatRunSelector({
 }: {
   providers: ProviderListItem[];
   codexModels?: CodexModel[];
+  codexConfigurationStatus?: CodexConfigurationStatus | null;
   value: ChatRunPreferences;
   onChange: (preferences: ChatRunPreferences) => void;
   discovering: boolean;
@@ -1146,26 +1151,48 @@ function ChatRunSelector({
     providerName: provider.connection.display_name,
     model
   })));
-  const useCodexCatalog = codexModels.length > 0;
-  const models = useCodexCatalog
-    ? codexModels.filter((model) => !model.hidden).map((model) => ({ providerId: "codex", providerName: "OpenAI Subscription", model: { id: model.id, display_name: model.displayName } as ProviderModel }))
-    : providerModels;
-  const modelKey = value.provider_id && value.model_id ? `${value.provider_id}\u0000${value.model_id}` : "";
+  const localProviders = codexConfigurationStatus?.local_providers?.providers ?? [];
+  const selectedLocalProvider = value.model_provider
+    ? localProviders.find((provider) => provider.id === value.model_provider)
+    : undefined;
+  const localModelIds = selectedLocalProvider
+    ? Array.from(new Set([selectedLocalProvider.default_model, ...selectedLocalProvider.models]))
+    : [];
+  const useCodexCatalog = !selectedLocalProvider && codexModels.length > 0;
+  const models = selectedLocalProvider
+    ? localModelIds.map((id) => ({
+        providerId: selectedLocalProvider.id,
+        providerName: selectedLocalProvider.display_name,
+        model: { id, display_name: id } as ProviderModel
+      }))
+    : useCodexCatalog
+      ? codexModels.filter((model) => !model.hidden).map((model) => ({ providerId: "codex", providerName: "OpenAI Subscription", model: { id: model.id, display_name: model.displayName } as ProviderModel }))
+      : providerModels;
+  const modelKey = value.model_id ? `${value.model_provider ?? value.provider_id ?? "codex"}\u0000${value.model_id}` : "";
   const summaryModel = value.model_label ?? value.model_id ?? "Automatic";
+  const providerSummary = selectedLocalProvider?.display_name ?? "OpenAI Subscription";
   const updateModel = (key: string) => {
     const selected = models.find((entry) => `${entry.providerId}\u0000${entry.model.id}` === key);
+    const selectedLocal = selected ? localProviders.find((provider) => provider.id === selected.providerId) : undefined;
     onChange(selected ? {
       ...value,
       provider_id: selected.providerId,
+      model_provider: selectedLocal?.id as "ollama" | "lmstudio" | undefined,
       model_id: selected.model.id,
       model_label: selected.model.display_name,
-      reasoning_effort: useCodexCatalog
+      reasoning_effort: selectedLocal
+        ? (["low", "medium", "high"].includes(value.reasoning_effort) ? value.reasoning_effort : "medium")
+        : useCodexCatalog
         ? codexModels.find((model) => model.id === selected.model.id)?.defaultReasoningEffort ?? value.reasoning_effort
         : value.reasoning_effort,
-      service_tier: useCodexCatalog
+      service_tier: selectedLocal
+        ? undefined
+        : useCodexCatalog
         ? codexModels.find((model) => model.id === selected.model.id)?.defaultServiceTier
-        : value.service_tier
+        : value.service_tier,
+      speed: selectedLocal ? "standard" : value.speed
     } : {
+      model_provider: undefined,
       reasoning_effort: value.reasoning_effort,
       speed: value.speed,
       service_tier: value.service_tier,
@@ -1183,11 +1210,13 @@ function ChatRunSelector({
       personality: value.personality
     });
   };
-  const selectedCodexModel = value.model_id
+  const selectedCodexModel = !selectedLocalProvider && value.model_id
     ? codexModels.find((model) => model.id === value.model_id)
-    : codexModels.find((model) => model.isDefault);
-  const effortChoices = selectedCodexModel?.supportedReasoningEfforts.map((item) => item.reasoningEffort) ?? ["none", "low", "medium", "high", "xhigh"];
-  const tierChoices = selectedCodexModel?.serviceTiers ?? [];
+    : !selectedLocalProvider ? codexModels.find((model) => model.isDefault) : undefined;
+  const effortChoices = selectedLocalProvider
+    ? ["low", "medium", "high"]
+    : selectedCodexModel?.supportedReasoningEfforts.map((item) => item.reasoningEffort) ?? ["none", "low", "medium", "high", "xhigh"];
+  const tierChoices = selectedLocalProvider ? [] : selectedCodexModel?.serviceTiers ?? [];
   const effortLabel = (effort: string) => effort === "xhigh" ? "Extra high" : effort.charAt(0).toUpperCase() + effort.slice(1);
   const effortDescription = (effort: string) => ({
     none: "No additional reasoning",
@@ -1257,6 +1286,31 @@ function ChatRunSelector({
     if (!path || writableRoots.some((root) => root.toLocaleLowerCase() === path.toLocaleLowerCase())) return;
     onChange({ ...value, additional_writable_roots: [...writableRoots, path] });
   };
+  const selectModelProvider = (providerId?: string) => {
+    const provider = localProviders.find((candidate) => candidate.id === providerId);
+    if (!provider) {
+      onChange({
+        ...value,
+        provider_id: "codex",
+        model_provider: undefined,
+        model_id: undefined,
+        model_label: undefined,
+        service_tier: undefined,
+        speed: "standard"
+      });
+      return;
+    }
+    onChange({
+      ...value,
+      provider_id: provider.id,
+      model_provider: provider.id as "ollama" | "lmstudio",
+      model_id: provider.default_model,
+      model_label: provider.default_model,
+      reasoning_effort: ["low", "medium", "high"].includes(value.reasoning_effort) ? value.reasoning_effort : "medium",
+      service_tier: undefined,
+      speed: "standard"
+    });
+  };
   const applyOutputSchema = () => {
     const result = parseOutputSchema(outputSchemaText);
     if (result.error) {
@@ -1278,6 +1332,7 @@ function ChatRunSelector({
     </summary>
     <div className="chat-run-popover" data-panel={panel} role="dialog" aria-label={label}>
       {panel === "root" ? <>
+        {advanced && <button className="chat-run-menu-row" type="button" onClick={() => setPanel("provider")}><span className="chat-run-menu-icon"><ChatRunPanelIcon panel="provider" /></span><span className="chat-run-menu-copy"><strong>Provider</strong><small>{providerSummary}</small></span><ChevronRight aria-hidden="true" /></button>}
         <button className="chat-run-menu-row" type="button" onClick={() => setPanel("model")}><span className="chat-run-menu-icon"><ChatRunPanelIcon panel="model" /></span><span className="chat-run-menu-copy"><strong>Model</strong><small>{summaryModel}</small></span><ChevronRight aria-hidden="true" /></button>
         <button className="chat-run-menu-row" type="button" onClick={() => setPanel("effort")}><span className="chat-run-menu-icon"><ChatRunPanelIcon panel="effort" /></span><span className="chat-run-menu-copy"><strong>Effort</strong><small>{effortLabel(value.reasoning_effort)}</small></span><ChevronRight aria-hidden="true" /></button>
         <button className="chat-run-menu-row" type="button" onClick={() => setPanel("speed")}><span className="chat-run-menu-icon"><ChatRunPanelIcon panel="speed" /></span><span className="chat-run-menu-copy"><strong>Speed</strong><small>{speedLabel}</small></span><ChevronRight aria-hidden="true" /></button>
@@ -1314,8 +1369,18 @@ function ChatRunSelector({
           </div>
         </details>
       </> : <>
-        <button className="chat-run-menu-back" type="button" onClick={() => setPanel("root")}><ChevronLeft aria-hidden="true" /><span>{panel === "model" ? "Model" : panel === "effort" ? "Effort" : panel === "speed" ? "Speed" : panel === "search" ? "Web search" : panel === "features" ? "Session features" : panel === "config" ? "Codex config" : panel === "output" ? "Output format" : "Team"}</span></button>
-        {panel === "search" ? <div className="chat-run-choice-list" role="menu" aria-label="Web search">
+        <button className="chat-run-menu-back" type="button" onClick={() => setPanel("root")}><ChevronLeft aria-hidden="true" /><span>{panel === "provider" ? "Provider" : panel === "model" ? "Model" : panel === "effort" ? "Effort" : panel === "speed" ? "Speed" : panel === "search" ? "Web search" : panel === "features" ? "Session features" : panel === "config" ? "Codex config" : panel === "output" ? "Output format" : "Team"}</span></button>
+        {panel === "provider" ? <div className="chat-run-choice-list" role="menu" aria-label="Model provider">
+          <ChatRunChoice selected={!selectedLocalProvider} label="OpenAI Subscription" description="Use your shared Codex account" onSelect={(target) => { selectModelProvider(); closeSelector(target); setPanel("root"); }} />
+          {localProviders.map((provider) => <ChatRunChoice
+            selected={selectedLocalProvider?.id === provider.id}
+            label={provider.display_name}
+            description={`${provider.running ? `Running${provider.version ? ` · ${provider.version}` : ""}` : "Not running"} · ${provider.endpoint}`}
+            key={provider.id}
+            onSelect={(target) => { selectModelProvider(provider.id); closeSelector(target); setPanel("root"); }}
+          />)}
+          {localProviders.length === 0 && <small className="empty-state">Local-provider discovery is unavailable from the connected MetaCog service.</small>}
+        </div> : panel === "search" ? <div className="chat-run-choice-list" role="menu" aria-label="Web search">
           <ChatRunChoice selected={webSearchMode === "cached"} label="Default" description="Use cached search when available" onSelect={(target) => { setWebSearchMode("cached"); closeSelector(target); setPanel("root"); }} />
           <ChatRunChoice selected={webSearchMode === "live"} label="Live" description="Use current web results for this run" onSelect={(target) => { setWebSearchMode("live"); closeSelector(target); setPanel("root"); }} />
           <ChatRunChoice selected={webSearchMode === "disabled"} label="Off" description="Do not use web search for this run" onSelect={(target) => { setWebSearchMode("disabled"); closeSelector(target); setPanel("root"); }} />
@@ -1372,14 +1437,14 @@ function ChatRunSelector({
           </div>
         </div> : <div className="chat-run-choice-list" role="menu" aria-label={panel === "model" ? "Model" : panel === "effort" ? "Effort" : panel === "speed" ? "Speed" : "Team preset"}>
           {panel === "model" && <>
-            <ChatRunChoice selected={!modelKey} label="Automatic" description="Use the account default" onSelect={(target) => { updateModel(""); closeSelector(target); setPanel("root"); }} />
+            {!selectedLocalProvider && <ChatRunChoice selected={!modelKey} label="Automatic" description="Use the account default" onSelect={(target) => { updateModel(""); closeSelector(target); setPanel("root"); }} />}
             {models.map(({ providerId, providerName, model }) => {
               const key = `${providerId}\u0000${model.id}`;
               return <ChatRunChoice selected={modelKey === key} label={model.display_name} description={providerName} key={`${providerId}-${model.id}`} onSelect={(target) => { updateModel(key); closeSelector(target); setPanel("root"); }} />;
             })}
           </>}
           {panel === "effort" && effortChoices.map((effort) => <ChatRunChoice selected={value.reasoning_effort === effort} label={effortLabel(effort)} description={effortDescription(effort)} key={effort} onSelect={(target) => { onChange({ ...value, reasoning_effort: effort as ReasoningEffort }); closeSelector(target); setPanel("root"); }} />)}
-          {panel === "speed" && [{ id: "", name: "Standard" }, ...(tierChoices.length > 0 ? tierChoices : [{ id: "fast", name: "Fast" }])].map((tier) => {
+          {panel === "speed" && [{ id: "", name: "Standard" }, ...(tierChoices.length > 0 ? tierChoices : selectedLocalProvider ? [] : [{ id: "fast", name: "Fast" }])].map((tier) => {
             const selectedTier = tier.id ? value.service_tier === tier.id : !value.service_tier;
             return <ChatRunChoice selected={selectedTier} label={tier.name} description={tier.id ? "Faster responses, more usage" : "Default speed"} key={tier.id || "standard"} onSelect={(target) => { onChange({ ...value, service_tier: tier.id || undefined, speed: /fast|priority/i.test(tier.id) ? "fast" : "standard" as ExecutionSpeed }); closeSelector(target); setPanel("root"); }} />;
           })}
@@ -3463,7 +3528,8 @@ export function App() {
       const tier = conversation.execution_preferences.service_tier;
       setNewChatRunPreferences((current) => ({
         ...current,
-        provider_id: conversation.execution_preferences.model_id ? "codex" : undefined,
+        provider_id: conversation.execution_preferences.model_provider ?? (conversation.execution_preferences.model_id ? "codex" : undefined),
+        model_provider: conversation.execution_preferences.model_provider,
         model_id: conversation.execution_preferences.model_id,
         model_label: model?.displayName,
         reasoning_effort: conversation.execution_preferences.reasoning_effort ?? current.reasoning_effort,
@@ -5109,6 +5175,7 @@ export function App() {
     let pollHandle: number | undefined;
     try {
       const executionPreferences = {
+        model_provider: preferences.model_provider,
         model_id: preferences.model_id,
         reasoning_effort: preferences.reasoning_effort,
         service_tier: preferences.service_tier,
@@ -5392,6 +5459,10 @@ export function App() {
         }
         return true;
       case "fast": {
+        if (newChatRunPreferences.model_provider) {
+          showCommandNotice("Fast mode unavailable", "Local Ollama and LM Studio runs do not expose an OpenAI subscription service tier.");
+          return true;
+        }
         const selectedModel = codexModels.find((model) => model.id === newChatRunPreferences.model_id) ?? codexModels.find((model) => model.isDefault);
         const fastTier = selectedModel?.serviceTiers.find((tier) => /fast|priority/i.test(`${tier.id} ${tier.name}`))?.id ?? "fast";
         const enabled = Boolean(newChatRunPreferences.service_tier);
@@ -5432,7 +5503,7 @@ export function App() {
           setTaskError(`Model “${argument}” is not available for this account.`);
           return true;
         }
-        setNewChatRunPreferences((current) => ({ ...current, provider_id: "codex", model_id: model.id, model_label: model.displayName, reasoning_effort: model.defaultReasoningEffort ?? current.reasoning_effort, service_tier: model.defaultServiceTier }));
+        setNewChatRunPreferences((current) => ({ ...current, provider_id: "codex", model_provider: undefined, model_id: model.id, model_label: model.displayName, reasoning_effort: model.defaultReasoningEffort ?? current.reasoning_effort, service_tier: model.defaultServiceTier }));
         setWorkspaceActionStatus(`Model changed to ${model.displayName}.`);
         return true;
       }
@@ -5619,6 +5690,7 @@ export function App() {
         if (!original) throw new Error("The original user message is unavailable for an explicit retry.");
         await sendMessageContent(original.content, visibleConversation.conversation, {
           ...newChatRunPreferences,
+          model_provider: uncertainTurn.execution_preferences.model_provider,
           model_id: uncertainTurn.execution_preferences.model_id,
           reasoning_effort: uncertainTurn.execution_preferences.reasoning_effort ?? newChatRunPreferences.reasoning_effort,
           service_tier: uncertainTurn.execution_preferences.service_tier,
@@ -7619,6 +7691,12 @@ export function App() {
   const workspaceProjectId = visibleConversation?.conversation.project_id ?? workspaceConversation?.project_id ?? workspaceTask?.project_id;
   const workspaceProject = projects.find((project) => project.project_id === workspaceProjectId) ?? (selectedChatId ? undefined : selectedProject ?? undefined);
   const workspaceProjectName = workspaceProject?.root.split(/[\\/]/).filter(Boolean).at(-1) ?? "No project selected";
+  const selectedCommandLocalProvider = newChatRunPreferences.model_provider
+    ? codexConfigurationStatus?.local_providers?.providers.find((provider) => provider.id === newChatRunPreferences.model_provider)
+    : undefined;
+  const commandLocalModels = selectedCommandLocalProvider
+    ? Array.from(new Set([selectedCommandLocalProvider.default_model, ...selectedCommandLocalProvider.models]))
+    : [];
   const activeLocalSites = sites.filter((site) => site.state !== "archived" && isChatGptSiteUrl(site.public_url));
   const localSitesByUrl = new Map(activeLocalSites.map((site) => [comparableSiteUrl(site.public_url), site]));
   const accountSiteUrls = new Set(codexSites.map((site) => comparableSiteUrl(site.public_url)));
@@ -8003,7 +8081,7 @@ export function App() {
                   hasProject={Boolean(selectedProject)}
                 />
                 <span className="composer-action-spacer" />
-                <ChatRunSelector providers={providers} codexModels={codexModels} codexFeatures={codexFeatures} advanced={advanced} value={newChatRunPreferences} onChange={setNewChatRunPreferences} discovering={modelDiscoveryBusy} discoveryError={modelDiscoveryError} onRefresh={() => void refreshCodexCatalog()} label="New chat model, effort, speed, and team" includeTeam hasProject={Boolean(selectedProject)} />
+                <ChatRunSelector providers={providers} codexModels={codexModels} codexConfigurationStatus={codexConfigurationStatus} codexFeatures={codexFeatures} advanced={advanced} value={newChatRunPreferences} onChange={setNewChatRunPreferences} discovering={modelDiscoveryBusy} discoveryError={modelDiscoveryError} onRefresh={() => void refreshCodexCatalog()} label="New chat model, effort, speed, and team" includeTeam hasProject={Boolean(selectedProject)} />
                 <button className="primary new-chat-send" type="button" aria-label="Send" title="Send message" disabled={taskBusy || !taskGoal.trim()} onClick={() => void addTask()}>
                   {taskBusy ? <span aria-hidden="true">…</span> : <ArrowUp aria-hidden="true" />}
                 </button>
@@ -8118,7 +8196,7 @@ export function App() {
                       hasProject={Boolean(workspaceProject)}
                     />
                     <span className="composer-action-spacer" />
-                    <ChatRunSelector providers={providers} codexModels={codexModels} codexFeatures={codexFeatures} advanced={advanced} value={newChatRunPreferences} onChange={setNewChatRunPreferences} discovering={modelDiscoveryBusy} discoveryError={modelDiscoveryError} onRefresh={() => void refreshCodexCatalog()} label="Chat model, effort, speed, and team" includeTeam hasProject={Boolean(workspaceProject)} />
+                    <ChatRunSelector providers={providers} codexModels={codexModels} codexConfigurationStatus={codexConfigurationStatus} codexFeatures={codexFeatures} advanced={advanced} value={newChatRunPreferences} onChange={setNewChatRunPreferences} discovering={modelDiscoveryBusy} discoveryError={modelDiscoveryError} onRefresh={() => void refreshCodexCatalog()} label="Chat model, effort, speed, and team" includeTeam hasProject={Boolean(workspaceProject)} />
                     <button className="primary new-chat-send" type="button" aria-label={conversationIsActive && !parseSlashCommand(taskGoal) ? "Queue" : "Send"} disabled={!taskGoal.trim() || steeringMessageId !== null} title={conversationIsActive && !parseSlashCommand(taskGoal) ? "Queue message (Ctrl+Enter steers now)" : "Run command or send message"} onClick={() => conversationIsActive && !parseSlashCommand(taskGoal) ? queueDraftMessage() : void addTask()}><ArrowUp aria-hidden="true" /></button>
                   </div>
                   {taskError && <p className="error-message" role="alert">{taskError}</p>}
@@ -8160,7 +8238,7 @@ export function App() {
                     onChange={(preferences) => setTaskRunPreferences((current) => ({ ...current, [task.id]: preferences }))}
                     discovering={modelDiscoveryBusy}
                     discoveryError={modelDiscoveryError}
-                    onRefresh={() => void discoverModelCatalogs(providers, true)}
+                    onRefresh={() => void refreshCodexCatalog()}
                     label={`Model, effort, and speed for ${task.goal}`}
                     hasProject={Boolean(task.project_id)}
                   />
@@ -10390,11 +10468,13 @@ export function App() {
             <div><span>Secondary usage</span><strong>{codexRateLimits?.secondary ? `${codexRateLimits.secondary.remaining_percent}% remaining` : "Unavailable"}</strong></div>
           </div>}
           {commandDialog === "model" && <div className="slash-command-choices" role="listbox" aria-label="Models">
-            <button type="button" role="option" aria-selected={!newChatRunPreferences.model_id} onClick={() => { setNewChatRunPreferences((current) => ({ ...current, provider_id: undefined, model_id: undefined, model_label: undefined })); setCommandDialog(null); }}><span><strong>Automatic</strong><small>Use the account default</small></span>{!newChatRunPreferences.model_id && <Check aria-hidden="true" />}</button>
-            {codexModels.filter((model) => !model.hidden).map((model) => <button type="button" role="option" aria-selected={newChatRunPreferences.model_id === model.id} key={model.id} onClick={() => { setNewChatRunPreferences((current) => ({ ...current, provider_id: "codex", model_id: model.id, model_label: model.displayName, reasoning_effort: model.defaultReasoningEffort as ReasoningEffort, service_tier: model.defaultServiceTier })); setCommandDialog(null); }}><span><strong>{model.displayName}</strong><small>{model.description}</small></span>{newChatRunPreferences.model_id === model.id && <Check aria-hidden="true" />}</button>)}
+            {!selectedCommandLocalProvider && <button type="button" role="option" aria-selected={!newChatRunPreferences.model_id} onClick={() => { setNewChatRunPreferences((current) => ({ ...current, provider_id: undefined, model_provider: undefined, model_id: undefined, model_label: undefined })); setCommandDialog(null); }}><span><strong>Automatic</strong><small>Use the account default</small></span>{!newChatRunPreferences.model_id && <Check aria-hidden="true" />}</button>}
+            {selectedCommandLocalProvider
+              ? commandLocalModels.map((model) => <button type="button" role="option" aria-selected={newChatRunPreferences.model_id === model} key={model} onClick={() => { setNewChatRunPreferences((current) => ({ ...current, provider_id: selectedCommandLocalProvider.id, model_provider: selectedCommandLocalProvider.id as "ollama" | "lmstudio", model_id: model, model_label: model, service_tier: undefined, speed: "standard" })); setCommandDialog(null); }}><span><strong>{model}</strong><small>{selectedCommandLocalProvider.display_name}</small></span>{newChatRunPreferences.model_id === model && <Check aria-hidden="true" />}</button>)
+              : codexModels.filter((model) => !model.hidden).map((model) => <button type="button" role="option" aria-selected={newChatRunPreferences.model_id === model.id} key={model.id} onClick={() => { setNewChatRunPreferences((current) => ({ ...current, provider_id: "codex", model_provider: undefined, model_id: model.id, model_label: model.displayName, reasoning_effort: model.defaultReasoningEffort as ReasoningEffort, service_tier: model.defaultServiceTier })); setCommandDialog(null); }}><span><strong>{model.displayName}</strong><small>{model.description}</small></span>{newChatRunPreferences.model_id === model.id && <Check aria-hidden="true" />}</button>)}
           </div>}
           {commandDialog === "reasoning" && <div className="slash-command-choices" role="listbox" aria-label="Reasoning effort">
-            {(codexModels.find((model) => model.id === newChatRunPreferences.model_id)?.supportedReasoningEfforts.map((item) => item.reasoningEffort) ?? ["low", "medium", "high", "xhigh"]).map((effort) => <button type="button" role="option" aria-selected={newChatRunPreferences.reasoning_effort === effort} key={effort} onClick={() => { setNewChatRunPreferences((current) => ({ ...current, reasoning_effort: effort as ReasoningEffort })); setCommandDialog(null); }}><span><strong>{effort === "xhigh" ? "Extra high" : effort.charAt(0).toUpperCase() + effort.slice(1)}</strong><small>Model-supported reasoning level</small></span>{newChatRunPreferences.reasoning_effort === effort && <Check aria-hidden="true" />}</button>)}
+            {(selectedCommandLocalProvider ? ["low", "medium", "high"] : codexModels.find((model) => model.id === newChatRunPreferences.model_id)?.supportedReasoningEfforts.map((item) => item.reasoningEffort) ?? ["low", "medium", "high", "xhigh"]).map((effort) => <button type="button" role="option" aria-selected={newChatRunPreferences.reasoning_effort === effort} key={effort} onClick={() => { setNewChatRunPreferences((current) => ({ ...current, reasoning_effort: effort as ReasoningEffort })); setCommandDialog(null); }}><span><strong>{effort === "xhigh" ? "Extra high" : effort.charAt(0).toUpperCase() + effort.slice(1)}</strong><small>Model-supported reasoning level</small></span>{newChatRunPreferences.reasoning_effort === effort && <Check aria-hidden="true" />}</button>)}
           </div>}
           {commandDialog === "personality" && <div className="slash-command-choices" role="listbox" aria-label="Response personality">
             {([

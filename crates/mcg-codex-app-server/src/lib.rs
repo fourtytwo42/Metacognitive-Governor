@@ -22,6 +22,7 @@ use async_tungstenite::{
 };
 use chrono::{DateTime, Utc};
 use futures_util::StreamExt as _;
+use semver::Version;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -86,6 +87,26 @@ pub struct CodexConfigurationStatus {
     pub requirements: Value,
     pub provider_capabilities: Value,
     pub windows_sandbox: Value,
+    pub local_providers: CodexLocalProviderDiscovery,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodexLocalProviderDiscovery {
+    pub configured_provider: Option<String>,
+    pub providers: Vec<CodexLocalProviderStatus>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodexLocalProviderStatus {
+    pub id: String,
+    pub display_name: String,
+    pub default_model: String,
+    pub endpoint: String,
+    pub running: bool,
+    pub responses_supported: bool,
+    pub version: Option<String>,
+    pub models: Vec<String>,
+    pub detail: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -449,6 +470,8 @@ pub struct CodexConfigOverride {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct CodexExecutionPreferences {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_provider: Option<String>,
     pub model: Option<String>,
     pub effort: Option<String>,
     pub service_tier: Option<String>,
@@ -2206,12 +2229,14 @@ impl CodexAppServerHarness {
         writable: bool,
         instructions: Option<&CodexThreadInstructions>,
     ) -> Result<String, CodexHarnessError> {
+        self.ensure_local_provider_ready(preferences).await?;
         let config = preferences.thread_config(instructions);
         let response = self
             .request(
                 "thread/start",
                 json!({
                     "cwd": cwd,
+                    "modelProvider": preferences.model_provider,
                     "model": preferences.model,
                     "serviceTier": preferences.service_tier,
                     "approvalPolicy": preferences.approval_policy(writable),
@@ -2271,12 +2296,14 @@ impl CodexAppServerHarness {
         writable: bool,
         instructions: Option<&CodexThreadInstructions>,
     ) -> Result<(), CodexHarnessError> {
+        self.ensure_local_provider_ready(preferences).await?;
         let config = preferences.thread_config(instructions);
         self.request(
             "thread/resume",
             json!({
                 "threadId": thread_id,
                 "cwd": cwd,
+                "modelProvider": preferences.model_provider,
                 "model": preferences.model,
                 "serviceTier": preferences.service_tier,
                 "approvalPolicy": preferences.approval_policy(writable),
@@ -2732,16 +2759,22 @@ impl CodexAppServerHarness {
         thread_id: &str,
         last_turn_id: Option<&str>,
     ) -> Result<String, CodexHarnessError> {
-        let response = self
-            .request(
-                "thread/fork",
-                json!({
-                    "threadId": thread_id,
-                    "lastTurnId": last_turn_id,
-                    "threadSource": "mcg"
-                }),
-            )
-            .await?;
+        self.fork_thread_at_with_preferences(thread_id, last_turn_id, None, false)
+            .await
+    }
+
+    pub async fn fork_thread_at_with_preferences(
+        &self,
+        thread_id: &str,
+        last_turn_id: Option<&str>,
+        preferences: Option<&CodexExecutionPreferences>,
+        writable: bool,
+    ) -> Result<String, CodexHarnessError> {
+        if let Some(preferences) = preferences {
+            self.ensure_local_provider_ready(preferences).await?;
+        }
+        let params = thread_fork_params(thread_id, last_turn_id, preferences, writable);
+        let response = self.request("thread/fork", params).await?;
         response
             .pointer("/thread/id")
             .and_then(Value::as_str)
@@ -2896,6 +2929,88 @@ impl CodexAppServerHarness {
 
     pub async fn configuration_requirements(&self) -> Result<Value, CodexHarnessError> {
         self.request("configRequirements/read", json!({})).await
+    }
+
+    /// Discovers the two local providers supported by Codex's stable `--oss`
+    /// flow. Probes bypass ambient HTTP proxies and accept only loopback HTTP
+    /// endpoints so provider discovery cannot become an unreviewed network
+    /// capability in MetaCog.
+    pub async fn local_provider_discovery(
+        &self,
+    ) -> Result<CodexLocalProviderDiscovery, CodexHarnessError> {
+        let configuration = self
+            .request("config/read", json!({"includeLayers": false}))
+            .await?;
+        let configured_provider = configuration
+            .pointer("/config/oss_provider")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .filter(|provider| matches!(provider.as_str(), "ollama" | "lmstudio"));
+        let (ollama, lmstudio) = tokio::join!(
+            probe_local_provider("ollama"),
+            probe_local_provider("lmstudio")
+        );
+        Ok(CodexLocalProviderDiscovery {
+            configured_provider,
+            providers: vec![ollama, lmstudio],
+        })
+    }
+
+    /// Persists the same `oss_provider` user preference written by Codex's
+    /// interactive OSS picker. Provider activation remains an explicit
+    /// per-run execution preference; this only supplies the next default.
+    pub async fn set_default_local_provider(
+        &self,
+        provider: &str,
+    ) -> Result<CodexLocalProviderDiscovery, CodexHarnessError> {
+        if !matches!(provider, "ollama" | "lmstudio") {
+            return Err(CodexHarnessError::InvalidRequest(
+                "local Codex provider must be `ollama` or `lmstudio`".into(),
+            ));
+        }
+        let response = self
+            .request(
+                "config/value/write",
+                json!({
+                    "keyPath": "oss_provider",
+                    "value": provider,
+                    "mergeStrategy": "replace",
+                    "filePath": null,
+                    "expectedVersion": null,
+                }),
+            )
+            .await?;
+        if !matches!(response.get("status").and_then(Value::as_str), Some("ok")) {
+            return Err(CodexHarnessError::InvalidRequest(format!(
+                "Codex did not accept the local provider preference: {}",
+                response
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown write status")
+            )));
+        }
+        let discovery = self.local_provider_discovery().await?;
+        if discovery.configured_provider.as_deref() != Some(provider) {
+            return Err(CodexHarnessError::InvalidRequest(
+                "the local provider preference is overridden by managed Codex configuration".into(),
+            ));
+        }
+        Ok(discovery)
+    }
+
+    async fn ensure_local_provider_ready(
+        &self,
+        preferences: &CodexExecutionPreferences,
+    ) -> Result<(), CodexHarnessError> {
+        let Some(provider) = preferences.model_provider.as_deref() else {
+            return Ok(());
+        };
+        let model = preferences.model.as_deref().ok_or_else(|| {
+            CodexHarnessError::InvalidRequest(
+                "a local Codex provider requires an explicit resolved model".into(),
+            )
+        })?;
+        ensure_local_provider_model(provider, model).await
     }
 
     /// Reads Codex's effective `tui.resume_cwd` value through the pinned native
@@ -3326,6 +3441,369 @@ impl CodexAppServerHarness {
     }
 }
 
+fn thread_fork_params(
+    thread_id: &str,
+    last_turn_id: Option<&str>,
+    preferences: Option<&CodexExecutionPreferences>,
+    writable: bool,
+) -> Value {
+    let mut params = json!({
+        "threadId": thread_id,
+        "lastTurnId": last_turn_id,
+        "threadSource": "mcg"
+    });
+    if let Some(preferences) = preferences {
+        let values = params
+            .as_object_mut()
+            .expect("thread/fork parameters are an object");
+        values.insert("modelProvider".into(), json!(preferences.model_provider));
+        values.insert("model".into(), json!(preferences.model));
+        values.insert("serviceTier".into(), json!(preferences.service_tier));
+        values.insert(
+            "approvalPolicy".into(),
+            json!(preferences.approval_policy(writable)),
+        );
+        values.insert(
+            "approvalsReviewer".into(),
+            json!(preferences.approvals_reviewer()),
+        );
+        values.insert(
+            "sandbox".into(),
+            json!(preferences.thread_sandbox(writable)),
+        );
+        values.insert(
+            "permissions".into(),
+            json!(preferences.effective_permission_profile(writable)),
+        );
+        values.insert("config".into(), json!(preferences.thread_config(None)));
+    }
+    params
+}
+
+fn local_provider_endpoint(provider: &str) -> Result<String, CodexHarnessError> {
+    let default_port = match provider {
+        "ollama" => 11_434,
+        "lmstudio" => 1_234,
+        _ => {
+            return Err(CodexHarnessError::InvalidRequest(format!(
+                "unsupported Codex local provider `{provider}`"
+            )));
+        }
+    };
+    let port = std::env::var("CODEX_OSS_PORT")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .and_then(|value| value.parse::<u16>().ok())
+        .unwrap_or(default_port);
+    let endpoint = std::env::var("CODEX_OSS_BASE_URL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| format!("http://localhost:{port}/v1"));
+    let parsed = Url::parse(&endpoint).map_err(|error| {
+        CodexHarnessError::InvalidRequest(format!(
+            "invalid CODEX_OSS_BASE_URL for {provider}: {error}"
+        ))
+    })?;
+    let loopback = match parsed.host() {
+        Some(url::Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
+        Some(url::Host::Ipv4(host)) => host.is_loopback(),
+        Some(url::Host::Ipv6(host)) => host.is_loopback(),
+        None => false,
+    };
+    if parsed.scheme() != "http"
+        || !loopback
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return Err(CodexHarnessError::InvalidRequest(
+            "MetaCog local providers require a credential-free loopback HTTP endpoint".into(),
+        ));
+    }
+    Ok(endpoint.trim_end_matches('/').to_owned())
+}
+
+fn local_provider_host_root(endpoint: &str) -> &str {
+    endpoint.strip_suffix("/v1").unwrap_or(endpoint)
+}
+
+fn local_provider_http_client(timeout: Duration) -> Result<reqwest::Client, CodexHarnessError> {
+    reqwest::Client::builder()
+        .no_proxy()
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(timeout)
+        .build()
+        .map_err(|error| CodexHarnessError::Start(error.to_string()))
+}
+
+async fn probe_local_provider(provider: &str) -> CodexLocalProviderStatus {
+    let display_name = if provider == "ollama" {
+        "Ollama"
+    } else {
+        "LM Studio"
+    };
+    let default_model = if provider == "ollama" {
+        "gpt-oss:20b"
+    } else {
+        "openai/gpt-oss-20b"
+    };
+    let endpoint = match local_provider_endpoint(provider) {
+        Ok(endpoint) => endpoint,
+        Err(error) => {
+            return CodexLocalProviderStatus {
+                id: provider.into(),
+                display_name: display_name.into(),
+                default_model: default_model.into(),
+                endpoint: String::new(),
+                running: false,
+                responses_supported: false,
+                version: None,
+                models: Vec::new(),
+                detail: error.to_string(),
+            };
+        }
+    };
+    let client = match local_provider_http_client(Duration::from_secs(5)) {
+        Ok(client) => client,
+        Err(error) => {
+            return CodexLocalProviderStatus {
+                id: provider.into(),
+                display_name: display_name.into(),
+                default_model: default_model.into(),
+                endpoint,
+                running: false,
+                responses_supported: false,
+                version: None,
+                models: Vec::new(),
+                detail: error.to_string(),
+            };
+        }
+    };
+    let result = if provider == "ollama" {
+        probe_ollama(&client, &endpoint).await
+    } else {
+        probe_lmstudio(&client, &endpoint).await
+    };
+    match result {
+        Ok((version, models, responses_supported)) => CodexLocalProviderStatus {
+            id: provider.into(),
+            display_name: display_name.into(),
+            default_model: default_model.into(),
+            endpoint,
+            running: true,
+            responses_supported,
+            version,
+            models,
+            detail: if responses_supported {
+                "Ready for Codex Responses API work".into()
+            } else {
+                "Running, but the Responses API version requirement is not met".into()
+            },
+        },
+        Err(detail) => CodexLocalProviderStatus {
+            id: provider.into(),
+            display_name: display_name.into(),
+            default_model: default_model.into(),
+            endpoint,
+            running: false,
+            responses_supported: false,
+            version: None,
+            models: Vec::new(),
+            detail,
+        },
+    }
+}
+
+async fn probe_ollama(
+    client: &reqwest::Client,
+    endpoint: &str,
+) -> Result<(Option<String>, Vec<String>, bool), String> {
+    let root = local_provider_host_root(endpoint);
+    let response = client
+        .get(format!("{root}/api/tags"))
+        .send()
+        .await
+        .map_err(|_| {
+            "No running Ollama server detected. Start it with `ollama serve`.".to_owned()
+        })?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "Ollama returned HTTP {} from its model catalog",
+            response.status()
+        ));
+    }
+    let value = response
+        .json::<Value>()
+        .await
+        .map_err(|error| format!("Ollama returned an invalid model catalog: {error}"))?;
+    let models = value
+        .get("models")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|model| model.get("name").and_then(Value::as_str))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let version = client
+        .get(format!("{root}/api/version"))
+        .send()
+        .await
+        .ok()
+        .filter(|response| response.status().is_success());
+    let version = if let Some(response) = version {
+        response.json::<Value>().await.ok().and_then(|value| {
+            value
+                .get("version")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+    } else {
+        None
+    };
+    let responses_supported = ollama_responses_supported(version.as_deref());
+    Ok((version, models, responses_supported))
+}
+
+fn ollama_responses_supported(raw: Option<&str>) -> bool {
+    raw.is_none_or(|raw| {
+        Version::parse(raw.trim_start_matches('v')).map_or(true, |version| {
+            version == Version::new(0, 0, 0) || version >= Version::new(0, 13, 4)
+        })
+    })
+}
+
+async fn probe_lmstudio(
+    client: &reqwest::Client,
+    endpoint: &str,
+) -> Result<(Option<String>, Vec<String>, bool), String> {
+    let response = client
+        .get(format!("{endpoint}/models"))
+        .send()
+        .await
+        .map_err(|_| {
+            "LM Studio is not responding. Install it and run `lms server start`.".to_owned()
+        })?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "LM Studio returned HTTP {} from its model catalog",
+            response.status()
+        ));
+    }
+    let value = response
+        .json::<Value>()
+        .await
+        .map_err(|error| format!("LM Studio returned an invalid model catalog: {error}"))?;
+    let models = value
+        .get("data")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|model| model.get("id").and_then(Value::as_str))
+        .map(str::to_owned)
+        .collect();
+    Ok((None, models, true))
+}
+
+async fn ensure_local_provider_model(provider: &str, model: &str) -> Result<(), CodexHarnessError> {
+    if !matches!(provider, "ollama" | "lmstudio") {
+        return Err(CodexHarnessError::InvalidRequest(format!(
+            "unsupported Codex local provider `{provider}`"
+        )));
+    }
+    let status = probe_local_provider(provider).await;
+    if !status.running {
+        return Err(CodexHarnessError::Protocol(status.detail));
+    }
+    if !status.responses_supported {
+        let version = status.version.as_deref().unwrap_or("unknown");
+        return Err(CodexHarnessError::Protocol(format!(
+            "Ollama {version} is too old. Codex requires Ollama 0.13.4 or newer."
+        )));
+    }
+    if status.models.iter().any(|available| available == model) {
+        return Ok(());
+    }
+    if provider == "ollama" {
+        let client = local_provider_http_client(Duration::from_secs(7_200))?;
+        let root = local_provider_host_root(&status.endpoint);
+        let response = client
+            .post(format!("{root}/api/pull"))
+            .json(&json!({"model": model, "stream": false}))
+            .send()
+            .await
+            .map_err(|error| {
+                CodexHarnessError::Protocol(format!(
+                    "failed to pull Ollama model `{model}`: {error}"
+                ))
+            })?;
+        if !response.status().is_success() {
+            return Err(CodexHarnessError::Protocol(format!(
+                "failed to pull Ollama model `{model}`: HTTP {}",
+                response.status()
+            )));
+        }
+        return Ok(());
+    }
+
+    let mut command = Command::new("lms");
+    command
+        .args(["get", "--yes", model])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    let status_result = tokio::time::timeout(Duration::from_secs(7_200), command.status()).await;
+    let status_result = match status_result {
+        Ok(Ok(status)) => status,
+        Ok(Err(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+            let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" })
+                .map(PathBuf::from)
+                .unwrap_or_default();
+            let fallback = home.join(".lmstudio").join("bin").join(if cfg!(windows) {
+                "lms.exe"
+            } else {
+                "lms"
+            });
+            if !fallback.is_file() {
+                return Err(CodexHarnessError::Protocol(
+                    "LM Studio CLI was not found. Install LM Studio before downloading a model."
+                        .into(),
+                ));
+            }
+            let mut fallback_command = Command::new(fallback);
+            fallback_command
+                .args(["get", "--yes", model])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .kill_on_drop(true);
+            tokio::time::timeout(Duration::from_secs(7_200), fallback_command.status())
+                .await
+                .map_err(|_| CodexHarnessError::Timeout)??
+        }
+        Ok(Err(error)) => return Err(CodexHarnessError::Io(error)),
+        Err(_) => return Err(CodexHarnessError::Timeout),
+    };
+    if !status_result.success() {
+        return Err(CodexHarnessError::Protocol(format!(
+            "LM Studio model download failed with exit code {}",
+            status_result.code().unwrap_or(-1)
+        )));
+    }
+    let client = local_provider_http_client(Duration::from_secs(5))?;
+    let endpoint = status.endpoint.clone();
+    let model = model.to_owned();
+    tokio::spawn(async move {
+        let _ = client
+            .post(format!("{endpoint}/responses"))
+            .json(&json!({"model": model, "input": "", "max_output_tokens": 1}))
+            .send()
+            .await;
+    });
+    Ok(())
+}
+
 fn is_approval_request(method: &str) -> bool {
     matches!(
         method,
@@ -3480,6 +3958,16 @@ fn thread_has_source(thread: &Value, thread_source: &str) -> bool {
 mod tests {
     use super::*;
     use sha2::{Digest, Sha256};
+
+    #[test]
+    fn ollama_response_support_matches_pinned_codex_floor() {
+        assert!(ollama_responses_supported(None));
+        assert!(ollama_responses_supported(Some("0.0.0")));
+        assert!(!ollama_responses_supported(Some("0.13.3")));
+        assert!(ollama_responses_supported(Some("v0.13.4")));
+        assert!(ollama_responses_supported(Some("0.14.0")));
+        assert!(ollama_responses_supported(Some("development")));
+    }
 
     #[test]
     fn remote_transport_rejects_unsafe_or_credential_bearing_endpoints() {
@@ -4180,6 +4668,29 @@ mod tests {
         .unwrap();
         assert_eq!(command.command, vec!["git", "status"]);
         assert!(!command.writable);
+    }
+
+    #[test]
+    fn fork_payload_preserves_inheritance_unless_exact_overrides_are_supplied() {
+        let inherited = thread_fork_params("thread-1", Some("turn-1"), None, false);
+        assert_eq!(inherited["threadId"], "thread-1");
+        assert_eq!(inherited["lastTurnId"], "turn-1");
+        assert!(inherited.get("modelProvider").is_none());
+        assert!(inherited.get("serviceTier").is_none());
+
+        let local = CodexExecutionPreferences {
+            model_provider: Some("ollama".into()),
+            model: Some("gpt-oss:20b".into()),
+            service_tier: None,
+            approval_mode: CodexApprovalMode::Ask,
+            ..CodexExecutionPreferences::default()
+        };
+        let overridden = thread_fork_params("thread-1", None, Some(&local), true);
+        assert_eq!(overridden["modelProvider"], "ollama");
+        assert_eq!(overridden["model"], "gpt-oss:20b");
+        assert!(overridden["serviceTier"].is_null());
+        assert_eq!(overridden["approvalPolicy"], "on-request");
+        assert_eq!(overridden["sandbox"], "workspace-write");
     }
 
     #[test]

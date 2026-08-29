@@ -38,13 +38,13 @@ Environment variables alone are not capability discovery.
 | Codex family | State | Notes |
 | --- | --- | --- |
 | `codex` TUI / prompt | Native | `mcg` launches the TUI and accepts a consumer prompt. |
-| `exec` / `e` | Partial | Cycles 2-18 add the compatible top-level alias, stdin prompts, global model selection, independent global `-a/--ask-for-approval` and `-s/--sandbox` controls including durable read-only execution, repeatable `--add-dir`, ordered session-local `--enable`/`--disable`, repeatable typed `-c/--config`, named `-p/--profile` layering, global `--search`, native `--strict-config` preflight, initial image references, bounded `--output-schema` for initial and resumed work, output-last-message, ephemeral cleanup, Git checks, and durable exec resume. Cycle 25 matches the pinned Codex 0.150.1 JSONL lifecycle, item, error, and usage envelopes over the replayable conversation stream. Local providers and hook/rules flags remain. |
+| `exec` / `e` | Partial | Cycles 2-18 add the compatible top-level alias, stdin prompts, global model selection, independent global `-a/--ask-for-approval` and `-s/--sandbox` controls including durable read-only execution, repeatable `--add-dir`, ordered session-local `--enable`/`--disable`, repeatable typed `-c/--config`, named `-p/--profile` layering, global `--search`, native `--strict-config` preflight, initial image references, bounded `--output-schema` for initial and resumed work, output-last-message, ephemeral cleanup, Git checks, and durable exec resume. Cycle 25 matches the pinned Codex 0.150.1 JSONL lifecycle, item, error, and usage envelopes over the replayable conversation stream. Cycle 27 adds exact `--oss`/`--local-provider` selection and readiness behavior. Hook/rules flags remain. |
 | `doctor` | MetaCog | MetaCog has a broader diagnostic command with a different report contract. |
 | `mcp`, `plugin` | MetaCog | Governed management exists; exact syntax and marketplace operations remain incomplete. |
 | `archive`, `unarchive`, `delete` | Native | IDs take precedence over exact names; deletion previews descendants, prompts by default, restricts forced deletion to UUIDs, and uses the existing transactional safety gate. |
 | `completion` | Native | Bash, Zsh, Fish, PowerShell (`power-shell`), and Elvish completions include both Codex-compatible and MetaCog-native commands and work without the daemon. |
 | `resume`, `fork` | Native | IDs, exact names, project-scoped `--last`, `--all`, durable forks, searchable terminal selection, and terminal reopening work. `resume --include-non-interactive` includes durably classified exec/consumer sessions while explicit IDs and names always remain addressable. Different roots prompt in an interactive terminal unless `tui.resume_cwd` decides; explicit `-C` wins. |
-| `review` | Partial | Uncommitted, base branch, commit/title, stdin, and custom-instruction targets use the native read-only review API and render only the final human-readable finding instead of protocol JSON. Remaining global overrides need exact alignment. |
+| `review` | Partial | Uncommitted, base branch, commit/title, stdin, custom-instruction, and local-provider targets use the native read-only review API and render only the final human-readable finding instead of protocol JSON. Remaining hook/rules overrides need exact alignment. |
 | `login`, `logout` | Native | Browser OAuth, device-code login, API-key stdin, access-token stdin, status, and device-wide logout use the shared Codex account. Secrets are accepted only through standard input or a transient desktop credential field, zeroized after use, and never persisted by MetaCog. |
 | `app` | Partial | `mcg app [PATH]` is daemon-free, validates the workspace, prints the canonical Windows handoff path, and launches MetaCog by path on macOS. Direct Windows desktop launch/deep-linking to the active conversation remains. |
 | `features` | Native | `list`, `enable`, and `disable` match Codex output and use the pinned app-server's shared configuration. Ordered global `--enable`/`--disable` and `-c features.*=bool` create session-local overrides without mutating that configuration. |
@@ -235,8 +235,8 @@ the previous installation, and removes only its private staged files. Unsigned
 development builds and incomplete installations fail closed. The Desktop update
 layout and workflow are unchanged; they consume the same shared trust contract.
 
-Codex-compatible support remains incomplete for local providers/OSS, exact
-per-invocation remote CLI flag semantics, and hook trust. Current Codex 0.150.1
+Codex-compatible support remains incomplete for exact per-invocation remote CLI
+flag semantics and hook trust. Current Codex 0.150.1
 documents `--permission-profile` only for the
 Windows `sandbox` command; that exact contract is already Native rather than a
 missing global non-sandbox flag. These
@@ -366,6 +366,25 @@ shared-account browser and device-code paths. The next exact transport gap is
 Codex's invocation-local `--remote` and `--remote-auth-token-env` CLI override
 semantics; MetaCog currently applies the equivalent through shared revisioned
 settings.
+
+Cycle 27 adds current Codex `--oss` and `--local-provider` behavior to the root
+TUI, bare/piped prompts, consumer runs, `exec`, resume, queue, fork, and review.
+The provider flag alone remains inert; `--oss` uses an explicit provider, then
+the native `oss_provider` preference, then Codex's interactive running-provider
+selection. Non-interactive ambiguity returns Codex's exact configuration error,
+while a manual picker choice is persisted through `config/value/write`. Ollama
+uses the `gpt-oss:20b` default, probes the Responses-compatible version floor,
+and pulls a missing model. LM Studio uses `openai/gpt-oss-20b`, discovers models,
+downloads missing models through its bundled `lms` command, and performs the
+same background warmup as Codex. Provider/model identity is pinned on thread
+start, resume, and fork, including forks created with invocation-local
+overrides. MetaCog intentionally restricts custom OSS endpoints to
+credential-free loopback HTTP and bypasses ambient proxies; local execution
+still inherits organization, approval, sandbox, agent, evidence, and output
+controls. Advanced New Chat and established Chat expose the same discovered
+provider/model controls inside the shared run-settings hierarchy, while Simple
+keeps the frequent OpenAI-subscription workflow uncluttered. Raw hidden
+reasoning remains excluded; only model-provided summaries are rendered.
 
 ## Safety invariants
 

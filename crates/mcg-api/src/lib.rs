@@ -247,6 +247,8 @@ pub struct ConversationListResponse {
 pub struct ForkConversationRequest {
     #[serde(default)]
     pub origin_turn_id: Option<ConversationTurnId>,
+    #[serde(default)]
+    pub execution_preferences: Option<ExecutionPreferences>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -413,6 +415,11 @@ pub struct CodexDiscoveryRequest {
     pub cwds: Vec<String>,
     #[serde(default)]
     pub force_reload: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SetCodexLocalProviderRequest {
+    pub provider: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -1838,6 +1845,10 @@ fn router_with_shutdown(runtime: Arc<AppRuntime>, shutdown: Option<watch::Sender
         .route(
             "/api/v1/codex/configuration",
             get(codex_configuration_status),
+        )
+        .route(
+            "/api/v1/codex/local-provider/default",
+            post(set_default_codex_local_provider),
         )
         .route(
             "/api/v1/codex/windows-sandbox/setup",
@@ -4159,7 +4170,12 @@ async fn fork_conversation(
         Json(
             state
                 .runtime
-                .fork_conversation(conversation_id, request.origin_turn_id, false)
+                .fork_conversation(
+                    conversation_id,
+                    request.origin_turn_id,
+                    false,
+                    request.execution_preferences,
+                )
                 .await
                 .map_err(map_runtime_error)?,
         ),
@@ -4177,7 +4193,12 @@ async fn create_side_conversation(
         Json(
             state
                 .runtime
-                .fork_conversation(conversation_id, request.origin_turn_id, true)
+                .fork_conversation(
+                    conversation_id,
+                    request.origin_turn_id,
+                    true,
+                    request.execution_preferences,
+                )
                 .await
                 .map_err(map_runtime_error)?,
         ),
@@ -4845,6 +4866,19 @@ async fn codex_configuration_status(
         state
             .runtime
             .codex_configuration_status()
+            .await
+            .map_err(map_runtime_error)?,
+    ))
+}
+
+async fn set_default_codex_local_provider(
+    State(state): State<ApiState>,
+    Json(request): Json<SetCodexLocalProviderRequest>,
+) -> Result<Json<mcg_codex_app_server::CodexLocalProviderDiscovery>, ApiError> {
+    Ok(Json(
+        state
+            .runtime
+            .set_default_codex_local_provider(request.provider.trim())
             .await
             .map_err(map_runtime_error)?,
     ))

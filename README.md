@@ -139,6 +139,23 @@ environment variable containing the bearer token; it never stores that token.
 Unencrypted `ws://` is accepted only for loopback endpoints, while remote hosts
 must use `wss://`.
 
+Codex-compatible local OSS execution is available anywhere model-consuming
+global options are accepted. MetaCog discovers the same Ollama and LM Studio
+providers, uses their Codex defaults, and prepares a missing selected model
+before starting work. A manual interactive choice becomes the shared Codex
+`oss_provider` default; non-interactive use should select a provider explicitly:
+
+```powershell
+mcg --oss --local-provider ollama
+mcg exec --oss --local-provider lmstudio "run the local verification"
+mcg review --uncommitted --oss --local-provider ollama
+```
+
+Advanced Chat exposes the same per-run provider and local model choices. Local
+providers do not expand MetaCog filesystem, network, approval, organization, or
+agent authority, and custom OSS endpoints are restricted to credential-free
+loopback HTTP.
+
 Owner-facing behavior is restart-safe and shared by every interface. Use the
 desktop Settings workspace or `mcg settings show|set|history` to select Guided,
 Balanced, or Autonomous operation, persist simple/advanced mode, and explicitly

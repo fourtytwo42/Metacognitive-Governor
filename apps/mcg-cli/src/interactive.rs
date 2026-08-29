@@ -526,6 +526,22 @@ pub fn select_resume_cwd(
     )
 }
 
+/// Opens the same resize-safe searchable picker Codex uses when `--oss` has
+/// no unambiguous configured or running provider.
+pub fn select_local_provider(
+    candidates: &[SessionPickerCandidate],
+    no_alt_screen: bool,
+) -> io::Result<Option<String>> {
+    select_candidate(
+        candidates,
+        no_alt_screen,
+        "Choose a local model provider",
+        "Search Ollama or LM Studio",
+        "No matching local provider · Esc cancels",
+        "↑↓ select · Enter choose · Esc cancel",
+    )
+}
+
 pub struct TuiModel {
     editor: EditorState,
     history: Vec<String>,

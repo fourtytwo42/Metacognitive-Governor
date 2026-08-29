@@ -2646,6 +2646,7 @@ fn sorted_delegation_revisions(delegations: &[AgentDelegation]) -> Vec<(AgentDel
 
 fn codex_preferences(preferences: &ExecutionPreferences) -> CodexExecutionPreferences {
     CodexExecutionPreferences {
+        model_provider: preferences.model_provider.clone(),
         model: preferences.model_id.clone(),
         effort: preferences.reasoning_effort.clone(),
         service_tier: preferences.service_tier.clone(),
@@ -2804,6 +2805,24 @@ fn validate_execution_preferences(
     preferences.codex_profile_config = None;
     preferences.codex_profile_digest = None;
     preferences.codex_profile_ignored_keys.clear();
+    if let Some(provider) = preferences.model_provider.as_mut() {
+        *provider = provider.trim().to_ascii_lowercase();
+        let default_model = match provider.as_str() {
+            "ollama" => "gpt-oss:20b",
+            "lmstudio" => "openai/gpt-oss-20b",
+            _ => {
+                return Err(StorageError::InvalidData(
+                    "Codex local provider must be `ollama` or `lmstudio`".into(),
+                )
+                .into());
+            }
+        };
+        if preferences.model_id.as_deref().is_none_or(str::is_empty) {
+            preferences.model_id = Some(default_model.into());
+        }
+        // Local providers do not have an OpenAI subscription service tier.
+        preferences.service_tier = None;
+    }
     validate_output_schema(preferences)?;
     if let Some(profile) = preferences.codex_profile.as_mut() {
         *profile = profile.trim().to_owned();
@@ -4056,8 +4075,15 @@ impl AppRuntime {
         parent_id: ConversationId,
         origin_turn_id: Option<ConversationTurnId>,
         ephemeral: bool,
+        execution_preferences: Option<ExecutionPreferences>,
     ) -> Result<ConversationView, RuntimeError> {
         let parent = self.conversation(parent_id)?;
+        let mut child_preferences = execution_preferences
+            .unwrap_or_else(|| parent.conversation.execution_preferences.clone());
+        validate_execution_preferences(
+            &mut child_preferences,
+            parent.conversation.project_id.is_some(),
+        )?;
         let selected_origin_id = origin_turn_id.or_else(|| {
             parent
                 .messages
@@ -4114,11 +4140,15 @@ impl AppRuntime {
         let forked_thread_id = if let Some(binding) = &existing_binding {
             Some(
                 self.codex_harness
-                    .fork_thread_at(
+                    .fork_thread_at_with_preferences(
                         &binding.codex_thread_id,
                         selected_origin
                             .as_ref()
                             .and_then(|origin| origin.codex_turn_id.as_deref()),
+                        Some(&codex_preferences(&child_preferences)),
+                        parent.conversation.project_id.is_some()
+                            && child_preferences.sandbox_mode
+                                != Some(mcg_domain::ExecutionSandboxMode::ReadOnly),
                     )
                     .await?,
             )
@@ -4133,7 +4163,7 @@ impl AppRuntime {
             },
             parent.conversation.project_id,
         );
-        child.execution_preferences = parent.conversation.execution_preferences.clone();
+        child.execution_preferences = child_preferences;
         child.mode = parent.conversation.mode;
         child.parent_conversation_id = Some(parent_id);
         child.fork_origin_turn_id = selected_origin_id;
@@ -4389,6 +4419,11 @@ impl AppRuntime {
         let event = self.store()?.append_agent_message(&request)?;
         let _ = self.event_sender.send(event);
         let preferences = CodexExecutionPreferences {
+            model_provider: view
+                .conversation
+                .execution_preferences
+                .model_provider
+                .clone(),
             model: target.model.clone(),
             effort: view
                 .conversation
@@ -11263,16 +11298,28 @@ impl AppRuntime {
     pub async fn codex_configuration_status(
         &self,
     ) -> Result<CodexConfigurationStatus, RuntimeError> {
-        let (requirements, provider_capabilities, windows_sandbox) = tokio::try_join!(
+        let (requirements, provider_capabilities, windows_sandbox, local_providers) = tokio::try_join!(
             self.codex_harness.configuration_requirements(),
             self.codex_harness.model_provider_capabilities(),
             self.codex_harness.windows_sandbox_readiness(),
+            self.codex_harness.local_provider_discovery(),
         )?;
         Ok(CodexConfigurationStatus {
             requirements,
             provider_capabilities,
             windows_sandbox,
+            local_providers,
         })
+    }
+
+    pub async fn set_default_codex_local_provider(
+        &self,
+        provider: &str,
+    ) -> Result<mcg_codex_app_server::CodexLocalProviderDiscovery, RuntimeError> {
+        Ok(self
+            .codex_harness
+            .set_default_local_provider(provider)
+            .await?)
     }
 
     fn ensure_windows_sandbox_configuration_idle(&self) -> Result<(), RuntimeError> {
@@ -11456,6 +11503,7 @@ impl AppRuntime {
         })?;
         let project_root = project_root.to_string_lossy().into_owned();
         let preferences = CodexExecutionPreferences {
+            model_provider: conversation.execution_preferences.model_provider.clone(),
             model: conversation.execution_preferences.model_id.clone(),
             effort: conversation.execution_preferences.reasoning_effort.clone(),
             service_tier: conversation.execution_preferences.service_tier.clone(),
@@ -12632,6 +12680,7 @@ impl AppRuntime {
         let project_root = Some(fs::canonicalize(scratch)?.to_string_lossy().into_owned());
         let writable = false;
         let codex_preferences = CodexExecutionPreferences {
+            model_provider: preferences.model_provider.clone(),
             model: preferences.model_id.clone(),
             effort: preferences.reasoning_effort.clone(),
             service_tier: preferences.service_tier.clone(),
@@ -27372,6 +27421,35 @@ mod tests {
             effective_delegation_permission_mode(&writable),
             mcg_domain::ApprovalMode::AutoReview
         );
+    }
+
+    #[test]
+    fn local_codex_provider_is_normalized_defaulted_and_mapped() {
+        let mut ollama = ExecutionPreferences {
+            model_provider: Some(" OLLAMA ".into()),
+            service_tier: Some("priority".into()),
+            ..Default::default()
+        };
+        validate_execution_preferences(&mut ollama, false).expect("valid Ollama preferences");
+        assert_eq!(ollama.model_provider.as_deref(), Some("ollama"));
+        assert_eq!(ollama.model_id.as_deref(), Some("gpt-oss:20b"));
+        assert!(ollama.service_tier.is_none());
+        let mapped = codex_preferences(&ollama);
+        assert_eq!(mapped.model_provider.as_deref(), Some("ollama"));
+        assert_eq!(mapped.model.as_deref(), Some("gpt-oss:20b"));
+
+        let mut lmstudio = ExecutionPreferences {
+            model_provider: Some("lmstudio".into()),
+            ..Default::default()
+        };
+        validate_execution_preferences(&mut lmstudio, true).expect("valid LM Studio preferences");
+        assert_eq!(lmstudio.model_id.as_deref(), Some("openai/gpt-oss-20b"));
+
+        let mut unsupported = ExecutionPreferences {
+            model_provider: Some("vllm".into()),
+            ..Default::default()
+        };
+        assert!(validate_execution_preferences(&mut unsupported, true).is_err());
     }
 
     #[test]

@@ -2751,6 +2751,39 @@ test("advanced run settings persist live web search per conversation", async () 
   ));
 });
 
+test("advanced run settings discover and persist Codex local providers", async () => {
+  client.getCodexConfigurationStatus.mockResolvedValue({
+    requirements: {},
+    provider_capabilities: {},
+    windows_sandbox: { status: "ready" },
+    local_providers: {
+      configured_provider: "ollama",
+      providers: [
+        { id: "ollama", display_name: "Ollama", default_model: "gpt-oss:20b", endpoint: "http://localhost:11434/v1", running: true, responses_supported: true, version: "0.13.4", models: ["gpt-oss:20b", "gpt-oss:120b"], detail: "Ready for Codex Responses API work" },
+        { id: "lmstudio", display_name: "LM Studio", default_model: "openai/gpt-oss-20b", endpoint: "http://localhost:1234/v1", running: false, responses_supported: false, models: [], detail: "LM Studio is not responding" }
+      ]
+    }
+  });
+  render(<App />);
+  await enableAdvancedMode();
+
+  let settings = openNewChatRunSettings().dialog;
+  fireEvent.click(within(settings).getByRole("button", { name: /^Provider/ }));
+  fireEvent.click(within(settings).getByRole("menuitemradio", { name: /Ollama.*Running.*0\.13\.4/ }));
+  expect(document.querySelector('summary[aria-label="New chat model, effort, speed, and team"]')).toHaveTextContent("gpt-oss:20b");
+
+  settings = openNewChatRunSettings().dialog;
+  fireEvent.click(within(settings).getByRole("button", { name: /^Model/ }));
+  fireEvent.click(within(settings).getByRole("menuitemradio", { name: /gpt-oss:120b.*Ollama/ }));
+  fireEvent.change(screen.getByLabelText("Message"), { target: { value: "Use my local model" } });
+  fireEvent.click(screen.getByRole("button", { name: "Send" }));
+
+  await waitFor(() => expect(client.sendConversationMessage).toHaveBeenCalledWith(
+    "00000000-0000-4000-8000-000000000c01",
+    expect.objectContaining({ execution_preferences: expect.objectContaining({ model_provider: "ollama", model_id: "gpt-oss:120b", service_tier: undefined }) })
+  ));
+});
+
 test("advanced run settings persist typed Codex config and block governed keys", async () => {
   render(<App />);
   await enableAdvancedMode();
@@ -2822,6 +2855,7 @@ test("simple run settings omit strict Codex configuration", () => {
   const settings = openNewChatRunSettings().dialog;
   expect(within(settings).queryByText("Codex config", { exact: true })).not.toBeInTheDocument();
   expect(within(settings).queryByText("Output format", { exact: true })).not.toBeInTheDocument();
+  expect(within(settings).queryByText("Provider", { exact: true })).not.toBeInTheDocument();
   expect(within(settings).queryByRole("textbox", { name: "Codex profile" })).not.toBeInTheDocument();
   expect(within(settings).queryByRole("checkbox", { name: "Require strict Codex configuration" })).not.toBeInTheDocument();
   expect(within(settings).queryByRole("textbox", { name: "Output JSON Schema" })).not.toBeInTheDocument();

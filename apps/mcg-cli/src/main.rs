@@ -64,7 +64,7 @@ use mcg_api::{
     UpdateSiteRequest, UpdateSshHostRequest, UpdateUserSettingsRequest,
     UserSettingsHistoryResponse, WakeScheduleRequest, WorktreeMutationRequest,
 };
-use mcg_codex_app_server::CodexResumeCwd;
+use mcg_codex_app_server::{CodexConfigurationStatus, CodexResumeCwd};
 use mcg_config::{AppConfig, AutonomyPreset, CliTuiPreferences, UserSettings};
 use mcg_domain::{
     AgentWakeState, ApprovalMode, CloudDiffApply, CodexConfigOverride, ComposerMentionInput,
@@ -122,8 +122,8 @@ use commands::{CommandContext, QueuePolicy, SLASH_COMMANDS, command_named};
 use exec_jsonl::{ExecJsonlEvent, ExecJsonlProjector};
 use interactive::{
     PaletteCandidate, PaletteKind, PaletteRequest, SessionPickerCandidate, SlashCandidate,
-    SubmittedLine, TuiAction, TuiModel, TuiTerminal, prompt_for_question, select_resume_cwd,
-    select_session,
+    SubmittedLine, TuiAction, TuiModel, TuiTerminal, prompt_for_question, select_local_provider,
+    select_resume_cwd, select_session,
 };
 
 #[derive(Serialize)]
@@ -178,6 +178,12 @@ struct Cli {
     /// Model used for a new interactive session or bare prompt.
     #[arg(short = 'm', long, global = true)]
     model: Option<String>,
+    /// Use a local open-source model provider.
+    #[arg(long, global = true)]
+    oss: bool,
+    /// Select the local provider used with --oss.
+    #[arg(long = "local-provider", value_enum, global = true)]
+    local_provider: Option<CodexLocalProviderArg>,
     /// Sandbox applied to model-generated commands.
     #[arg(short = 's', long, value_enum, global = true)]
     sandbox: Option<CodexSandboxArg>,
@@ -375,6 +381,10 @@ struct CodexCompatCli {
     config: Vec<String>,
     #[arg(short = 'm', long, global = true)]
     model: Option<String>,
+    #[arg(long, global = true)]
+    oss: bool,
+    #[arg(long = "local-provider", value_enum, global = true)]
+    local_provider: Option<CodexLocalProviderArg>,
     #[arg(short = 's', long, value_enum, global = true)]
     sandbox: Option<CodexSandboxArg>,
     #[arg(short = 'a', long = "ask-for-approval", value_enum, global = true)]
@@ -494,6 +504,115 @@ enum CodexSandboxArg {
     ReadOnly,
     WorkspaceWrite,
     DangerFullAccess,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum CodexLocalProviderArg {
+    Ollama,
+    #[value(name = "lmstudio")]
+    LmStudio,
+}
+
+impl CodexLocalProviderArg {
+    const fn id(self) -> &'static str {
+        match self {
+            Self::Ollama => "ollama",
+            Self::LmStudio => "lmstudio",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResolvedLocalProvider {
+    id: String,
+    default_model: String,
+}
+
+async fn resolve_oss_provider(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+    oss: bool,
+    explicit: Option<CodexLocalProviderArg>,
+    interactive: bool,
+    no_alt_screen: bool,
+) -> Result<Option<ResolvedLocalProvider>, Box<dyn std::error::Error>> {
+    if !oss {
+        // Codex accepts --local-provider without --oss but does not activate it.
+        return Ok(None);
+    }
+    let status: CodexConfigurationStatus = decode_api_response(
+        client
+            .get(format!("{host}/api/v1/codex/configuration"))
+            .bearer_auth(token)
+            .send()
+            .await?,
+        "discover local Codex providers",
+    )
+    .await?;
+    let resolve = |id: &str| -> Result<ResolvedLocalProvider, Box<dyn std::error::Error>> {
+        let provider = status
+            .local_providers
+            .providers
+            .iter()
+            .find(|provider| provider.id == id)
+            .ok_or_else(|| format!("Codex local provider `{id}` was not discovered"))?;
+        Ok(ResolvedLocalProvider {
+            id: provider.id.clone(),
+            default_model: provider.default_model.clone(),
+        })
+    };
+    if let Some(explicit) = explicit {
+        return resolve(explicit.id()).map(Some);
+    }
+    if let Some(configured) = status.local_providers.configured_provider.as_deref() {
+        return resolve(configured).map(Some);
+    }
+    if !interactive {
+        return Err(
+            "No default OSS provider configured. Use --local-provider=provider or set oss_provider to one of: lmstudio, ollama in config.toml"
+                .into(),
+        );
+    }
+    let running = status
+        .local_providers
+        .providers
+        .iter()
+        .filter(|provider| provider.running)
+        .collect::<Vec<_>>();
+    if running.len() == 1 {
+        return resolve(&running[0].id).map(Some);
+    }
+    let candidates = status
+        .local_providers
+        .providers
+        .iter()
+        .map(|provider| SessionPickerCandidate {
+            id: provider.id.clone(),
+            title: provider.display_name.clone(),
+            detail: if provider.running {
+                format!(
+                    "Running · {} · default {}",
+                    provider.endpoint, provider.default_model
+                )
+            } else {
+                format!("Not running · {}", provider.detail)
+            },
+        })
+        .collect::<Vec<_>>();
+    let selected = select_local_provider(&candidates, no_alt_screen)?
+        .ok_or("local provider selection was cancelled")?;
+    let _: mcg_codex_app_server::CodexLocalProviderDiscovery = decode_api_response(
+        client
+            .post(format!("{host}/api/v1/codex/local-provider/default"))
+            .bearer_auth(token)
+            .json(&serde_json::json!({ "provider": selected }))
+            .send()
+            .await?,
+        "persist local Codex provider",
+    )
+    .await?;
+    resolve(&selected).map(Some)
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -2208,7 +2327,33 @@ async fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
     };
     let client = reqwest::Client::new();
     let project = cli.project.unwrap_or(std::env::current_dir()?);
-    let model = cli.model;
+    let uses_local_provider = matches!(
+        &cli.command,
+        None | Some(Command::Prompt(_)) | Some(Command::Run { command: None, .. })
+    );
+    let provider_is_interactive = cli.command.is_none() && std::io::stdin().is_terminal();
+    let resolved_local_provider = if uses_local_provider {
+        resolve_oss_provider(
+            &client,
+            &host,
+            token.trim(),
+            cli.oss,
+            cli.local_provider,
+            provider_is_interactive,
+            no_alt_screen,
+        )
+        .await?
+    } else {
+        None
+    };
+    let model_provider = resolved_local_provider
+        .as_ref()
+        .map(|provider| provider.id.clone());
+    let model = cli.model.or_else(|| {
+        resolved_local_provider
+            .as_ref()
+            .map(|provider| provider.default_model.clone())
+    });
     let sandbox = cli.sandbox;
     let approval_policy = cli.approval_policy;
     let approve_for_me = cli.approve_for_me;
@@ -2311,6 +2456,7 @@ async fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
             let additional_writable_roots = codex_additional_writable_roots(&add_dirs)?;
             let preferences = codex_execution_preferences(
                 run_model.or(model.clone()),
+                model_provider.clone(),
                 sandbox,
                 approval_policy,
                 approve_for_me,
@@ -2343,6 +2489,7 @@ async fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
             let additional_writable_roots = codex_additional_writable_roots(&add_dirs)?;
             let preferences = codex_execution_preferences(
                 model.clone(),
+                model_provider.clone(),
                 sandbox,
                 approval_policy,
                 approve_for_me,
@@ -2374,6 +2521,7 @@ async fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
             let additional_writable_roots = codex_additional_writable_roots(&add_dirs)?;
             let preferences = codex_execution_preferences(
                 model.clone(),
+                model_provider.clone(),
                 sandbox,
                 approval_policy,
                 approve_for_me,
@@ -2403,6 +2551,7 @@ async fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
             let additional_writable_roots = codex_additional_writable_roots(&add_dirs)?;
             let preferences = codex_execution_preferences(
                 model,
+                model_provider,
                 sandbox,
                 approval_policy,
                 approve_for_me,
@@ -2495,6 +2644,7 @@ fn codex_compat_command_requested() -> bool {
                 | "-C"
                 | "--model"
                 | "-m"
+                | "--local-provider"
                 | "--sandbox"
                 | "-s"
                 | "--ask-for-approval"
@@ -2983,6 +3133,8 @@ async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
     }
     if matches!(cli.command, CodexCompatCommand::Update) {
         if cli.model.is_some()
+            || cli.oss
+            || cli.local_provider.is_some()
             || cli.project.is_some()
             || cli.sandbox.is_some()
             || cli.approval_policy.is_some()
@@ -3011,7 +3163,18 @@ async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
         )
         .await;
     }
-    let model = cli.model;
+    let uses_local_provider = matches!(
+        &cli.command,
+        CodexCompatCommand::Exec(_)
+            | CodexCompatCommand::Resume(_)
+            | CodexCompatCommand::Queue(_)
+            | CodexCompatCommand::Fork(_)
+            | CodexCompatCommand::Review(_)
+    );
+    let provider_is_interactive = matches!(
+        cli.command,
+        CodexCompatCommand::Resume(_) | CodexCompatCommand::Fork(_)
+    );
     let sandbox = cli.sandbox;
     let approval_policy = cli.approval_policy;
     let approve_for_me = cli.approve_for_me;
@@ -3050,6 +3213,28 @@ async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
     let client = reqwest::Client::new();
     let host = host.as_str();
     let token = token.trim();
+    let resolved_local_provider = if uses_local_provider {
+        resolve_oss_provider(
+            &client,
+            host,
+            token,
+            cli.oss,
+            cli.local_provider,
+            provider_is_interactive,
+            no_alt_screen,
+        )
+        .await?
+    } else {
+        None
+    };
+    let model_provider = resolved_local_provider
+        .as_ref()
+        .map(|provider| provider.id.clone());
+    let model = cli.model.or_else(|| {
+        resolved_local_provider
+            .as_ref()
+            .map(|provider| provider.default_model.clone())
+    });
     match cli.command {
         CodexCompatCommand::App(_) => unreachable!("app handled before daemon authentication"),
         CodexCompatCommand::MigrateRollouts(_) => {
@@ -3110,6 +3295,7 @@ async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
                 ephemeral,
                 skip_git_repo_check,
                 model,
+                model_provider,
                 sandbox,
                 approval_policy,
                 approve_for_me,
@@ -3171,6 +3357,7 @@ async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
             }
             let preferences = codex_execution_preferences_override(
                 model.clone(),
+                model_provider.clone(),
                 sandbox,
                 approval_policy,
                 approve_for_me,
@@ -3212,6 +3399,7 @@ async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
             .await?;
             let preferences = codex_execution_preferences_override(
                 model,
+                model_provider.clone(),
                 sandbox,
                 approval_policy,
                 approve_for_me,
@@ -3276,12 +3464,27 @@ async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
                 no_alt_screen,
             )
             .await?;
+            let preferences = codex_execution_preferences_override(
+                model.clone(),
+                model_provider,
+                sandbox,
+                approval_policy,
+                approve_for_me,
+                dangerously_bypass_approvals_and_sandbox,
+                &additional_writable_roots,
+                &feature_overrides,
+                &config_overrides,
+                codex_profile,
+                strict_config,
+                &source.execution_preferences,
+            );
             let mut fork: Conversation = decode_api_response(
                 client
                     .post(format!("{host}/api/v1/conversations/{}/fork", source.id))
                     .bearer_auth(token)
                     .json(&ForkConversationRequest {
                         origin_turn_id: None,
+                        execution_preferences: preferences.clone(),
                     })
                     .send()
                     .await?,
@@ -3292,19 +3495,6 @@ async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
                 fork = rebind_conversation_to_current_project(&client, host, token, &project, fork)
                     .await?;
             }
-            let preferences = codex_execution_preferences_override(
-                model.clone(),
-                sandbox,
-                approval_policy,
-                approve_for_me,
-                dangerously_bypass_approvals_and_sandbox,
-                &additional_writable_roots,
-                &feature_overrides,
-                &config_overrides,
-                codex_profile,
-                strict_config,
-                &fork.execution_preferences,
-            );
             let mentions = codex_exec_mentions(&images)?;
             Box::pin(run_interactive(
                 &client,
@@ -3336,6 +3526,20 @@ async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
                 title,
                 prompt,
             } = *args;
+            let preferences = codex_execution_preferences(
+                model,
+                model_provider,
+                sandbox,
+                approval_policy,
+                approve_for_me,
+                dangerously_bypass_approvals_and_sandbox,
+                &additional_writable_roots,
+                &feature_overrides,
+                &config_overrides,
+                codex_profile,
+                strict_config,
+                conversation_preferences(None, None, None, ApprovalMode::Ask),
+            );
             Box::pin(run_codex_compatible_review(
                 &client,
                 host,
@@ -3346,6 +3550,7 @@ async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
                 commit,
                 title,
                 prompt,
+                preferences,
             ))
             .await?;
         }
@@ -6101,6 +6306,7 @@ async fn run_interactive_slash(
                     .bearer_auth(token)
                     .json(&ForkConversationRequest {
                         origin_turn_id: None,
+                        execution_preferences: Some(preferences.clone()),
                     })
                     .send()
                     .await?,
@@ -6642,7 +6848,10 @@ async fn run_interactive_slash(
                         conversation.id
                     ))
                     .bearer_auth(token)
-                    .json(&ForkConversationRequest { origin_turn_id })
+                    .json(&ForkConversationRequest {
+                        origin_turn_id,
+                        execution_preferences: Some(preferences.clone()),
+                    })
                     .send()
                     .await?,
                 "fork conversation",
@@ -7213,6 +7422,7 @@ async fn run_codex_compatible_exec(
     ephemeral: bool,
     skip_git_repo_check: bool,
     model: Option<String>,
+    model_provider: Option<String>,
     sandbox: Option<CodexSandboxArg>,
     approval_policy: Option<CodexApprovalPolicyArg>,
     approve_for_me: bool,
@@ -7232,6 +7442,7 @@ async fn run_codex_compatible_exec(
     }
     let mut preferences = codex_execution_preferences(
         model,
+        model_provider,
         sandbox,
         approval_policy,
         approve_for_me,
@@ -7406,6 +7617,7 @@ async fn run_codex_compatible_review(
     commit: Option<String>,
     title: Option<String>,
     prompt: Vec<String>,
+    preferences: ExecutionPreferences,
 ) -> Result<(), Box<dyn std::error::Error>> {
     require_git_repository(project)?;
     let canonical_root = std::fs::canonicalize(project)?;
@@ -7430,7 +7642,7 @@ async fn run_codex_compatible_review(
         host,
         token,
         Some(project.project.project_id),
-        &conversation_preferences(None, None, None, ApprovalMode::Ask),
+        &preferences,
         "MetaCog CLI review",
     )
     .await?;
@@ -11561,6 +11773,7 @@ fn conversation_preferences_exact(
     sandbox_mode: Option<ExecutionSandboxMode>,
 ) -> ExecutionPreferences {
     ExecutionPreferences {
+        model_provider: None,
         model_id: model,
         reasoning_effort: effort,
         service_tier: speed,
@@ -11584,6 +11797,7 @@ fn conversation_preferences_exact(
 
 fn codex_execution_preferences(
     model: Option<String>,
+    model_provider: Option<String>,
     sandbox: Option<CodexSandboxArg>,
     approval_policy: Option<CodexApprovalPolicyArg>,
     approve_for_me: bool,
@@ -11602,6 +11816,10 @@ fn codex_execution_preferences(
     }
     if let Some(model) = model {
         fallback.model_id = Some(model);
+    }
+    fallback.model_provider = model_provider;
+    if fallback.model_provider.is_some() {
+        fallback.service_tier = None;
     }
     fallback.additional_writable_roots = additional_writable_roots.to_vec();
     fallback.codex_feature_overrides = feature_overrides.clone();
@@ -11657,6 +11875,7 @@ fn codex_execution_preferences(
 
 fn codex_execution_preferences_override(
     model: Option<String>,
+    model_provider: Option<String>,
     sandbox: Option<CodexSandboxArg>,
     approval_policy: Option<CodexApprovalPolicyArg>,
     approve_for_me: bool,
@@ -11669,6 +11888,7 @@ fn codex_execution_preferences_override(
     fallback: &ExecutionPreferences,
 ) -> Option<ExecutionPreferences> {
     if model.is_none()
+        && model_provider.is_none()
         && sandbox.is_none()
         && approval_policy.is_none()
         && !approve_for_me
@@ -11683,6 +11903,7 @@ fn codex_execution_preferences_override(
     }
     Some(codex_execution_preferences(
         model,
+        model_provider,
         sandbox,
         approval_policy,
         approve_for_me,
@@ -14369,6 +14590,32 @@ mod tests {
         assert_eq!(exec.images, [PathBuf::from("screen.png")]);
         assert_eq!(exec.add_dirs, [PathBuf::from(".")]);
 
+        let oss = CodexCompatCli::try_parse_from([
+            "mcg",
+            "--oss",
+            "--local-provider",
+            "lmstudio",
+            "exec",
+            "inspect locally",
+        ])
+        .expect("Codex-compatible local provider flags");
+        assert!(oss.oss);
+        assert_eq!(oss.local_provider, Some(CodexLocalProviderArg::LmStudio));
+        let native_oss = Cli::try_parse_from([
+            "mcg",
+            "--oss",
+            "--local-provider",
+            "ollama",
+            "run",
+            "inspect locally",
+        ])
+        .expect("native local provider flags");
+        assert!(native_oss.oss);
+        assert_eq!(
+            native_oss.local_provider,
+            Some(CodexLocalProviderArg::Ollama)
+        );
+
         let exec_resume = CodexCompatCli::try_parse_from([
             "mcg",
             "exec",
@@ -14539,6 +14786,7 @@ mod tests {
 
         let independent = codex_execution_preferences(
             Some("gpt-5.6-terra".to_owned()),
+            None,
             Some(CodexSandboxArg::DangerFullAccess),
             Some(CodexApprovalPolicyArg::OnRequest),
             false,
@@ -14571,7 +14819,26 @@ mod tests {
         );
         assert!(independent.strict_config);
 
+        let local = codex_execution_preferences(
+            Some("gpt-oss:20b".into()),
+            Some("ollama".into()),
+            None,
+            None,
+            false,
+            false,
+            &[],
+            &BTreeMap::new(),
+            &[],
+            None,
+            false,
+            conversation_preferences(None, None, Some("fast".into()), ApprovalMode::Ask),
+        );
+        assert_eq!(local.model_provider.as_deref(), Some("ollama"));
+        assert_eq!(local.model_id.as_deref(), Some("gpt-oss:20b"));
+        assert!(local.service_tier.is_none());
+
         let yolo = codex_execution_preferences(
+            None,
             None,
             Some(CodexSandboxArg::ReadOnly),
             Some(CodexApprovalPolicyArg::Untrusted),
@@ -14592,6 +14859,7 @@ mod tests {
         );
 
         let approve_for_me = codex_execution_preferences(
+            None,
             None,
             None,
             None,

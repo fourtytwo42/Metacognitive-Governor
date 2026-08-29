@@ -167,7 +167,18 @@ test.beforeEach(async ({ page }) => {
           };
           if (command === "list_conversations") return { conversations: [] };
           if (command === "codex_features") return codexFeatures;
-          if (command === "codex_configuration_status") return { requirements: {}, provider_capabilities: {}, windows_sandbox: { status: windowsSandboxReady ? "ready" : "notConfigured" } };
+          if (command === "codex_configuration_status") return {
+            requirements: {},
+            provider_capabilities: {},
+            windows_sandbox: { status: windowsSandboxReady ? "ready" : "notConfigured" },
+            local_providers: {
+              configured_provider: "ollama",
+              providers: [
+                { id: "ollama", display_name: "Ollama", default_model: "gpt-oss:20b", endpoint: "http://localhost:11434/v1", running: true, responses_supported: true, version: "0.13.4", models: ["gpt-oss:20b", "gpt-oss:120b"], detail: "Ready for Codex Responses API work" },
+                { id: "lmstudio", display_name: "LM Studio", default_model: "openai/gpt-oss-20b", endpoint: "http://localhost:1234/v1", running: false, responses_supported: false, models: [], detail: "LM Studio is not responding" }
+              ]
+            }
+          };
           if (command === "codex_harness_status") return {
             bundled_version: "0.150.1", protocol_version: "0.150.1", schema_sha256: "8".repeat(64),
             process_state: "ready", initialized: true, account_state: "signed_out", active_threads: 0,
@@ -631,6 +642,38 @@ test("advanced run settings manage additional writable folders without overflow"
   expect((dialogBox?.y ?? 0) + (dialogBox?.height ?? 0)).toBeLessThanOrEqual(viewport?.height ?? 0);
   await dialog.getByRole("button", { name: "Remove writable folder C:\\Shared\\assets" }).click();
   await expect(dialog.getByText("C:\\Shared\\assets")).toHaveCount(0);
+});
+
+test("advanced run settings expose local Codex providers without leaking them into Simple", async ({ page }) => {
+  await page.goto("/");
+  await openOwnerSurface(page, "Projects");
+  await page.getByRole("button", { name: "Start chat" }).click();
+
+  await page.locator('summary[aria-label="New chat model, effort, speed, and team"]').click();
+  let dialog = page.getByRole("dialog", { name: "New chat model, effort, speed, and team" });
+  await expect(dialog.getByRole("button", { name: /^Provider/ })).toHaveCount(0);
+  await page.locator('summary[aria-label="New chat model, effort, speed, and team"]').click();
+
+  await page.getByRole("button", { name: "Use advanced mode" }).click();
+  await page.locator('summary[aria-label="New chat model, effort, speed, and team"]').click();
+  dialog = page.getByRole("dialog", { name: "New chat model, effort, speed, and team" });
+  await dialog.getByRole("button", { name: /^Provider/ }).click();
+  await expect(dialog.getByRole("menuitemradio", { name: /Ollama.*Running.*0\.13\.4/ })).toBeVisible();
+  await expect(dialog.getByRole("menuitemradio", { name: /LM Studio.*Not running/ })).toBeVisible();
+  await dialog.getByRole("menuitemradio", { name: /Ollama.*Running.*0\.13\.4/ }).click();
+  await expect(page.locator('summary[aria-label="New chat model, effort, speed, and team"]')).toContainText("gpt-oss:20b");
+
+  await page.locator('summary[aria-label="New chat model, effort, speed, and team"]').click();
+  dialog = page.getByRole("dialog", { name: "New chat model, effort, speed, and team" });
+  await dialog.getByRole("button", { name: /^Model/ }).click();
+  await expect(dialog.getByRole("menuitemradio", { name: /gpt-oss:120b.*Ollama/ })).toBeVisible();
+
+  const box = await dialog.boundingBox();
+  const viewport = page.viewportSize();
+  expect(box).not.toBeNull();
+  expect((box?.x ?? 0) + (box?.width ?? 0)).toBeLessThanOrEqual(viewport?.width ?? 0);
+  expect((box?.y ?? 0) + (box?.height ?? 0)).toBeLessThanOrEqual(viewport?.height ?? 0);
+  expect(await dialog.evaluate((element) => element.scrollWidth)).toBeLessThanOrEqual(await dialog.evaluate((element) => element.clientWidth + 1));
 });
 
 test("advanced run settings expose bounded per-session Codex feature overrides", async ({ page }) => {

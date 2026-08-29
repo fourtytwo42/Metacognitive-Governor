@@ -305,6 +305,7 @@ export interface GitHubRepositoryList { repositories: GitHubRepository[]; }
 
 export interface ChatRunPreferences {
   provider_id?: string;
+  model_provider?: "ollama" | "lmstudio";
   model_id?: string;
   model_label?: string;
   reasoning_effort: ReasoningEffort;
@@ -325,6 +326,7 @@ export interface ChatRunPreferences {
 }
 
 export interface ExecutionPreferences {
+  model_provider?: "ollama" | "lmstudio";
   model_id?: string;
   reasoning_effort?: string;
   service_tier?: string;
@@ -680,6 +682,24 @@ export interface CodexConfigurationStatus {
   requirements: unknown;
   provider_capabilities: unknown;
   windows_sandbox: CodexWindowsSandboxReadiness;
+  local_providers?: CodexLocalProviderDiscovery;
+}
+
+export interface CodexLocalProviderDiscovery {
+  configured_provider?: string;
+  providers: CodexLocalProviderStatus[];
+}
+
+export interface CodexLocalProviderStatus {
+  id: "ollama" | "lmstudio" | string;
+  display_name: string;
+  default_model: string;
+  endpoint: string;
+  running: boolean;
+  responses_supported: boolean;
+  version?: string;
+  models: string[];
+  detail: string;
 }
 
 export type CodexWindowsSandboxSetupMode = "elevated" | "unelevated";
@@ -2216,14 +2236,15 @@ export function transitionTask(taskId: string, state: TaskState): Promise<TaskEn
 }
 
 function launchRequest(preferences?: ChatRunPreferences, organizationId?: string) {
+  const usesCodexLocalProvider = Boolean(preferences?.model_provider);
   return {
     organization_id: organizationId || null,
     context_token_budget: 8192,
     requested_tools: [],
     estimated_output_tokens: 8192,
     max_model_calls: 16,
-    provider_id: preferences?.provider_id || null,
-    model_id: preferences?.model_id || null,
+    provider_id: usesCodexLocalProvider ? null : preferences?.provider_id || null,
+    model_id: usesCodexLocalProvider ? null : preferences?.model_id || null,
     reasoning_effort: preferences?.reasoning_effort ?? "medium",
     service_tier: preferences?.speed === "fast" ? "priority" : null
   };
