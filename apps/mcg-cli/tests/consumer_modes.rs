@@ -201,6 +201,8 @@ fn codex_global_flags_route_to_compatible_commands_before_or_after_the_command()
             "--add-dir",
             ".",
             "--search",
+            "--profile",
+            "team.fast",
             "--enable",
             "memories",
             "--disable",
@@ -221,6 +223,8 @@ fn codex_global_flags_route_to_compatible_commands_before_or_after_the_command()
             "--add-dir",
             ".",
             "--search",
+            "--profile",
+            "team.fast",
             "--enable",
             "memories",
             "--disable",
@@ -253,6 +257,7 @@ fn codex_global_flags_route_to_compatible_commands_before_or_after_the_command()
     assert!(root_help.status.success());
     let root_help = String::from_utf8_lossy(&root_help.stdout);
     assert!(root_help.contains("--search"));
+    assert!(root_help.contains("--profile"));
     assert!(root_help.contains("--no-alt-screen"));
     assert!(root_help.contains("--approve-for-me"));
     assert!(root_help.contains("agents"));

@@ -2129,6 +2129,23 @@ pub struct ExecutionPreferences {
     /// never permits it to expand MetaCog role or organization authority.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission_profile: Option<String>,
+    /// Optional Codex v2 configuration profile selected with `--profile`/`-p`.
+    /// The runtime resolves and validates this file through the pinned Codex
+    /// loader before persistence, then stores only a bounded, governance-safe
+    /// snapshot for deterministic execution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_profile: Option<String>,
+    /// Governance-safe profile snapshot resolved by the runtime. API callers
+    /// cannot expand authority by supplying this value because it is always
+    /// replaced during originating-turn validation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_profile_config: Option<serde_json::Value>,
+    /// SHA-256 of the exact profile file used to create the snapshot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_profile_digest: Option<String>,
+    /// Profile paths intentionally removed because MetaCog governs them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub codex_profile_ignored_keys: Vec<String>,
     /// Owner-selected, canonical local directories that a workspace-write turn may also mutate.
     /// Runtime validation re-resolves these paths before every originating turn.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -2509,6 +2526,10 @@ mod tests {
         execution_preferences.remove("sandbox_mode");
         execution_preferences.remove("additional_writable_roots");
         execution_preferences.remove("strict_config");
+        execution_preferences.remove("codex_profile");
+        execution_preferences.remove("codex_profile_config");
+        execution_preferences.remove("codex_profile_digest");
+        execution_preferences.remove("codex_profile_ignored_keys");
         object.remove("mode");
         object.remove("goal");
         object.remove("pending_input_requests");
@@ -2519,6 +2540,15 @@ mod tests {
         assert!(decoded.execution_preferences.approval_policy.is_none());
         assert!(decoded.execution_preferences.sandbox_mode.is_none());
         assert!(!decoded.execution_preferences.strict_config);
+        assert_eq!(decoded.execution_preferences.codex_profile, None);
+        assert_eq!(decoded.execution_preferences.codex_profile_config, None);
+        assert_eq!(decoded.execution_preferences.codex_profile_digest, None);
+        assert!(
+            decoded
+                .execution_preferences
+                .codex_profile_ignored_keys
+                .is_empty()
+        );
         assert!(
             decoded
                 .execution_preferences

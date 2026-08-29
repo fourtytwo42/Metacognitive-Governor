@@ -2488,6 +2488,7 @@ fn codex_preferences(preferences: &ExecutionPreferences) -> CodexExecutionPrefer
         writable_roots: preferences.additional_writable_roots.clone(),
         feature_overrides: preferences.codex_feature_overrides.clone(),
         config_overrides: codex_config_overrides(preferences),
+        profile_config: preferences.codex_profile_config.clone(),
     }
 }
 
@@ -2541,6 +2542,27 @@ fn validate_execution_preferences(
     preferences: &mut ExecutionPreferences,
     has_project: bool,
 ) -> Result<(), RuntimeError> {
+    // Profile snapshots are runtime-owned. Never trust serialized values supplied by an API or
+    // CLI caller; each originating send resolves the named profile again before persistence.
+    preferences.codex_profile_config = None;
+    preferences.codex_profile_digest = None;
+    preferences.codex_profile_ignored_keys.clear();
+    if let Some(profile) = preferences.codex_profile.as_mut() {
+        *profile = profile.trim().to_owned();
+        if profile.is_empty()
+            || profile.len() > 128
+            || matches!(profile.as_str(), "." | "..")
+            || !profile
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        {
+            return Err(StorageError::InvalidData(
+                "Codex profile must use 1-128 letters, numbers, dashes, underscores, or dots"
+                    .into(),
+            )
+            .into());
+        }
+    }
     if let Some(profile) = preferences.permission_profile.as_mut() {
         *profile = profile.trim().to_owned();
         if profile.is_empty()
@@ -4094,6 +4116,11 @@ impl AppRuntime {
                 .codex_feature_overrides
                 .clone(),
             config_overrides: codex_config_overrides(&view.conversation.execution_preferences),
+            profile_config: view
+                .conversation
+                .execution_preferences
+                .codex_profile_config
+                .clone(),
         };
         let scope = delegation.map_or_else(
             || "the current coordination batch".to_owned(),
@@ -10112,6 +10139,36 @@ impl AppRuntime {
         Ok(())
     }
 
+    async fn resolve_codex_profile(
+        &self,
+        preferences: &mut ExecutionPreferences,
+        project_id: Option<ProjectId>,
+    ) -> Result<(), RuntimeError> {
+        let Some(profile) = preferences.codex_profile.as_deref() else {
+            return Ok(());
+        };
+        let cwd = if let Some(project_id) = project_id {
+            let project = self
+                .project(project_id)?
+                .ok_or(StorageError::ProjectNotFound(project_id))?;
+            Some(fs::canonicalize(&project.root).map_err(|error| {
+                StorageError::InvalidData(format!(
+                    "project cannot be resolved for Codex profile validation: {error}"
+                ))
+            })?)
+        } else {
+            None
+        };
+        let resolved = self
+            .codex_harness
+            .resolve_profile(profile, cwd.as_deref(), preferences.strict_config)
+            .await?;
+        preferences.codex_profile_config = Some(resolved.config);
+        preferences.codex_profile_digest = Some(resolved.digest);
+        preferences.codex_profile_ignored_keys = resolved.ignored_keys;
+        Ok(())
+    }
+
     pub async fn set_codex_feature(
         &self,
         name: &str,
@@ -10273,6 +10330,10 @@ impl AppRuntime {
                 .codex_feature_overrides
                 .clone(),
             config_overrides: codex_config_overrides(&conversation.execution_preferences),
+            profile_config: conversation
+                .execution_preferences
+                .codex_profile_config
+                .clone(),
         };
         let host_thread_id = self
             .codex_harness
@@ -11269,6 +11330,8 @@ impl AppRuntime {
         validate_execution_preferences(&mut preferences, conversation.project_id.is_some())?;
         self.validate_codex_strict_config(&preferences, conversation.project_id)
             .await?;
+        self.resolve_codex_profile(&mut preferences, conversation.project_id)
+            .await?;
         self.validate_codex_permission_profile(&preferences, conversation.project_id)
             .await?;
         conversation.execution_preferences = preferences.clone();
@@ -11374,6 +11437,7 @@ impl AppRuntime {
             writable_roots: preferences.additional_writable_roots.clone(),
             feature_overrides: preferences.codex_feature_overrides.clone(),
             config_overrides: codex_config_overrides(&preferences),
+            profile_config: preferences.codex_profile_config.clone(),
         };
         let previous_thread = chat_session.codex_thread_id.clone();
         let thread_id = if let Some(thread_id) = previous_thread {
@@ -26059,6 +26123,31 @@ mod tests {
             ..Default::default()
         };
         assert!(validate_execution_preferences(&mut malformed, true).is_err());
+    }
+
+    #[test]
+    fn codex_profiles_are_validated_and_caller_snapshots_are_discarded() {
+        let mut preferences = ExecutionPreferences {
+            codex_profile: Some("  team.fast  ".into()),
+            codex_profile_config: Some(serde_json::json!({"sandbox_mode": "danger-full-access"})),
+            codex_profile_digest: Some("forged".into()),
+            codex_profile_ignored_keys: vec!["forged".into()],
+            ..Default::default()
+        };
+        validate_execution_preferences(&mut preferences, false)
+            .expect("valid project-free profile");
+        assert_eq!(preferences.codex_profile.as_deref(), Some("team.fast"));
+        assert!(preferences.codex_profile_config.is_none());
+        assert!(preferences.codex_profile_digest.is_none());
+        assert!(preferences.codex_profile_ignored_keys.is_empty());
+
+        for invalid in ["", ".", "..", "../team", "team/config", "team config"] {
+            let mut malformed = ExecutionPreferences {
+                codex_profile: Some(invalid.into()),
+                ..Default::default()
+            };
+            assert!(validate_execution_preferences(&mut malformed, false).is_err());
+        }
     }
 
     #[test]

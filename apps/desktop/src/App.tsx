@@ -582,6 +582,7 @@ function storedChatPreferences(key: string): ChatRunPreferences {
       additional_writable_roots: parsed.additional_writable_roots ?? [],
       codex_feature_overrides: parsed.codex_feature_overrides ?? {},
       codex_config_overrides: parsed.codex_config_overrides ?? [],
+      codex_profile: parsed.codex_profile,
       strict_config: parsed.strict_config ?? false,
       team_preset: parsed.team_preset ?? "automatic",
       personality: parsed.personality
@@ -1113,6 +1114,7 @@ function ChatRunSelector({
       additional_writable_roots: value.additional_writable_roots,
       codex_feature_overrides: value.codex_feature_overrides,
       codex_config_overrides: value.codex_config_overrides,
+      codex_profile: value.codex_profile,
       strict_config: value.strict_config,
       team_preset: value.team_preset,
       personality: value.personality
@@ -1138,6 +1140,12 @@ function ChatRunSelector({
   const writableRoots = value.additional_writable_roots ?? [];
   const featureOverrides = value.codex_feature_overrides ?? {};
   const configOverrides = value.codex_config_overrides ?? [];
+  const codexProfile = value.codex_profile ?? "";
+  const configSummary = [
+    codexProfile.trim() ? `Profile ${codexProfile.trim()}` : null,
+    value.strict_config ? "Strict" : null,
+    configOverrides.length > 0 ? `${configOverrides.length} override${configOverrides.length === 1 ? "" : "s"}` : null
+  ].filter(Boolean).join(" · ") || "Use Codex defaults";
   const webSearchOverride = [...configOverrides].reverse().find((config) => config.key.trim().toLocaleLowerCase().replaceAll("-", "_") === "web_search");
   const webSearchMode = typeof webSearchOverride?.value === "string" && ["cached", "live", "disabled"].includes(webSearchOverride.value)
     ? webSearchOverride.value as "cached" | "live" | "disabled"
@@ -1202,7 +1210,7 @@ function ChatRunSelector({
         {includeTeam && <button className="chat-run-menu-row" type="button" onClick={() => setPanel("team")}><span className="chat-run-menu-icon"><ChatRunPanelIcon panel="team" /></span><span className="chat-run-menu-copy"><strong>Team</strong><small>{TEAM_PRESET_DETAILS[teamValue].label}</small></span><ChevronRight aria-hidden="true" /></button>}
         {advanced && <button className="chat-run-menu-row" type="button" onClick={() => setPanel("search")}><span className="chat-run-menu-icon"><ChatRunPanelIcon panel="search" /></span><span className="chat-run-menu-copy"><strong>Web search</strong><small>{webSearchMode === "live" ? "Live" : webSearchMode === "disabled" ? "Off" : "Default (cached)"}</small></span><ChevronRight aria-hidden="true" /></button>}
         {advanced && <button className="chat-run-menu-row" type="button" onClick={() => setPanel("features")}><span className="chat-run-menu-icon"><ChatRunPanelIcon panel="features" /></span><span className="chat-run-menu-copy"><strong>Session features</strong><small>{Object.keys(featureOverrides).length > 0 ? `${Object.keys(featureOverrides).length} override${Object.keys(featureOverrides).length === 1 ? "" : "s"}` : "Use Codex defaults"}</small></span><ChevronRight aria-hidden="true" /></button>}
-        {advanced && <button className="chat-run-menu-row" type="button" onClick={() => setPanel("config")}><span className="chat-run-menu-icon"><ChatRunPanelIcon panel="config" /></span><span className="chat-run-menu-copy"><strong>Codex config</strong><small>{value.strict_config ? `Strict${configOverrides.length > 0 ? ` · ${configOverrides.length} override${configOverrides.length === 1 ? "" : "s"}` : ""}` : configOverrides.length > 0 ? `${configOverrides.length} ordered override${configOverrides.length === 1 ? "" : "s"}` : "Use Codex defaults"}</small></span><ChevronRight aria-hidden="true" /></button>}
+        {advanced && <button className="chat-run-menu-row" type="button" onClick={() => setPanel("config")}><span className="chat-run-menu-icon"><ChatRunPanelIcon panel="config" /></span><span className="chat-run-menu-copy"><strong>Codex config</strong><small>{configSummary}</small></span><ChevronRight aria-hidden="true" /></button>}
         <details className="chat-run-advanced">
           <summary>Advanced <ChevronDown aria-hidden="true" /></summary>
           <div className="chat-run-model-status">
@@ -1255,6 +1263,10 @@ function ChatRunSelector({
           </div>
         </div> : panel === "config" ? <div className="chat-run-config-panel">
           <p>Set typed Codex configuration for this run only. Later rows with the same key win. MetaCog-governed authority and secret-bearing settings are blocked.</p>
+          <label className="chat-run-profile-field">
+            <span><strong>Codex profile</strong><small>Layer <code>$CODEX_HOME/&lt;name&gt;.config.toml</code>. MetaCog ignores authority- and secret-bearing profile settings.</small></span>
+            <input aria-label="Codex profile" placeholder="team" value={codexProfile} onChange={(event) => onChange({ ...value, codex_profile: event.target.value || undefined })} />
+          </label>
           <label className="chat-run-strict-config">
             <span><strong>Strict config</strong><small>Fail before dispatch when Codex finds an unknown field in the effective user or project configuration.</small></span>
             <span className="settings-switch"><input aria-label="Require strict Codex configuration" type="checkbox" checked={value.strict_config ?? false} onChange={(event) => onChange({ ...value, strict_config: event.target.checked })} /><i aria-hidden="true" /></span>
@@ -3238,6 +3250,7 @@ export function App() {
         additional_writable_roots: conversation.execution_preferences.additional_writable_roots ?? [],
         codex_feature_overrides: conversation.execution_preferences.codex_feature_overrides ?? {},
         codex_config_overrides: conversation.execution_preferences.codex_config_overrides ?? [],
+        codex_profile: conversation.execution_preferences.codex_profile,
         strict_config: conversation.execution_preferences.strict_config ?? false,
         team_preset: conversation.execution_preferences.team_preset ?? "automatic",
         personality: conversation.execution_preferences.personality
@@ -4772,6 +4785,7 @@ export function App() {
         additional_writable_roots: preferences.additional_writable_roots,
         codex_feature_overrides: preferences.codex_feature_overrides,
         codex_config_overrides: preferences.codex_config_overrides,
+        codex_profile: preferences.codex_profile,
         strict_config: preferences.strict_config,
         team_preset: preferences.team_preset,
         personality: preferences.personality
@@ -5280,6 +5294,7 @@ export function App() {
           additional_writable_roots: uncertainTurn.execution_preferences.additional_writable_roots ?? [],
           codex_feature_overrides: uncertainTurn.execution_preferences.codex_feature_overrides ?? {},
           codex_config_overrides: uncertainTurn.execution_preferences.codex_config_overrides ?? [],
+          codex_profile: uncertainTurn.execution_preferences.codex_profile,
           strict_config: uncertainTurn.execution_preferences.strict_config ?? false,
           team_preset: uncertainTurn.execution_preferences.team_preset ?? newChatRunPreferences.team_preset
         });

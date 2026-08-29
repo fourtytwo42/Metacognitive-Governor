@@ -38,7 +38,7 @@ Environment variables alone are not capability discovery.
 | Codex family | State | Notes |
 | --- | --- | --- |
 | `codex` TUI / prompt | Native | `mcg` launches the TUI and accepts a consumer prompt. |
-| `exec` / `e` | Partial | Cycles 2-16 add the compatible top-level alias, JSONL lifecycle output, stdin prompts, global model selection, independent global `-a/--ask-for-approval` and `-s/--sandbox` controls including durable read-only execution, repeatable `--add-dir`, ordered session-local `--enable`/`--disable`, repeatable typed `-c/--config`, global `--search`, native `--strict-config` preflight, initial image references, output-last-message, ephemeral cleanup, Git checks, and durable exec resume. Exact event schemas, output schemas, profiles, local providers, and hook/rules flags remain. |
+| `exec` / `e` | Partial | Cycles 2-17 add the compatible top-level alias, JSONL lifecycle output, stdin prompts, global model selection, independent global `-a/--ask-for-approval` and `-s/--sandbox` controls including durable read-only execution, repeatable `--add-dir`, ordered session-local `--enable`/`--disable`, repeatable typed `-c/--config`, named `-p/--profile` layering, global `--search`, native `--strict-config` preflight, initial image references, output-last-message, ephemeral cleanup, Git checks, and durable exec resume. Exact event schemas, output schemas, local providers, and hook/rules flags remain. |
 | `doctor` | MetaCog | MetaCog has a broader diagnostic command with a different report contract. |
 | `mcp`, `plugin` | MetaCog | Governed management exists; exact syntax and marketplace operations remain incomplete. |
 | `archive`, `unarchive`, `delete` | Native | IDs take precedence over exact names; deletion previews descendants, prompts by default, restricts forced deletion to UUIDs, and uses the existing transactional safety gate. |
@@ -150,9 +150,21 @@ orphaned pending turn. The bounded qualification process closes stdin, has a
 app-server. The selected preference is durable and auditable per originating
 turn.
 
-Codex-compatible support remains incomplete for local providers/OSS,
-configuration profiles, remote endpoints/authentication, output schemas, and
-hook trust. Current Codex 0.150.1 documents `--permission-profile` only for the
+Cycle 17 adds global `-p NAME` and `--profile NAME` to interactive, bare/piped,
+consumer-run, `exec`, resume, fork, queue, and Windows sandbox flows. The pinned
+Codex loader first validates `$CODEX_HOME/<name>.config.toml`; MetaCog then stores
+the selected name, source SHA-256, removed-key audit list, and a bounded safe
+snapshot with the originating run. Credential-, approval-, sandbox-, network-,
+tool-, provider-, instruction-, MCP-, plugin-, app-, and agent-authority settings
+are stripped. The safe profile snapshot merges first, explicit ordered `-c` and
+feature overrides merge next, and immutable role policy merges last. This keeps
+resumed and delegated execution deterministic without allowing a profile to
+expand MetaCog governance. The installed Codex 0.150.1 qualification proves the
+documented named-file loader shape.
+
+Codex-compatible support remains incomplete for local providers/OSS, remote
+endpoints/authentication, output schemas, and hook trust. Current Codex 0.150.1
+documents `--permission-profile` only for the
 Windows `sandbox` command; that exact contract is already Native rather than a
 missing global non-sandbox flag. These
 flags must map into governed requests; they may not bypass organization or
@@ -227,6 +239,12 @@ New Chat and established Chat. Simple remains unchanged. The control uses the
 shared run-preference model, persists with ordinary drafts and conversations,
 and summarizes its active state in the existing selector without adding a new
 page or exposing raw diagnostics by default.
+
+Cycle 17 adds the named Codex profile beside Strict config in that same Advanced
+panel. The compact summary shows the selected profile, strict state, and override
+count; the responsive form explains the exact named-file location and that
+MetaCog ignores authority- and secret-bearing keys. New Chat and established
+Chat share the control and persistence path, while Simple remains unchanged.
 
 ## Safety invariants
 

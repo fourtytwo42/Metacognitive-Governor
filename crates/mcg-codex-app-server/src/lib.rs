@@ -4,6 +4,7 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
+    fs,
     io::{BufRead as _, Read as _},
     path::{Path, PathBuf},
     process::Stdio,
@@ -14,6 +15,7 @@ use std::{
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
@@ -353,6 +355,17 @@ pub struct CodexExecutionPreferences {
     pub feature_overrides: BTreeMap<String, bool>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub config_overrides: Vec<CodexConfigOverride>,
+    /// A validated, sanitized snapshot of the selected Codex profile. The runtime owns this
+    /// field; callers cannot use it to bypass MetaCog's configuration boundary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_config: Option<Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodexResolvedProfile {
+    pub config: Value,
+    pub digest: String,
+    pub ignored_keys: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -620,7 +633,10 @@ pub enum CodexSandboxMode {
 
 impl CodexExecutionPreferences {
     fn thread_config(&self, instructions: Option<&CodexThreadInstructions>) -> Option<Value> {
-        let mut config = Value::Object(Default::default());
+        let mut config = self
+            .profile_config
+            .clone()
+            .unwrap_or_else(|| Value::Object(Default::default()));
         for override_value in &self.config_overrides {
             apply_json_path(
                 &mut config,
@@ -747,6 +763,106 @@ fn merge_json_objects(base: &mut Value, overlay: &Value) {
             }
         }
         (base, overlay) => *base = overlay.clone(),
+    }
+}
+
+fn validate_profile_name(profile: &str) -> Result<(), CodexHarnessError> {
+    if profile.is_empty()
+        || profile.len() > 128
+        || matches!(profile, "." | "..")
+        || !profile
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    {
+        return Err(CodexHarnessError::Protocol(
+            "Codex profile must use 1-128 letters, numbers, dashes, underscores, or dots".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn codex_home() -> Result<PathBuf, CodexHarnessError> {
+    if let Some(root) = std::env::var_os("CODEX_HOME").filter(|value| !value.is_empty()) {
+        return Ok(PathBuf::from(root));
+    }
+    #[cfg(windows)]
+    let home = std::env::var_os("USERPROFILE");
+    #[cfg(not(windows))]
+    let home = std::env::var_os("HOME");
+    home.map(|value| PathBuf::from(value).join(".codex"))
+        .ok_or_else(|| CodexHarnessError::Protocol("Codex home is unavailable".into()))
+}
+
+fn governed_profile_segment(segment: &str, top_level: bool) -> bool {
+    let normalized = segment.to_ascii_lowercase().replace('-', "_");
+    let secret = [
+        "api_key",
+        "auth",
+        "bearer",
+        "credential",
+        "password",
+        "secret",
+        "token",
+    ]
+    .iter()
+    .any(|candidate| normalized.contains(candidate));
+    if secret {
+        return true;
+    }
+    top_level
+        && [
+            "agent",
+            "agents",
+            "app",
+            "apps",
+            "approval",
+            "approval_policy",
+            "browser",
+            "computer_use",
+            "developer_instructions",
+            "dynamic_tools",
+            "experimental_user_input",
+            "features",
+            "hooks",
+            "instructions",
+            "mcp_servers",
+            "model_provider",
+            "model_providers",
+            "network_access",
+            "oss_provider",
+            "permissions",
+            "plugin",
+            "plugins",
+            "process",
+            "remote",
+            "rules",
+            "sandbox",
+            "sandbox_mode",
+            "shell_environment_policy",
+            "skills",
+            "show_raw_agent_reasoning",
+            "tools",
+            "user_instructions",
+            "workspace_write",
+        ]
+        .contains(&normalized.as_str())
+}
+
+fn sanitize_profile_config(value: &mut Value, path: &mut Vec<String>, ignored: &mut Vec<String>) {
+    let Value::Object(object) = value else {
+        return;
+    };
+    let keys = object.keys().cloned().collect::<Vec<_>>();
+    for key in keys {
+        let remove = governed_profile_segment(&key, path.is_empty());
+        path.push(key.clone());
+        if remove {
+            ignored.push(path.join("."));
+            object.remove(&key);
+        } else if let Some(child) = object.get_mut(&key) {
+            sanitize_profile_config(child, path, ignored);
+        }
+        path.pop();
     }
 }
 
@@ -896,6 +1012,101 @@ impl CodexAppServerHarness {
             diagnostic.chars().take(4_096).collect()
         };
         Err(CodexHarnessError::Protocol(diagnostic))
+    }
+
+    /// Resolves a named Codex runtime profile with the pinned native loader, then returns a
+    /// sanitized snapshot suitable for a governed app-server thread. Authority- and
+    /// credential-bearing keys are deliberately omitted and reported for auditability.
+    pub async fn resolve_profile(
+        &self,
+        profile: &str,
+        cwd: Option<&Path>,
+        strict: bool,
+    ) -> Result<CodexResolvedProfile, CodexHarnessError> {
+        validate_profile_name(profile)?;
+        let root = codex_home()?;
+        let canonical_root = fs::canonicalize(&root).map_err(|error| {
+            CodexHarnessError::Protocol(format!(
+                "Codex home `{}` cannot be resolved: {error}",
+                root.display()
+            ))
+        })?;
+        let profile_path = canonical_root.join(format!("{profile}.config.toml"));
+        let canonical_profile = fs::canonicalize(&profile_path).map_err(|error| {
+            CodexHarnessError::Protocol(format!(
+                "Codex profile `{profile}` is unavailable at `{}`: {error}",
+                profile_path.display()
+            ))
+        })?;
+        if canonical_profile.parent() != Some(canonical_root.as_path()) {
+            return Err(CodexHarnessError::Protocol(
+                "Codex profile resolved outside CODEX_HOME".into(),
+            ));
+        }
+        let metadata = fs::metadata(&canonical_profile)?;
+        const MAX_PROFILE_BYTES: u64 = 256 * 1024;
+        if !metadata.is_file() || metadata.len() > MAX_PROFILE_BYTES {
+            return Err(CodexHarnessError::Protocol(format!(
+                "Codex profile must be a regular file no larger than {MAX_PROFILE_BYTES} bytes"
+            )));
+        }
+
+        let executable = self.inner.lock().await.executable.clone();
+        let mut command = Command::new(executable);
+        if strict {
+            command.arg("--strict-config");
+        }
+        command
+            .arg("--profile")
+            .arg(profile)
+            .arg("mcp")
+            .arg("list")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        if let Some(cwd) = cwd {
+            command.current_dir(cwd);
+        }
+        let output = tokio::time::timeout(Duration::from_secs(30), command.output())
+            .await
+            .map_err(|_| CodexHarnessError::Timeout)?
+            .map_err(|error| CodexHarnessError::Start(error.to_string()))?;
+        if !output.status.success() {
+            let diagnostic = String::from_utf8_lossy(&output.stderr);
+            let diagnostic = diagnostic.trim();
+            return Err(CodexHarnessError::Protocol(if diagnostic.is_empty() {
+                format!("Codex profile validation exited with {}", output.status)
+            } else {
+                diagnostic.chars().take(4_096).collect()
+            }));
+        }
+
+        let bytes = fs::read(&canonical_profile)?;
+        let parsed = toml::from_slice::<toml::Value>(&bytes).map_err(|error| {
+            CodexHarnessError::Protocol(format!("Codex profile `{profile}` is invalid: {error}"))
+        })?;
+        let mut config = serde_json::to_value(parsed).map_err(|error| {
+            CodexHarnessError::Protocol(format!("Codex profile could not be projected: {error}"))
+        })?;
+        let mut ignored_keys = Vec::new();
+        sanitize_profile_config(&mut config, &mut Vec::new(), &mut ignored_keys);
+        ignored_keys.sort();
+        let serialized = serde_json::to_vec(&config).map_err(|error| {
+            CodexHarnessError::Protocol(format!("Codex profile could not be bounded: {error}"))
+        })?;
+        const MAX_SANITIZED_PROFILE_BYTES: usize = 64 * 1024;
+        if serialized.len() > MAX_SANITIZED_PROFILE_BYTES {
+            return Err(CodexHarnessError::Protocol(format!(
+                "sanitized Codex profile exceeds the {MAX_SANITIZED_PROFILE_BYTES}-byte per-run limit"
+            )));
+        }
+        let digest = format!("{:x}", Sha256::digest(&bytes));
+        Ok(CodexResolvedProfile {
+            config,
+            digest,
+            ignored_keys,
+        })
     }
 
     pub async fn subscribe(&self) -> broadcast::Receiver<Value> {
@@ -2581,6 +2792,12 @@ mod tests {
     #[test]
     fn ordered_session_config_merges_beneath_features_and_role_authority() {
         let preferences = CodexExecutionPreferences {
+            profile_config: Some(json!({
+                "model_verbosity": "medium",
+                "history": {"persistence": "save-all"},
+                "features": {"memories": false, "browser_use": true},
+                "web_search": "disabled"
+            })),
             config_overrides: vec![
                 CodexConfigOverride {
                     path: vec!["model_verbosity".into()],
@@ -2617,6 +2834,47 @@ mod tests {
         assert_eq!(config["history"]["persistence"], "save-all");
         assert_eq!(config["features"]["memories"], false);
         assert_eq!(config["web_search"], "cached");
+    }
+
+    #[test]
+    fn profile_sanitization_removes_authority_and_secret_bearing_settings() {
+        let mut config = json!({
+            "model": "gpt-5.6-terra",
+            "model_verbosity": "low",
+            "sandbox_mode": "danger-full-access",
+            "mcp_servers": {"unsafe": {"command": "anything"}},
+            "history": {"persistence": "save-all", "bearer_token": "secret"},
+            "nested": {"api-key": "secret", "safe": true}
+        });
+        let mut ignored = Vec::new();
+        sanitize_profile_config(&mut config, &mut Vec::new(), &mut ignored);
+        ignored.sort();
+        assert_eq!(config["model"], "gpt-5.6-terra");
+        assert_eq!(config["model_verbosity"], "low");
+        assert_eq!(config["history"]["persistence"], "save-all");
+        assert_eq!(config["nested"]["safe"], true);
+        assert!(config.get("sandbox_mode").is_none());
+        assert!(config.get("mcp_servers").is_none());
+        assert!(config["history"].get("bearer_token").is_none());
+        assert_eq!(
+            ignored,
+            vec![
+                "history.bearer_token",
+                "mcp_servers",
+                "nested.api-key",
+                "sandbox_mode"
+            ]
+        );
+    }
+
+    #[test]
+    fn profile_names_are_bounded_identifiers() {
+        for valid in ["team", "team.fast", "team_1", "team-prod"] {
+            validate_profile_name(valid).expect("valid profile name");
+        }
+        for invalid in ["", ".", "..", "../team", "team/config", "team config"] {
+            assert!(validate_profile_name(invalid).is_err(), "{invalid}");
+        }
     }
 
     #[test]
@@ -2760,6 +3018,38 @@ mod tests {
             .validate_strict_config(Some(&cwd))
             .await
             .expect("current Codex configuration should pass its native strict loader");
+    }
+
+    #[tokio::test]
+    #[ignore = "qualification gate: requires the packaged pinned Codex binary"]
+    async fn installed_pinned_binary_loads_named_runtime_profiles() {
+        let executable = std::env::var_os("MCG_CODEX_APP_SERVER_EXECUTABLE")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("codex"));
+        let root = std::env::temp_dir().join(format!(
+            "metacog-codex-profile-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        fs::create_dir(&root).expect("temporary Codex home");
+        let profile = root.join("team.config.toml");
+        fs::write(&profile, "model_verbosity = \"low\"\n").expect("profile fixture");
+        let output = Command::new(executable)
+            .env("CODEX_HOME", &root)
+            .args(["--profile", "team", "mcp", "list"])
+            .output()
+            .await
+            .expect("run pinned Codex profile loader");
+        fs::remove_file(profile).expect("remove profile fixture");
+        fs::remove_dir(root).expect("remove temporary Codex home");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[test]

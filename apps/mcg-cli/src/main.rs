@@ -2106,6 +2106,7 @@ async fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
     let add_dirs = native_overrides.add_dirs;
     let feature_overrides = native_overrides.feature_overrides;
     let config_overrides = native_overrides.config_overrides;
+    let codex_profile = native_overrides.codex_profile;
     let strict_config = native_overrides.strict_config;
     let no_alt_screen = native_overrides.no_alt_screen;
     let cli = Cli::parse_from(native_arguments);
@@ -2290,6 +2291,7 @@ async fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
                 &additional_writable_roots,
                 &feature_overrides,
                 &config_overrides,
+                codex_profile.clone(),
                 strict_config,
                 conversation_preferences(None, effort, speed, approval.into()),
             );
@@ -2321,6 +2323,7 @@ async fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
                 &additional_writable_roots,
                 &feature_overrides,
                 &config_overrides,
+                codex_profile.clone(),
                 strict_config,
                 conversation_preferences(None, None, None, ApprovalMode::Ask),
             );
@@ -2351,6 +2354,7 @@ async fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
                 &additional_writable_roots,
                 &feature_overrides,
                 &config_overrides,
+                codex_profile.clone(),
                 strict_config,
                 conversation_preferences(None, None, None, ApprovalMode::Ask),
             );
@@ -2379,6 +2383,7 @@ async fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
                 &additional_writable_roots,
                 &feature_overrides,
                 &config_overrides,
+                codex_profile,
                 strict_config,
                 conversation_preferences(None, None, None, ApprovalMode::Ask),
             );
@@ -2469,6 +2474,8 @@ fn codex_compat_command_requested() -> bool {
                 | "--add-dir"
                 | "--config"
                 | "-c"
+                | "--profile"
+                | "-p"
                 | "--enable"
                 | "--disable"
         ) {
@@ -2484,7 +2491,9 @@ fn codex_compat_command_requested() -> bool {
             || argument.starts_with("--image=")
             || argument.starts_with("--add-dir=")
             || argument.starts_with("--config=")
+            || argument.starts_with("--profile=")
             || (argument.starts_with("-c") && argument.len() > 2)
+            || (argument.starts_with("-p") && argument.len() > 2)
             || argument.starts_with("--enable=")
             || argument.starts_with("--disable=")
             || (argument.starts_with("-C") && argument.len() > 2)
@@ -2514,6 +2523,7 @@ struct NativeOverrides {
     feature_overrides: BTreeMap<String, bool>,
     config_overrides: Vec<CodexConfigOverride>,
     raw_config_overrides: Vec<String>,
+    codex_profile: Option<String>,
     strict_config: bool,
     no_alt_screen: bool,
 }
@@ -2633,6 +2643,29 @@ fn extract_native_overrides(
             overrides.strict_config = true;
             continue;
         }
+        let profile = if argument == "--profile" || argument == "-p" {
+            Some(
+                arguments
+                    .next()
+                    .ok_or_else(|| "--profile requires a profile name".to_owned())?
+                    .into_string()
+                    .map_err(|_| "Codex profile names must be valid Unicode".to_owned())?,
+            )
+        } else {
+            argument.to_str().and_then(|value| {
+                value
+                    .strip_prefix("--profile=")
+                    .or_else(|| value.strip_prefix("-p"))
+                    .map(str::to_owned)
+            })
+        };
+        if let Some(profile) = profile {
+            if profile.is_empty() {
+                return Err("--profile requires a profile name".into());
+            }
+            overrides.codex_profile = Some(profile);
+            continue;
+        }
         if argument == "--no-alt-screen" {
             overrides.no_alt_screen = true;
             continue;
@@ -2718,6 +2751,13 @@ fn combined_cli_command() -> clap::Command {
                 .long("search")
                 .help("Enable live web search for this session.")
                 .action(clap::ArgAction::SetTrue),
+        )
+        .arg(
+            clap::Arg::new("profile")
+                .short('p')
+                .long("profile")
+                .value_name("NAME")
+                .help("Layer $CODEX_HOME/<name>.config.toml over the base Codex configuration."),
         )
         .arg(
             clap::Arg::new("strict-config")
@@ -2876,7 +2916,7 @@ fn codex_sandbox_arguments(
         command.push(OsString::from("--permission-profile"));
         command.push(OsString::from(profile));
     }
-    if let Some(profile) = &args.profile {
+    if let Some(profile) = args.profile.as_ref().or(overrides.codex_profile.as_ref()) {
         command.push(OsString::from("--profile"));
         command.push(OsString::from(profile));
     }
@@ -2922,6 +2962,7 @@ async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
     let additional_writable_roots = codex_additional_writable_roots(&add_dirs)?;
     let mut feature_overrides = native_overrides.feature_overrides;
     let config_overrides = native_overrides.config_overrides;
+    let codex_profile = native_overrides.codex_profile;
     let strict_config = native_overrides.strict_config;
     let no_alt_screen = native_overrides.no_alt_screen;
     for feature in cli.enable_features {
@@ -2984,6 +3025,7 @@ async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
                 &additional_writable_roots,
                 &feature_overrides,
                 &config_overrides,
+                codex_profile.clone(),
                 strict_config,
                 images,
                 output_last_message,
@@ -3018,6 +3060,7 @@ async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
                 &additional_writable_roots,
                 &feature_overrides,
                 &config_overrides,
+                codex_profile.clone(),
                 strict_config,
                 &conversation.execution_preferences,
             );
@@ -3056,6 +3099,7 @@ async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
                 &additional_writable_roots,
                 &feature_overrides,
                 &config_overrides,
+                codex_profile.clone(),
                 strict_config,
                 &conversation.execution_preferences,
             );
@@ -3118,6 +3162,7 @@ async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
                 &additional_writable_roots,
                 &feature_overrides,
                 &config_overrides,
+                codex_profile,
                 strict_config,
                 &fork.execution_preferences,
             );
@@ -6314,6 +6359,7 @@ async fn run_codex_compatible_exec(
     additional_writable_roots: &[String],
     feature_overrides: &BTreeMap<String, bool>,
     config_overrides: &[CodexConfigOverride],
+    codex_profile: Option<String>,
     strict_config: bool,
     images: Vec<PathBuf>,
     output_last_message: Option<PathBuf>,
@@ -6331,6 +6377,7 @@ async fn run_codex_compatible_exec(
         additional_writable_roots,
         feature_overrides,
         config_overrides,
+        codex_profile,
         strict_config,
         conversation_preferences(None, None, None, ApprovalMode::Ask),
     );
@@ -10534,6 +10581,10 @@ fn conversation_preferences_exact(
         additional_writable_roots: Vec::new(),
         codex_feature_overrides: BTreeMap::new(),
         codex_config_overrides: Vec::new(),
+        codex_profile: None,
+        codex_profile_config: None,
+        codex_profile_digest: None,
+        codex_profile_ignored_keys: Vec::new(),
         strict_config: false,
         team_preset: Default::default(),
         personality: None,
@@ -10549,6 +10600,7 @@ fn codex_execution_preferences(
     additional_writable_roots: &[String],
     feature_overrides: &BTreeMap<String, bool>,
     config_overrides: &[CodexConfigOverride],
+    codex_profile: Option<String>,
     strict_config: bool,
     mut fallback: ExecutionPreferences,
 ) -> ExecutionPreferences {
@@ -10563,6 +10615,9 @@ fn codex_execution_preferences(
     fallback.additional_writable_roots = additional_writable_roots.to_vec();
     fallback.codex_feature_overrides = feature_overrides.clone();
     fallback.codex_config_overrides = config_overrides.to_vec();
+    if let Some(codex_profile) = codex_profile {
+        fallback.codex_profile = Some(codex_profile);
+    }
     fallback.strict_config = strict_config;
     if dangerously_bypass_approvals_and_sandbox {
         fallback.approval_mode = ApprovalMode::FullAccess;
@@ -10618,6 +10673,7 @@ fn codex_execution_preferences_override(
     additional_writable_roots: &[String],
     feature_overrides: &BTreeMap<String, bool>,
     config_overrides: &[CodexConfigOverride],
+    codex_profile: Option<String>,
     strict_config: bool,
     fallback: &ExecutionPreferences,
 ) -> Option<ExecutionPreferences> {
@@ -10628,6 +10684,7 @@ fn codex_execution_preferences_override(
         && additional_writable_roots.is_empty()
         && feature_overrides.is_empty()
         && config_overrides.is_empty()
+        && codex_profile.is_none()
         && !strict_config
         && !dangerously_bypass_approvals_and_sandbox
     {
@@ -10642,6 +10699,7 @@ fn codex_execution_preferences_override(
         additional_writable_roots,
         feature_overrides,
         config_overrides,
+        codex_profile,
         strict_config,
         fallback.clone(),
     ))
@@ -13161,6 +13219,8 @@ mod tests {
                 "memories",
                 "--search",
                 "--strict-config",
+                "--profile",
+                "team.fast",
                 "--no-alt-screen",
                 "-c",
                 "web_search=\"disabled\"",
@@ -13192,6 +13252,10 @@ mod tests {
         assert_eq!(interactive.images, [PathBuf::from("diagram.png")]);
         assert_eq!(interactive_overrides.add_dirs, [PathBuf::from(".")]);
         assert!(interactive_overrides.strict_config);
+        assert_eq!(
+            interactive_overrides.codex_profile.as_deref(),
+            Some("team.fast")
+        );
         assert!(interactive_overrides.no_alt_screen);
         assert_eq!(
             interactive_overrides.feature_overrides.get("memories"),
@@ -13263,6 +13327,7 @@ mod tests {
             &["C:/shared".into()],
             &BTreeMap::from([("memories".into(), true)]),
             &interactive_overrides.config_overrides,
+            interactive_overrides.codex_profile.clone(),
             true,
             conversation_preferences(None, None, None, ApprovalMode::Ask),
         );
@@ -13296,6 +13361,7 @@ mod tests {
             &[],
             &BTreeMap::new(),
             &[],
+            None,
             false,
             conversation_preferences(None, None, None, ApprovalMode::Ask),
         );
@@ -13315,6 +13381,7 @@ mod tests {
             &[],
             &BTreeMap::new(),
             &[],
+            None,
             false,
             conversation_preferences(None, None, None, ApprovalMode::Ask),
         );
