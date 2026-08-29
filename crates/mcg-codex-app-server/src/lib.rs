@@ -4391,6 +4391,73 @@ mod tests {
         server.await.expect("fixture server completion");
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn invocation_remote_unix_socket_uses_the_codex_rpc_handshake() {
+        let temporary = tempfile::tempdir().expect("create Unix socket fixture directory");
+        let socket_path = temporary.path().join("app-server-control.sock");
+        let listener =
+            tokio::net::UnixListener::bind(&socket_path).expect("bind Unix socket fixture");
+        let (request_uri_tx, request_uri_rx) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.expect("accept Unix fixture client");
+            let mut request_uri_tx = Some(request_uri_tx);
+            let mut socket = async_tungstenite::tokio::accept_hdr_async(
+                socket,
+                move |request: &async_tungstenite::tungstenite::handshake::server::Request,
+                      response| {
+                    if let Some(sender) = request_uri_tx.take() {
+                        let _ = sender.send(request.uri().to_string());
+                    }
+                    Ok(response)
+                },
+            )
+            .await
+            .expect("upgrade Unix fixture websocket");
+            while let Some(message) = socket.next().await {
+                let Message::Text(text) = message.expect("fixture Unix websocket message") else {
+                    continue;
+                };
+                let request: Value =
+                    serde_json::from_str(&text).expect("fixture Unix JSON-RPC request");
+                let Some(id) = request.get("id").cloned() else {
+                    continue;
+                };
+                let method = request
+                    .get("method")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let result = if method == "account/read" {
+                    json!({"account": null, "requiresOpenaiAuth": true})
+                } else {
+                    json!({})
+                };
+                socket
+                    .send(Message::Text(
+                        json!({"id": id, "result": result}).to_string().into(),
+                    ))
+                    .await
+                    .expect("send Unix fixture response");
+                if method == "account/read" {
+                    break;
+                }
+            }
+        });
+        let endpoint = format!("unix://{}", socket_path.display());
+        let harness = CodexAppServerHarness::new_with_invocation_remote("unused", endpoint, None)
+            .expect("Unix invocation remote harness");
+        let account = harness
+            .account()
+            .await
+            .expect("Unix remote account request");
+        assert!(!account.authenticated);
+        assert_eq!(
+            request_uri_rx.await.expect("Unix request URI capture"),
+            "/rpc"
+        );
+        server.await.expect("Unix fixture server completion");
+    }
+
     #[test]
     fn invocation_remote_validation_requires_root_explicit_port_and_secure_scope() {
         assert!(validate_invocation_remote_transport("ws://127.0.0.1:4500", None).is_ok());

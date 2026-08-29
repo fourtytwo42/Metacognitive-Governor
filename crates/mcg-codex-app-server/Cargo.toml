@@ -23,5 +23,8 @@ zeroize.workspace = true
 [target.'cfg(windows)'.dependencies]
 win32job = "2.0.3"
 
+[dev-dependencies]
+tempfile.workspace = true
+
 [lints]
 workspace = true
