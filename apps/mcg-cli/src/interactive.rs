@@ -327,6 +327,10 @@ fn render_session_picker(
     filtered: &[usize],
     query: &str,
     selected: usize,
+    heading: &str,
+    search_title: &str,
+    empty_footer: &str,
+    active_footer: &str,
 ) {
     let area = frame.area();
     let content = if area.width > 96 {
@@ -352,15 +356,14 @@ fn render_session_picker(
         ])
         .split(content);
     frame.render_widget(
-        Paragraph::new("Resume a conversation")
-            .style(Style::default().add_modifier(Modifier::BOLD)),
+        Paragraph::new(heading).style(Style::default().add_modifier(Modifier::BOLD)),
         rows[0],
     );
     frame.render_widget(
         Paragraph::new(query).block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(" Search titles, ids, and projects "),
+                .title(format!(" {search_title} ")),
         ),
         rows[1],
     );
@@ -394,9 +397,9 @@ fn render_session_picker(
         &mut state,
     );
     let footer = if filtered.is_empty() {
-        "No matching conversations · Esc cancels"
+        empty_footer
     } else {
-        "↑↓ select · Enter resume · type to filter · Esc cancel"
+        active_footer
     };
     frame.render_widget(
         Paragraph::new(footer).style(Style::default().fg(Color::DarkGray)),
@@ -404,10 +407,13 @@ fn render_session_picker(
     );
 }
 
-/// Opens a searchable Codex-style terminal picker and returns the selected stable id.
-pub fn select_session(
+fn select_candidate(
     candidates: &[SessionPickerCandidate],
     no_alt_screen: bool,
+    heading: &str,
+    search_title: &str,
+    empty_footer: &str,
+    active_footer: &str,
 ) -> io::Result<Option<String>> {
     if candidates.is_empty() {
         return Ok(None);
@@ -419,7 +425,17 @@ pub fn select_session(
         let filtered = fuzzy_session_indices(candidates, &query);
         selected = selected.min(filtered.len().saturating_sub(1));
         terminal.terminal.draw(|frame| {
-            render_session_picker(frame, candidates, &filtered, &query, selected);
+            render_session_picker(
+                frame,
+                candidates,
+                &filtered,
+                &query,
+                selected,
+                heading,
+                search_title,
+                empty_footer,
+                active_footer,
+            );
         })?;
 
         match event::read()? {
@@ -465,6 +481,49 @@ pub fn select_session(
             _ => {}
         }
     }
+}
+
+/// Opens a searchable Codex-style terminal picker and returns the selected stable id.
+pub fn select_session(
+    candidates: &[SessionPickerCandidate],
+    no_alt_screen: bool,
+) -> io::Result<Option<String>> {
+    select_candidate(
+        candidates,
+        no_alt_screen,
+        "Resume a conversation",
+        "Search titles, ids, and projects",
+        "No matching conversations · Esc cancels",
+        "↑↓ select · Enter resume · type to filter · Esc cancel",
+    )
+}
+
+/// Asks which working directory should govern a resumed or forked conversation.
+pub fn select_resume_cwd(
+    current: &str,
+    session: &str,
+    no_alt_screen: bool,
+) -> io::Result<Option<String>> {
+    let candidates = [
+        SessionPickerCandidate {
+            id: "current".into(),
+            title: "Use current directory".into(),
+            detail: current.into(),
+        },
+        SessionPickerCandidate {
+            id: "session".into(),
+            title: "Use session directory".into(),
+            detail: session.into(),
+        },
+    ];
+    select_candidate(
+        &candidates,
+        no_alt_screen,
+        "Choose a working directory",
+        "Filter directory choices",
+        "No matching directory choice · Esc cancels",
+        "↑↓ select · Enter choose · Esc cancel",
+    )
 }
 
 pub struct TuiModel {
@@ -2112,7 +2171,17 @@ mod tests {
             let mut terminal = Terminal::new(backend).expect("test terminal");
             terminal
                 .draw(|frame| {
-                    render_session_picker(frame, &candidates, &filtered, "conversation", 19);
+                    render_session_picker(
+                        frame,
+                        &candidates,
+                        &filtered,
+                        "conversation",
+                        19,
+                        "Resume a conversation",
+                        "Search titles, ids, and projects",
+                        "No matching conversations · Esc cancels",
+                        "↑↓ select · Enter resume · type to filter · Esc cancel",
+                    );
                 })
                 .expect("picker should render without clipping or panics");
         }

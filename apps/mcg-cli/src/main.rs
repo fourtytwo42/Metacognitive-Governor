@@ -30,20 +30,20 @@ use mcg_api::{
     AnswerConversationInputRequest, ApplyComputerActionsRequest, ApprovalListResponse,
     ArchiveConversationRequest, ArchiveProjectRequest, AssembleContextRequest,
     AttachBrowserSessionRequest, BackupListResponse, BackupSummaryResponse, CheckSiteHealthRequest,
-    ConversationDeletionPreview, ConversationDeletionResult, ConversationListResponse,
-    ConversationStreamEvent, CorrectMemoryClaimRequest, CreateConversationRequest,
-    CreateEncryptedBackupRequest, CreateMemoryClaimRequest, CreateOrganizationRequest,
-    CreatePlatformSessionRequest, CreateScheduleRequest, CreateSiteMonitorRequest,
-    CreateSiteRequest, CreateSshHostRequest, CreateTaskRequest, DecideSharedOrganizationRequest,
-    DelegationMutationRequest, DelegationRetryRequest, DeploySiteRequest, DiscoverProjectRequest,
-    EvaluationMutationResponse, ExecuteAgentWorkRequest, ExperimentBenchmarkListResponse,
-    ExperimentDecisionListResponse, ExperimentListResponse, ForkConversationRequest,
-    ImportOrganizationRequest, ImportSharedOrganizationRequest, InheritOrganizationRequest,
-    InstallLocalPluginRequest, InstallRegistryPluginRequest, InvokePluginRequest,
-    LaunchTaskRequest, LaunchTaskResponse, ManagedMemoryResponse, McpListResponse,
-    MemoryClaimHistoryResponse, MemoryClaimListResponse, MentionCandidateListResponse,
-    NavigateBrowserSessionRequest, OrganizationHistoryResponse, OrganizationListResponse,
-    OrganizationMutationResponse, OrganizationPublisherListResponse,
+    CodexResumeCwdQuery, ConversationDeletionPreview, ConversationDeletionResult,
+    ConversationListResponse, ConversationStreamEvent, CorrectMemoryClaimRequest,
+    CreateConversationRequest, CreateEncryptedBackupRequest, CreateMemoryClaimRequest,
+    CreateOrganizationRequest, CreatePlatformSessionRequest, CreateScheduleRequest,
+    CreateSiteMonitorRequest, CreateSiteRequest, CreateSshHostRequest, CreateTaskRequest,
+    DecideSharedOrganizationRequest, DelegationMutationRequest, DelegationRetryRequest,
+    DeploySiteRequest, DiscoverProjectRequest, EvaluationMutationResponse, ExecuteAgentWorkRequest,
+    ExperimentBenchmarkListResponse, ExperimentDecisionListResponse, ExperimentListResponse,
+    ForkConversationRequest, ImportOrganizationRequest, ImportSharedOrganizationRequest,
+    InheritOrganizationRequest, InstallLocalPluginRequest, InstallRegistryPluginRequest,
+    InvokePluginRequest, LaunchTaskRequest, LaunchTaskResponse, ManagedMemoryResponse,
+    McpListResponse, MemoryClaimHistoryResponse, MemoryClaimListResponse,
+    MentionCandidateListResponse, NavigateBrowserSessionRequest, OrganizationHistoryResponse,
+    OrganizationListResponse, OrganizationMutationResponse, OrganizationPublisherListResponse,
     OrganizationShareReviewListResponse, PlanAgentRunRequest, PlanWorkRequest,
     PlatformSessionHistoryResponse, PlatformSessionListResponse, PluginInvocationHistoryResponse,
     PluginListResponse, ProjectHistoryResponse, ProjectListResponse,
@@ -63,6 +63,7 @@ use mcg_api::{
     UpdateSiteRequest, UpdateSshHostRequest, UpdateUserSettingsRequest,
     UserSettingsHistoryResponse, WakeScheduleRequest, WorktreeMutationRequest,
 };
+use mcg_codex_app_server::CodexResumeCwd;
 use mcg_config::{AppConfig, AutonomyPreset, CliTuiPreferences, UserSettings};
 use mcg_domain::{
     AgentWakeState, ApprovalMode, CodexConfigOverride, ComposerMentionInput, ComputerUseCapability,
@@ -119,7 +120,8 @@ use zeroize::Zeroize;
 use commands::{CommandContext, QueuePolicy, SLASH_COMMANDS, command_named};
 use interactive::{
     PaletteCandidate, PaletteKind, PaletteRequest, SessionPickerCandidate, SlashCandidate,
-    SubmittedLine, TuiAction, TuiModel, TuiTerminal, prompt_for_question, select_session,
+    SubmittedLine, TuiAction, TuiModel, TuiTerminal, prompt_for_question, select_resume_cwd,
+    select_session,
 };
 
 #[derive(Serialize)]
@@ -2990,6 +2992,7 @@ async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
             )
         })?
     };
+    let project_was_explicit = cli.project.is_some();
     let project = cli.project.unwrap_or(std::env::current_dir()?);
     let client = reqwest::Client::new();
     let host = host.as_str();
@@ -3048,7 +3051,7 @@ async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
                 last,
                 session,
             } = *args;
-            let conversation = resolve_cli_session(
+            let mut conversation = resolve_cli_session(
                 &client,
                 host,
                 token,
@@ -3061,6 +3064,29 @@ async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
                 no_alt_screen,
             )
             .await?;
+            if should_resume_in_current_directory(
+                &client,
+                host,
+                token,
+                &conversation,
+                &project,
+                project_was_explicit,
+                &config_overrides,
+                codex_profile.as_deref(),
+                strict_config,
+                no_alt_screen,
+            )
+            .await?
+            {
+                conversation = rebind_conversation_to_current_project(
+                    &client,
+                    host,
+                    token,
+                    &project,
+                    conversation,
+                )
+                .await?;
+            }
             let preferences = codex_execution_preferences_override(
                 model.clone(),
                 sandbox,
@@ -3155,7 +3181,20 @@ async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
                 no_alt_screen,
             )
             .await?;
-            let fork: Conversation = decode_api_response(
+            let use_current_directory = should_resume_in_current_directory(
+                &client,
+                host,
+                token,
+                &source,
+                &project,
+                project_was_explicit,
+                &config_overrides,
+                codex_profile.as_deref(),
+                strict_config,
+                no_alt_screen,
+            )
+            .await?;
+            let mut fork: Conversation = decode_api_response(
                 client
                     .post(format!("{host}/api/v1/conversations/{}/fork", source.id))
                     .bearer_auth(token)
@@ -3167,6 +3206,10 @@ async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
                 "fork conversation",
             )
             .await?;
+            if use_current_directory {
+                fork = rebind_conversation_to_current_project(&client, host, token, &project, fork)
+                    .await?;
+            }
             let preferences = codex_execution_preferences_override(
                 model.clone(),
                 sandbox,
@@ -3491,6 +3534,190 @@ async fn current_cli_project_id(
         .await?
         .project
         .project_id)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResumeCwdDecision {
+    Current,
+    Session,
+    Prompt,
+}
+
+fn resume_cwd_config_override(
+    overrides: &[CodexConfigOverride],
+) -> Result<Option<CodexResumeCwd>, Box<dyn std::error::Error>> {
+    let Some(value) = overrides
+        .iter()
+        .rev()
+        .find(|override_value| override_value.key == "tui.resume_cwd")
+        .map(|override_value| &override_value.value)
+    else {
+        return Ok(None);
+    };
+    match value.as_str() {
+        Some("current") => Ok(Some(CodexResumeCwd::Current)),
+        Some("session") => Ok(Some(CodexResumeCwd::Session)),
+        _ => Err(format!(
+            "Codex configuration override `tui.resume_cwd` must be `current` or `session`, not {value}"
+        )
+        .into()),
+    }
+}
+
+fn resume_cwd_decision(
+    current: &std::path::Path,
+    session: Option<&std::path::Path>,
+    explicit_current: bool,
+    preference: Option<CodexResumeCwd>,
+    interactive_terminal: bool,
+) -> Result<ResumeCwdDecision, Box<dyn std::error::Error>> {
+    let Some(session) = session else {
+        return Ok(if explicit_current {
+            ResumeCwdDecision::Current
+        } else {
+            ResumeCwdDecision::Session
+        });
+    };
+    if paths_match_for_host(session, &current.to_string_lossy()) {
+        return Ok(ResumeCwdDecision::Session);
+    }
+    if explicit_current {
+        return Ok(ResumeCwdDecision::Current);
+    }
+    match preference {
+        Some(CodexResumeCwd::Current) => Ok(ResumeCwdDecision::Current),
+        Some(CodexResumeCwd::Session) => Ok(ResumeCwdDecision::Session),
+        None if interactive_terminal => Ok(ResumeCwdDecision::Prompt),
+        None => Err(
+            "the saved session uses a different working directory; pass -C <DIR> or set `tui.resume_cwd` to `current` or `session`"
+                .into(),
+        ),
+    }
+}
+
+async fn conversation_project_root(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+    conversation: &Conversation,
+) -> Result<Option<PathBuf>, Box<dyn std::error::Error>> {
+    let Some(project_id) = conversation.project_id else {
+        return Ok(None);
+    };
+    let value: serde_json::Value = decode_api_response(
+        client
+            .get(format!("{host}/api/v1/projects/{project_id}"))
+            .bearer_auth(token)
+            .send()
+            .await?,
+        "load the saved session project",
+    )
+    .await?;
+    let root = value
+        .get("root")
+        .and_then(serde_json::Value::as_str)
+        .ok_or("saved session project did not contain a root")?;
+    Ok(Some(std::fs::canonicalize(root)?))
+}
+
+async fn effective_resume_cwd(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+    cwd: &std::path::Path,
+    profile: Option<&str>,
+    strict: bool,
+) -> Result<Option<CodexResumeCwd>, Box<dyn std::error::Error>> {
+    let cwd = cwd
+        .to_str()
+        .ok_or("current directory must be valid Unicode")?;
+    decode_api_response(
+        client
+            .get(format!("{host}/api/v1/codex/resume-cwd"))
+            .bearer_auth(token)
+            .query(&CodexResumeCwdQuery {
+                cwd: Some(cwd.to_owned()),
+                profile: profile.map(str::to_owned),
+                strict,
+            })
+            .send()
+            .await?,
+        "resolve Codex resume working-directory preference",
+    )
+    .await
+}
+
+async fn should_resume_in_current_directory(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+    conversation: &Conversation,
+    current: &std::path::Path,
+    explicit_current: bool,
+    config_overrides: &[CodexConfigOverride],
+    profile: Option<&str>,
+    strict: bool,
+    no_alt_screen: bool,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    let current = std::fs::canonicalize(current)?;
+    let session = conversation_project_root(client, host, token, conversation).await?;
+    let explicit_preference = resume_cwd_config_override(config_overrides)?;
+    let preference = if explicit_preference.is_some() || explicit_current || session.is_none() {
+        explicit_preference
+    } else {
+        effective_resume_cwd(client, host, token, &current, profile, strict).await?
+    };
+    match resume_cwd_decision(
+        &current,
+        session.as_deref(),
+        explicit_current,
+        preference,
+        std::io::stdin().is_terminal(),
+    )? {
+        ResumeCwdDecision::Current => Ok(true),
+        ResumeCwdDecision::Session => Ok(false),
+        ResumeCwdDecision::Prompt => {
+            let session = session.expect("prompt requires a saved session directory");
+            match select_resume_cwd(
+                &current.display().to_string(),
+                &session.display().to_string(),
+                no_alt_screen,
+            )?
+            .as_deref()
+            {
+                Some("current") => Ok(true),
+                Some("session") => Ok(false),
+                Some(choice) => Err(format!("unknown working-directory choice `{choice}`").into()),
+                None => Err("working-directory selection was cancelled".into()),
+            }
+        }
+    }
+}
+
+async fn rebind_conversation_to_current_project(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+    project: &std::path::Path,
+    conversation: Conversation,
+) -> Result<Conversation, Box<dyn std::error::Error>> {
+    let project_id = current_cli_project_id(client, host, token, project).await?;
+    if conversation.project_id == Some(project_id) {
+        return Ok(conversation);
+    }
+    decode_api_response(
+        client
+            .patch(format!("{host}/api/v1/conversations/{}", conversation.id))
+            .bearer_auth(token)
+            .json(&UpdateConversationRequest {
+                title: conversation.title.clone(),
+                project_id: Some(project_id),
+            })
+            .send()
+            .await?,
+        "use the current directory for the conversation",
+    )
+    .await
 }
 
 fn filter_cli_session_candidates(
@@ -13751,6 +13978,81 @@ mod tests {
                     && args.sandbox_state_disable_network
                     && args.command.first() == Some(&OsString::from("powershell.exe"))
         ));
+    }
+
+    #[test]
+    fn resume_cwd_override_uses_the_last_exact_codex_value() {
+        let overrides = vec![
+            CodexConfigOverride {
+                key: "tui.resume_cwd".into(),
+                value: serde_json::json!("session"),
+            },
+            CodexConfigOverride {
+                key: "model_verbosity".into(),
+                value: serde_json::json!("low"),
+            },
+            CodexConfigOverride {
+                key: "tui.resume_cwd".into(),
+                value: serde_json::json!("current"),
+            },
+        ];
+        assert_eq!(
+            resume_cwd_config_override(&overrides).expect("valid override"),
+            Some(CodexResumeCwd::Current)
+        );
+        let invalid = [CodexConfigOverride {
+            key: "tui.resume_cwd".into(),
+            value: serde_json::json!("somewhere"),
+        }];
+        assert!(resume_cwd_config_override(&invalid).is_err());
+    }
+
+    #[test]
+    fn resume_cwd_decision_preserves_authority_and_honors_precedence() {
+        let current = std::path::Path::new("current-project");
+        let session = std::path::Path::new("saved-project");
+        assert_eq!(
+            resume_cwd_decision(current, Some(current), false, None, true).expect("matching roots"),
+            ResumeCwdDecision::Session
+        );
+        assert_eq!(
+            resume_cwd_decision(
+                current,
+                Some(session),
+                true,
+                Some(CodexResumeCwd::Session),
+                true,
+            )
+            .expect("explicit -C wins"),
+            ResumeCwdDecision::Current
+        );
+        assert_eq!(
+            resume_cwd_decision(
+                current,
+                Some(session),
+                false,
+                Some(CodexResumeCwd::Current),
+                true,
+            )
+            .expect("configured current"),
+            ResumeCwdDecision::Current
+        );
+        assert_eq!(
+            resume_cwd_decision(current, Some(session), false, None, true)
+                .expect("interactive prompt"),
+            ResumeCwdDecision::Prompt
+        );
+        assert!(resume_cwd_decision(current, Some(session), false, None, false).is_err());
+        assert_eq!(
+            resume_cwd_decision(current, None, false, Some(CodexResumeCwd::Current), true,)
+                .expect("project-free chats remain unbound"),
+            ResumeCwdDecision::Session
+        );
+        assert_eq!(
+            resume_cwd_decision(current, None, true, None, true)
+                .expect("explicit project binds project-free chat"),
+            ResumeCwdDecision::Current
+        );
     }
 
     #[test]

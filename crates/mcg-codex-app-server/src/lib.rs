@@ -74,6 +74,13 @@ pub struct CodexConfigurationStatus {
     pub windows_sandbox: Value,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodexResumeCwd {
+    Current,
+    Session,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CodexStableDiscovery {
@@ -897,6 +904,17 @@ fn sanitize_profile_config(value: &mut Value, path: &mut Vec<String>, ignored: &
             sanitize_profile_config(child, path, ignored);
         }
         path.pop();
+    }
+}
+
+fn parse_resume_cwd(value: Option<&Value>) -> Result<Option<CodexResumeCwd>, CodexHarnessError> {
+    match value {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) if value == "current" => Ok(Some(CodexResumeCwd::Current)),
+        Some(Value::String(value)) if value == "session" => Ok(Some(CodexResumeCwd::Session)),
+        Some(value) => Err(CodexHarnessError::Protocol(format!(
+            "Codex configuration returned invalid tui.resume_cwd value {value}"
+        ))),
     }
 }
 
@@ -2281,6 +2299,31 @@ impl CodexAppServerHarness {
         self.request("configRequirements/read", json!({})).await
     }
 
+    /// Reads Codex's effective `tui.resume_cwd` value through the pinned native
+    /// configuration loader. `None` preserves Codex's prompt-on-difference behavior.
+    pub async fn resume_cwd(
+        &self,
+        cwd: Option<&str>,
+        profile: Option<&str>,
+        strict: bool,
+    ) -> Result<Option<CodexResumeCwd>, CodexHarnessError> {
+        let response = self
+            .request("config/read", json!({"cwd": cwd, "includeLayers": false}))
+            .await?;
+        let mut preference = parse_resume_cwd(response.pointer("/config/tui/resume_cwd"))?;
+        if let Some(profile) = profile {
+            let resolved = self
+                .resolve_profile(profile, cwd.map(Path::new), strict)
+                .await?;
+            if let Some(profile_preference) =
+                parse_resume_cwd(resolved.config.pointer("/tui/resume_cwd"))?
+            {
+                preference = Some(profile_preference);
+            }
+        }
+        Ok(preference)
+    }
+
     pub async fn windows_sandbox_readiness(&self) -> Result<Value, CodexHarnessError> {
         self.request(WINDOWS_SANDBOX_READINESS_METHOD, json!({}))
             .await
@@ -2972,6 +3015,21 @@ mod tests {
     }
 
     #[test]
+    fn resume_directory_preference_accepts_only_codex_values() {
+        assert_eq!(parse_resume_cwd(None).expect("unset"), None);
+        assert_eq!(
+            parse_resume_cwd(Some(&json!("current"))).expect("current"),
+            Some(CodexResumeCwd::Current)
+        );
+        assert_eq!(
+            parse_resume_cwd(Some(&json!("session"))).expect("session"),
+            Some(CodexResumeCwd::Session)
+        );
+        assert!(parse_resume_cwd(Some(&json!("elsewhere"))).is_err());
+        assert!(parse_resume_cwd(Some(&json!(true))).is_err());
+    }
+
+    #[test]
     fn two_agent_role_configs_are_thread_scoped_and_fail_closed() {
         let chat = CodexThreadInstructions::isolated_chat_config(
             "C:/MCG/mcg-agent-mcp.exe",
@@ -3112,6 +3170,25 @@ mod tests {
             .validate_strict_config(Some(&cwd))
             .await
             .expect("current Codex configuration should pass its native strict loader");
+    }
+
+    #[tokio::test]
+    #[ignore = "qualification gate: requires the packaged pinned Codex binary"]
+    async fn installed_pinned_binary_reads_resume_directory_preference() {
+        let executable = std::env::var_os("MCG_CODEX_APP_SERVER_EXECUTABLE")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("codex"));
+        let harness = CodexAppServerHarness::new(executable);
+        let cwd = std::env::current_dir().expect("current directory");
+        let cwd = cwd.to_string_lossy();
+        let preference = harness
+            .resume_cwd(Some(cwd.as_ref()), None, false)
+            .await
+            .expect("Codex resume working-directory preference");
+        assert!(matches!(
+            preference,
+            None | Some(CodexResumeCwd::Current | CodexResumeCwd::Session)
+        ));
     }
 
     #[tokio::test]

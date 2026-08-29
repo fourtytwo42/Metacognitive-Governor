@@ -1,6 +1,6 @@
 # Codex CLI and desktop parity matrix
 
-Last verified 2026-08-28 against:
+Last verified 2026-08-29 against:
 
 - pinned Codex app-server `0.150.1` schema
   `844b52d4a5a8cda58794e28b3b119c3a3d20a588b7db83209c298bec62704092`;
@@ -20,7 +20,7 @@ is no usable equivalent. MetaCog-only operations remain under `/mcg` or
 | --- | --- | --- | --- |
 | Terminal | Transcript, multiline composer, palettes, history, `Ctrl+R`, `Ctrl+O`, `Ctrl+L`, steering, queueing, reconnect/replay, `--no-alt-screen` | Native | `Ctrl+L` clears only the rendered transcript; durable conversation history and replay remain intact. Initial image attachments enter the same durable mention queue as interactive picker selections. Inline mode preserves terminal scrollback without entering the alternate screen. |
 | References | `@`, `/mention`, `$skill`, `$app` | Native | Files/folders, explicitly attached resources, MetaCog plugins, Codex skills, Apps, and initial image attachments use bounded searchable completion. `$` lists accessible enabled Apps and skills; `/apps` inserts the selected `$app-id` instead of sending a command. |
-| Sessions | `/new`, `/clear`, `/resume`, `/rename`, `/fork`, `/side`/`/btw`, `/archive`, `/delete`, `/exit`/`/quit` | Partial | Searchable session selection, exact selectors, archive confirmation, and exit are native. Saved/current directory choice and side-session presentation still need comparison. |
+| Sessions | `/new`, `/clear`, `/resume`, `/rename`, `/fork`, `/side`/`/btw`, `/archive`, `/delete`, `/exit`/`/quit` | Partial | Searchable session selection, exact selectors, saved/current-directory choice, archive confirmation, and exit are native. Side-session presentation still needs comparison. |
 | Work | `/review`, `/diff`, `/compact`, `/copy`, `/status`, `/usage`, `/raw` | Partial | Top-level review targets and human findings are native; interactive review target picking, raw terminal scrollback, and exact usage/status presentation remain. |
 | Execution | `/model`, `/fast`, `/personality`, `/permissions`, `/approve`, `/plan`, `/goal` | Partial | Cycle 15 adds live project-aware Codex permission-profile discovery and durable selection in the nested `/permissions` picker. Exact remaining Plan/Goal edge cases are pending. Plan is unavailable while running as of Cycle 1. |
 | Background work | `!`, `/ps`, `/stop`/`/clean` | Native | Cycle 1 makes stop/clean settle all conversation-owned commands. |
@@ -43,7 +43,7 @@ Environment variables alone are not capability discovery.
 | `mcp`, `plugin` | MetaCog | Governed management exists; exact syntax and marketplace operations remain incomplete. |
 | `archive`, `unarchive`, `delete` | Native | IDs take precedence over exact names; deletion previews descendants, prompts by default, restricts forced deletion to UUIDs, and uses the existing transactional safety gate. |
 | `completion` | Native | Bash, Zsh, Fish, PowerShell (`power-shell`), and Elvish completions include both Codex-compatible and MetaCog-native commands and work without the daemon. |
-| `resume`, `fork` | Partial | IDs, exact names, project-scoped `--last`, `--all`, durable forks, searchable terminal selection, and terminal reopening work. `resume --include-non-interactive` includes durably classified exec/consumer sessions while explicit IDs and names always remain addressable. The current-vs-saved-directory choice and `tui.resume_cwd` preference remain. |
+| `resume`, `fork` | Native | IDs, exact names, project-scoped `--last`, `--all`, durable forks, searchable terminal selection, and terminal reopening work. `resume --include-non-interactive` includes durably classified exec/consumer sessions while explicit IDs and names always remain addressable. Different roots prompt in an interactive terminal unless `tui.resume_cwd` decides; explicit `-C` wins. |
 | `review` | Partial | Uncommitted, base branch, commit/title, stdin, and custom-instruction targets use the native read-only review API and render only the final human-readable finding instead of protocol JSON. Remaining global overrides need exact alignment. |
 | `login`, `logout` | Partial | Browser OAuth, status, and device-wide logout use the shared Codex app-server account. Device auth, API-key stdin, and access-token stdin remain unavailable from the pinned app-server adapter. |
 | `app` | Partial | `mcg app [PATH]` is daemon-free, validates the workspace, prints the canonical Windows handoff path, and launches MetaCog by path on macOS. Direct Windows desktop launch/deep-linking to the active conversation remains. |
@@ -178,10 +178,7 @@ blocking numbered resume/fork prompt with a searchable resize-safe Ratatui picke
 Direct session IDs and exact names remain addressable regardless of picker filtering.
 Native `review` now extracts the latest completed `agentMessage` and prints the
 human finding while retaining visible protocol failures; raw review turn JSON is
-no longer presented as the ordinary result. A resumed conversation still keeps
-its saved MetaCog project binding because that binding is an authority boundary;
-current-vs-saved-directory selection remains an explicit gap until it can be
-modeled without silently changing project authority.
+no longer presented as the ordinary result.
 
 Cycle 20 adds the Codex-style active-conversation agent browser behind `/agent`
 and `/subagents`. Active sessions sort before completed sessions, fuzzy filtering
@@ -196,6 +193,17 @@ Coordinator, Coder, Tester, message, and activity records, while Tester browser
 authority remains independently bounded and non-mutating, so no desktop visual
 change is required for this cycle. Cross-conversation agent browsing and jumping
 from an approval overlay to its source thread remain explicit gaps.
+
+Cycle 21 aligns top-level `resume` and `fork` working-directory behavior with
+Codex. The CLI compares the current canonical root with the selected session's
+saved project, uses a resize-safe current-versus-session picker when they differ,
+and honors the native layered `tui.resume_cwd = "current" | "session"` value.
+Ordered explicit `-c tui.resume_cwd=...` overrides the selected named profile
+and effective user/project configuration, while explicit `-C/--cd` wins over
+every preference. Choosing current performs an explicit governed project rebind
+before the TUI opens; choosing session preserves the saved authority boundary.
+Project-free conversations remain unbound unless `-C` explicitly targets a
+project. Invalid values and non-interactive ambiguous choices fail visibly.
 
 Codex-compatible support remains incomplete for local providers/OSS, remote
 endpoints/authentication, exact event schemas, and hook trust. Current Codex 0.150.1

@@ -47,9 +47,9 @@ use mcg_codex_app_server::{
     CodexCommandExecResult, CodexConfigOverride as CodexAppConfigOverride,
     CodexConfigurationStatus, CodexExecutionPreferences, CodexFeature, CodexFsWatch,
     CodexHarnessError, CodexHarnessStatus, CodexMentionInput, CodexModel, CodexPendingRequest,
-    CodexPermissionProfile, CodexRateLimits, CodexReviewDelivery, CodexReviewResult,
-    CodexReviewTarget, CodexSandboxMode, CodexStableDiscovery, CodexThreadInstructions,
-    CodexTurnProgress, verify_pinned_two_agent_conformance,
+    CodexPermissionProfile, CodexRateLimits, CodexResumeCwd, CodexReviewDelivery,
+    CodexReviewResult, CodexReviewTarget, CodexSandboxMode, CodexStableDiscovery,
+    CodexThreadInstructions, CodexTurnProgress, verify_pinned_two_agent_conformance,
 };
 use mcg_config::{
     AppConfig, AutonomyPreset, CliTuiPreferences, UserSettings, UserSettingsRevision,
@@ -10361,6 +10361,15 @@ impl AppRuntime {
             provider_capabilities,
             windows_sandbox,
         })
+    }
+
+    pub async fn codex_resume_cwd(
+        &self,
+        cwd: Option<&str>,
+        profile: Option<&str>,
+        strict: bool,
+    ) -> Result<Option<CodexResumeCwd>, RuntimeError> {
+        Ok(self.codex_harness.resume_cwd(cwd, profile, strict).await?)
     }
 
     pub async fn codex_pending_requests(&self) -> Vec<CodexPendingRequest> {

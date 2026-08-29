@@ -374,6 +374,14 @@ pub struct CodexDiscoveryRequest {
     pub force_reload: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct CodexResumeCwdQuery {
+    pub cwd: Option<String>,
+    pub profile: Option<String>,
+    #[serde(default)]
+    pub strict: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SetCodexFeatureRequest {
     pub enabled: bool,
@@ -1738,6 +1746,7 @@ fn router_with_shutdown(runtime: Arc<AppRuntime>, shutdown: Option<watch::Sender
             "/api/v1/codex/configuration",
             get(codex_configuration_status),
         )
+        .route("/api/v1/codex/resume-cwd", get(codex_resume_cwd))
         .route(
             "/api/v1/codex/pending-requests",
             get(codex_pending_requests),
@@ -4606,6 +4615,19 @@ async fn codex_configuration_status(
         state
             .runtime
             .codex_configuration_status()
+            .await
+            .map_err(map_runtime_error)?,
+    ))
+}
+
+async fn codex_resume_cwd(
+    State(state): State<ApiState>,
+    Query(query): Query<CodexResumeCwdQuery>,
+) -> Result<Json<Option<mcg_codex_app_server::CodexResumeCwd>>, ApiError> {
+    Ok(Json(
+        state
+            .runtime
+            .codex_resume_cwd(query.cwd.as_deref(), query.profile.as_deref(), query.strict)
             .await
             .map_err(map_runtime_error)?,
     ))

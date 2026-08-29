@@ -13,7 +13,7 @@ use axum::{
     routing::{get, post, put},
 };
 use mcg_config::AppConfig;
-use mcg_domain::ProjectId;
+use mcg_domain::{ConversationInteractionKind, ExecutionPreferences, ProjectId};
 use mcg_providers::{CONTRACT_VERSION, ProviderAuthMode, ProviderConnection, ProviderKind};
 use mcg_runtime::AppRuntime;
 use tokio::{net::TcpListener, task::JoinHandle};
@@ -396,6 +396,65 @@ async fn cli_supports_structured_task_and_error_workflows() {
         runtime.projects().expect("reused project projection").len(),
         1
     );
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn explicit_cd_rebinds_a_resumed_session_before_terminal_entry() {
+    let saved_project = tempfile::tempdir().expect("saved project directory");
+    let current_project = tempfile::tempdir().expect("current project directory");
+    let runtime = Arc::new(
+        AppRuntime::open_in_memory(AppConfig::default(), TEST_TOKEN.to_owned()).expect("runtime"),
+    );
+    let saved_project_id = ProjectId::new();
+    let current_project_id = ProjectId::new();
+    runtime
+        .discover_project(saved_project.path(), saved_project_id)
+        .expect("discover saved project");
+    runtime
+        .discover_project(current_project.path(), current_project_id)
+        .expect("discover current project");
+    let conversation = runtime
+        .create_conversation(
+            Some("resume directory fixture".into()),
+            Some(saved_project_id),
+            ExecutionPreferences::default(),
+            ConversationInteractionKind::Interactive,
+        )
+        .expect("create saved conversation");
+    let (host, server) = start_server(runtime.clone()).await;
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_mcg"))
+        .args(["--host", &host, "-C"])
+        .arg(current_project.path())
+        .args(["resume", &conversation.id.to_string()])
+        .env("MCG_AUTH_TOKEN", TEST_TOKEN)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("resume CLI process");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let resumed = runtime
+            .conversation(conversation.id)
+            .expect("load resumed conversation");
+        if resumed.conversation.project_id == Some(current_project_id) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "resume did not adopt the explicit current directory"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    let resumed = runtime
+        .conversation(conversation.id)
+        .expect("load resumed conversation");
+    assert_eq!(resumed.conversation.project_id, Some(current_project_id));
+
     server.abort();
 }
 
