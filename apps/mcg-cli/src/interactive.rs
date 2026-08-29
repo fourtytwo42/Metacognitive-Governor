@@ -27,6 +27,13 @@ use ratatui::{
 
 const MAX_VISIBLE_CHOICES: usize = 8;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionPickerCandidate {
+    pub id: String,
+    pub title: String,
+    pub detail: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PaletteKind {
     Slash,
@@ -205,6 +212,237 @@ impl Drop for TuiTerminal {
             );
         }
         let _ = self.terminal.show_cursor();
+    }
+}
+
+struct SessionPickerTerminal {
+    terminal: Terminal<CrosstermBackend<io::Stdout>>,
+    alternate_screen: bool,
+}
+
+impl SessionPickerTerminal {
+    fn enter(no_alt_screen: bool) -> io::Result<Self> {
+        terminal::enable_raw_mode()?;
+        let mut stdout = io::stdout();
+        if no_alt_screen {
+            execute!(stdout, event::EnableMouseCapture, cursor::Hide)?;
+        } else {
+            execute!(
+                stdout,
+                EnterAlternateScreen,
+                event::EnableMouseCapture,
+                cursor::Hide
+            )?;
+        }
+        let backend = CrosstermBackend::new(stdout);
+        let terminal = if no_alt_screen {
+            let (_, rows) = terminal::size()?;
+            Terminal::with_options(
+                backend,
+                TerminalOptions {
+                    viewport: Viewport::Inline(rows.saturating_sub(1).clamp(1, 18)),
+                },
+            )?
+        } else {
+            Terminal::new(backend)?
+        };
+        Ok(Self {
+            terminal,
+            alternate_screen: !no_alt_screen,
+        })
+    }
+}
+
+impl Drop for SessionPickerTerminal {
+    fn drop(&mut self) {
+        let _ = terminal::disable_raw_mode();
+        if self.alternate_screen {
+            let _ = execute!(
+                self.terminal.backend_mut(),
+                event::DisableMouseCapture,
+                LeaveAlternateScreen,
+                cursor::Show
+            );
+        } else {
+            let _ = execute!(
+                self.terminal.backend_mut(),
+                event::DisableMouseCapture,
+                cursor::Show
+            );
+        }
+        let _ = self.terminal.show_cursor();
+    }
+}
+
+fn fuzzy_session_indices(candidates: &[SessionPickerCandidate], query: &str) -> Vec<usize> {
+    let needle = query.trim().to_ascii_lowercase();
+    let mut matches = candidates
+        .iter()
+        .enumerate()
+        .filter_map(|(index, candidate)| {
+            if needle.is_empty() {
+                return Some((index, 0_usize));
+            }
+            let haystack = format!("{} {} {}", candidate.title, candidate.detail, candidate.id)
+                .to_ascii_lowercase();
+            if let Some(position) = haystack.find(&needle) {
+                return Some((index, position));
+            }
+            let mut cursor = 0_usize;
+            for character in needle.chars() {
+                let relative = haystack[cursor..].find(character)?;
+                cursor += relative + character.len_utf8();
+            }
+            Some((index, cursor + haystack.len()))
+        })
+        .collect::<Vec<_>>();
+    matches.sort_by_key(|(index, score)| (*score, *index));
+    matches.into_iter().map(|(index, _)| index).collect()
+}
+
+fn render_session_picker(
+    frame: &mut ratatui::Frame<'_>,
+    candidates: &[SessionPickerCandidate],
+    filtered: &[usize],
+    query: &str,
+    selected: usize,
+) {
+    let area = frame.area();
+    let content = if area.width > 96 {
+        let horizontal = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Percentage(18),
+                Constraint::Percentage(64),
+                Constraint::Percentage(18),
+            ])
+            .split(area);
+        horizontal[1]
+    } else {
+        area
+    };
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2),
+            Constraint::Length(3),
+            Constraint::Min(3),
+            Constraint::Length(2),
+        ])
+        .split(content);
+    frame.render_widget(
+        Paragraph::new("Resume a conversation")
+            .style(Style::default().add_modifier(Modifier::BOLD)),
+        rows[0],
+    );
+    frame.render_widget(
+        Paragraph::new(query).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Search titles, ids, and projects "),
+        ),
+        rows[1],
+    );
+    let visible_height = rows[2].height.saturating_sub(2) as usize;
+    let offset = selected.saturating_sub(visible_height.saturating_sub(1));
+    let items = filtered
+        .iter()
+        .skip(offset)
+        .take(visible_height.max(1))
+        .map(|index| {
+            let candidate = &candidates[*index];
+            ListItem::new(vec![
+                Line::from(Span::styled(
+                    candidate.title.clone(),
+                    Style::default().add_modifier(Modifier::BOLD),
+                )),
+                Line::from(Span::styled(
+                    candidate.detail.clone(),
+                    Style::default().fg(Color::DarkGray),
+                )),
+            ])
+        })
+        .collect::<Vec<_>>();
+    let mut state = ListState::default()
+        .with_selected((!items.is_empty()).then_some(selected.saturating_sub(offset)));
+    frame.render_stateful_widget(
+        List::new(items)
+            .block(Block::default().borders(Borders::ALL))
+            .highlight_style(Style::default().bg(Color::DarkGray)),
+        rows[2],
+        &mut state,
+    );
+    let footer = if filtered.is_empty() {
+        "No matching conversations · Esc cancels"
+    } else {
+        "↑↓ select · Enter resume · type to filter · Esc cancel"
+    };
+    frame.render_widget(
+        Paragraph::new(footer).style(Style::default().fg(Color::DarkGray)),
+        rows[3],
+    );
+}
+
+/// Opens a searchable Codex-style terminal picker and returns the selected stable id.
+pub fn select_session(
+    candidates: &[SessionPickerCandidate],
+    no_alt_screen: bool,
+) -> io::Result<Option<String>> {
+    if candidates.is_empty() {
+        return Ok(None);
+    }
+    let mut terminal = SessionPickerTerminal::enter(no_alt_screen)?;
+    let mut query = String::new();
+    let mut selected = 0_usize;
+    loop {
+        let filtered = fuzzy_session_indices(candidates, &query);
+        selected = selected.min(filtered.len().saturating_sub(1));
+        terminal.terminal.draw(|frame| {
+            render_session_picker(frame, candidates, &filtered, &query, selected);
+        })?;
+
+        match event::read()? {
+            Event::Key(key) if key.kind == event::KeyEventKind::Press => match key.code {
+                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    return Ok(None);
+                }
+                KeyCode::Esc => return Ok(None),
+                KeyCode::Enter => {
+                    if let Some(index) = filtered.get(selected) {
+                        return Ok(Some(candidates[*index].id.clone()));
+                    }
+                }
+                KeyCode::Up => selected = selected.saturating_sub(1),
+                KeyCode::Down => {
+                    selected = (selected + 1).min(filtered.len().saturating_sub(1));
+                }
+                KeyCode::Backspace => {
+                    query.pop();
+                    selected = 0;
+                }
+                KeyCode::Char(character)
+                    if !key
+                        .modifiers
+                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                {
+                    query.push(character);
+                    selected = 0;
+                }
+                _ => {}
+            },
+            Event::Paste(value) => {
+                query.push_str(&value.replace(['\r', '\n'], ""));
+                selected = 0;
+            }
+            Event::Mouse(mouse) => match mouse.kind {
+                MouseEventKind::ScrollUp => selected = selected.saturating_sub(1),
+                MouseEventKind::ScrollDown => {
+                    selected = (selected + 1).min(filtered.len().saturating_sub(1));
+                }
+                _ => {}
+            },
+            _ => {}
+        }
     }
 }
 
@@ -1423,6 +1661,47 @@ mod tests {
             plugin_revision_id: None,
             installation_revision: None,
         })
+    }
+
+    #[test]
+    fn session_picker_searches_titles_projects_and_ids_with_fuzzy_fallback() {
+        let candidates = vec![
+            SessionPickerCandidate {
+                id: "first-id".into(),
+                title: "Release verification".into(),
+                detail: "MetaCog · interactive".into(),
+            },
+            SessionPickerCandidate {
+                id: "second-id".into(),
+                title: "Structured output".into(),
+                detail: "ExampleSite · non-interactive".into(),
+            },
+        ];
+        assert_eq!(fuzzy_session_indices(&candidates, "structured"), vec![1]);
+        assert_eq!(fuzzy_session_indices(&candidates, "examplesite"), vec![1]);
+        assert_eq!(fuzzy_session_indices(&candidates, "rlvrf"), vec![0]);
+        assert_eq!(fuzzy_session_indices(&candidates, "second-id"), vec![1]);
+    }
+
+    #[test]
+    fn session_picker_renders_at_compact_and_wide_terminal_sizes() {
+        let candidates = (0..20)
+            .map(|index| SessionPickerCandidate {
+                id: format!("conversation-{index}"),
+                title: format!("Conversation {index}"),
+                detail: "Project · interactive · 2026-08-28 22:00 UTC".into(),
+            })
+            .collect::<Vec<_>>();
+        let filtered = fuzzy_session_indices(&candidates, "conversation");
+        for (width, height) in [(48, 12), (96, 18), (180, 30)] {
+            let backend = ratatui::backend::TestBackend::new(width, height);
+            let mut terminal = Terminal::new(backend).expect("test terminal");
+            terminal
+                .draw(|frame| {
+                    render_session_picker(frame, &candidates, &filtered, "conversation", 19);
+                })
+                .expect("picker should render without clipping or panics");
+        }
     }
 
     #[test]

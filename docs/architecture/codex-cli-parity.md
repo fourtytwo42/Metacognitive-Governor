@@ -4,8 +4,8 @@ Last verified 2026-08-28 against:
 
 - pinned Codex app-server `0.150.1` schema
   `844b52d4a5a8cda58794e28b3b119c3a3d20a588b7db83209c298bec62704092`;
-- current official [Codex CLI command reference](https://developers.openai.com/codex/cli/reference/);
-- current official [slash-command reference](https://developers.openai.com/codex/cli/slash-commands/).
+- current official [Codex CLI command reference](https://learn.chatgpt.com/docs/developer-commands?surface=cli);
+- current official [slash-command reference](https://learn.chatgpt.com/docs/reference/slash-commands).
 
 This is a gap ledger, not a completion claim. `Native` means the interaction
 and effect match current Codex. `MetaCog` means the same objective is supported
@@ -20,8 +20,8 @@ is no usable equivalent. MetaCog-only operations remain under `/mcg` or
 | --- | --- | --- | --- |
 | Terminal | Transcript, multiline composer, palettes, history, `Ctrl+R`, `Ctrl+O`, `Ctrl+L`, steering, queueing, reconnect/replay, `--no-alt-screen` | Native | `Ctrl+L` clears only the rendered transcript; durable conversation history and replay remain intact. Initial image attachments enter the same durable mention queue as interactive picker selections. Inline mode preserves terminal scrollback without entering the alternate screen. |
 | References | `@`, `/mention`, `$skill`, `$app` | Native | Files/folders, explicitly attached resources, MetaCog plugins, Codex skills, Apps, and initial image attachments use bounded searchable completion. `$` lists accessible enabled Apps and skills; `/apps` inserts the selected `$app-id` instead of sending a command. |
-| Sessions | `/new`, `/clear`, `/resume`, `/rename`, `/fork`, `/side`/`/btw`, `/archive`, `/delete`, `/exit`/`/quit` | Partial | Cycle 1 adds clear naming and archive confirmation/exit; selectors and side-session presentation need comparison. |
-| Work | `/review`, `/diff`, `/compact`, `/copy`, `/status`, `/usage`, `/raw` | Partial | Review needs base/commit selection; raw must expose terminal scrollback; usage/status need exact presentation. |
+| Sessions | `/new`, `/clear`, `/resume`, `/rename`, `/fork`, `/side`/`/btw`, `/archive`, `/delete`, `/exit`/`/quit` | Partial | Searchable session selection, exact selectors, archive confirmation, and exit are native. Saved/current directory choice and side-session presentation still need comparison. |
+| Work | `/review`, `/diff`, `/compact`, `/copy`, `/status`, `/usage`, `/raw` | Partial | Top-level review targets and human findings are native; interactive review target picking, raw terminal scrollback, and exact usage/status presentation remain. |
 | Execution | `/model`, `/fast`, `/personality`, `/permissions`, `/approve`, `/plan`, `/goal` | Partial | Cycle 15 adds live project-aware Codex permission-profile discovery and durable selection in the nested `/permissions` picker. Exact remaining Plan/Goal edge cases are pending. Plan is unavailable while running as of Cycle 1. |
 | Background work | `!`, `/ps`, `/stop`/`/clean` | Native | Cycle 1 makes stop/clean settle all conversation-owned commands. |
 | Context | `/skills`, `/apps`, `/plugins`, `/mcp`, `/memories`, `/agent`, `/subagents` | Partial | `/apps` matches current picker/insertion behavior. Several other commands still print discovery data; agent selection does not replace the transcript viewport. |
@@ -43,8 +43,8 @@ Environment variables alone are not capability discovery.
 | `mcp`, `plugin` | MetaCog | Governed management exists; exact syntax and marketplace operations remain incomplete. |
 | `archive`, `unarchive`, `delete` | Native | IDs take precedence over exact names; deletion previews descendants, prompts by default, restricts forced deletion to UUIDs, and uses the existing transactional safety gate. |
 | `completion` | Native | Bash, Zsh, Fish, PowerShell (`power-shell`), and Elvish completions include both Codex-compatible and MetaCog-native commands and work without the daemon. |
-| `resume`, `fork` | Partial | IDs, exact names, project-scoped `--last`, `--all`, durable forks, and terminal reopening work. The temporary numbered picker must be replaced by the same searchable TUI overlay, and non-interactive session classification/current-vs-saved-directory choice remain. |
-| `review` | Partial | Uncommitted, base branch, commit/title, stdin, and custom-instruction targets use the native read-only review API. Human-formatted findings and remaining global overrides need exact alignment. |
+| `resume`, `fork` | Partial | IDs, exact names, project-scoped `--last`, `--all`, durable forks, searchable terminal selection, and terminal reopening work. `resume --include-non-interactive` includes durably classified exec/consumer sessions while explicit IDs and names always remain addressable. The current-vs-saved-directory choice and `tui.resume_cwd` preference remain. |
+| `review` | Partial | Uncommitted, base branch, commit/title, stdin, and custom-instruction targets use the native read-only review API and render only the final human-readable finding instead of protocol JSON. Remaining global overrides need exact alignment. |
 | `login`, `logout` | Partial | Browser OAuth, status, and device-wide logout use the shared Codex app-server account. Device auth, API-key stdin, and access-token stdin remain unavailable from the pinned app-server adapter. |
 | `app` | Partial | `mcg app [PATH]` is daemon-free, validates the workspace, prints the canonical Windows handoff path, and launches MetaCog by path on macOS. Direct Windows desktop launch/deep-linking to the active conversation remains. |
 | `features` | Native | `list`, `enable`, and `disable` match Codex output and use the pinned app-server's shared configuration. Ordered global `--enable`/`--disable` and `-c features.*=bool` create session-local overrides without mutating that configuration. |
@@ -53,7 +53,8 @@ Environment variables alone are not capability discovery.
 | `migrate-rollouts` | Native | Daemon-free pass-through to the pinned Codex 0.150.1 migration engine with dry-run default, `--apply`, repeated `--thread`, throughput, JSON, and verbose controls. MetaCog does not reinterpret Codex rollout storage. |
 | global `--approve-for-me` | Native | Maps to MetaCog's existing governed Auto Review mode and forces the workspace-write sandbox and on-request policy while organization limits remain authoritative. It is mutually exclusive with explicit approval policy and full bypass. |
 | `sandbox` | Native | `mcg sandbox` is a daemon-free pass-through to the pinned Codex 0.150.1 Windows restricted-token sandbox. It preserves explicit state JSON, readable roots, network disabling, named permission/config profiles, managed configuration, working directory, literal command arguments, and repeatable config/feature overrides. The child process exit code and diagnostics pass through unchanged. |
-| `apply`, `update`, `mcp-server` | Missing | `apply` must not mutate Git outside MetaCog's review/apply authority, `update` must update the signed MetaCog bundle rather than only its Codex sidecar, and `mcp-server` must not expose an ungoverned agent endpoint. Native governed equivalents remain to be implemented. |
+| `apply`, `update` | Missing | `apply` must not mutate Git outside MetaCog's review/apply authority, and `update` must update the signed MetaCog bundle rather than only its Codex sidecar. Native governed equivalents remain to be implemented. |
+| `mcp-server` | Superseded | Current Codex documentation marks this family deprecated and directs integrations to app-server. MetaCog already uses its pinned app-server contract and will not add a new deprecated ungoverned endpoint. |
 | `app-server`, `cloud`, `debug`, `execpolicy`, `remote-control` | Missing | Experimental families remain gated until their contracts can be safely supported. |
 
 ## Global flag compatibility
@@ -170,6 +171,17 @@ unconstrained so it can still delegate, but the final owner answer is constraine
 schema failure is terminal and never replaced with nonconforming fallback text.
 Plan and active Goal modes reject structured output because their interactive
 continuation contracts are incompatible with a single final JSON document.
+
+Cycle 19 adds a durable interactive/non-interactive conversation classification,
+uses it for Codex-compatible `resume --include-non-interactive`, and replaces the
+blocking numbered resume/fork prompt with a searchable resize-safe Ratatui picker.
+Direct session IDs and exact names remain addressable regardless of picker filtering.
+Native `review` now extracts the latest completed `agentMessage` and prints the
+human finding while retaining visible protocol failures; raw review turn JSON is
+no longer presented as the ordinary result. A resumed conversation still keeps
+its saved MetaCog project binding because that binding is an authority boundary;
+current-vs-saved-directory selection remains an explicit gap until it can be
+modeled without silently changing project authority.
 
 Codex-compatible support remains incomplete for local providers/OSS, remote
 endpoints/authentication, exact event schemas, and hook trust. Current Codex 0.150.1

@@ -67,17 +67,18 @@ use mcg_config::{AppConfig, AutonomyPreset, CliTuiPreferences, UserSettings};
 use mcg_domain::{
     AgentWakeState, ApprovalMode, CodexConfigOverride, ComposerMentionInput, ComputerUseCapability,
     ComputerUseRegion, ComputerUseTarget, Conversation, ConversationGoalStatus, ConversationId,
-    ConversationMode, ConversationRole, ConversationState, ConversationTurnId,
-    ConversationTurnState, ConversationView, CoordinationBatchState, ExecutionApprovalPolicy,
-    ExecutionPreferences, ExecutionSandboxMode, MemoryClaimId, MemoryTransferId, MentionCandidate,
-    MentionKind, NotificationSeverity, OrganizationId, OrganizationImportId,
-    OrganizationRevisionId, OrganizationShareReviewId, PlatformCapabilitySnapshot, PlatformSession,
-    PlatformSessionId, PlatformSessionKind, PluginCapabilityGrant, PluginInstallSource,
-    PluginInstallation, PluginInvocationId, PluginRevision, PluginRevisionId, PluginSignature,
-    PluginSignatureState, ProjectId, ReviewedTopologyPlanId, RunId, ScheduleId, ScheduleState,
-    ScheduleTrigger, SchedulerNotification, SchedulerNotificationId, Site, SiteDeploymentCommand,
-    SiteDeploymentId, SiteEnvironment, SiteHealthCheckId, SiteId, SiteMonitor, SiteState, SshHost,
-    SshHostId, SshWorkflow, SshWorkflowId, TaskEnvelope, TaskId, TaskState, WorkItemId,
+    ConversationInteractionKind, ConversationMode, ConversationRole, ConversationState,
+    ConversationTurnId, ConversationTurnState, ConversationView, CoordinationBatchState,
+    ExecutionApprovalPolicy, ExecutionPreferences, ExecutionSandboxMode, MemoryClaimId,
+    MemoryTransferId, MentionCandidate, MentionKind, NotificationSeverity, OrganizationId,
+    OrganizationImportId, OrganizationRevisionId, OrganizationShareReviewId,
+    PlatformCapabilitySnapshot, PlatformSession, PlatformSessionId, PlatformSessionKind,
+    PluginCapabilityGrant, PluginInstallSource, PluginInstallation, PluginInvocationId,
+    PluginRevision, PluginRevisionId, PluginSignature, PluginSignatureState, ProjectId,
+    ReviewedTopologyPlanId, RunId, ScheduleId, ScheduleState, ScheduleTrigger,
+    SchedulerNotification, SchedulerNotificationId, Site, SiteDeploymentCommand, SiteDeploymentId,
+    SiteEnvironment, SiteHealthCheckId, SiteId, SiteMonitor, SiteState, SshHost, SshHostId,
+    SshWorkflow, SshWorkflowId, TaskEnvelope, TaskId, TaskState, WorkItemId,
     effective_delegation_attempt_ids,
 };
 use mcg_events::EventEnvelope;
@@ -117,8 +118,8 @@ use zeroize::Zeroize;
 
 use commands::{CommandContext, QueuePolicy, SLASH_COMMANDS, command_named};
 use interactive::{
-    PaletteCandidate, PaletteKind, PaletteRequest, SlashCandidate, SubmittedLine, TuiAction,
-    TuiModel, TuiTerminal, prompt_for_question,
+    PaletteCandidate, PaletteKind, PaletteRequest, SessionPickerCandidate, SlashCandidate,
+    SubmittedLine, TuiAction, TuiModel, TuiTerminal, prompt_for_question, select_session,
 };
 
 #[derive(Serialize)]
@@ -3043,7 +3044,7 @@ async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
         CodexCompatCommand::Resume(args) => {
             let ResumeArgs {
                 all,
-                include_non_interactive: _,
+                include_non_interactive,
                 last,
                 session,
             } = *args;
@@ -3056,6 +3057,8 @@ async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
                 last,
                 all,
                 Some(false),
+                include_non_interactive,
+                no_alt_screen,
             )
             .await?;
             let preferences = codex_execution_preferences_override(
@@ -3095,6 +3098,8 @@ async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
                 false,
                 true,
                 Some(false),
+                true,
+                false,
             )
             .await?;
             let preferences = codex_execution_preferences_override(
@@ -3146,6 +3151,8 @@ async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
                 last,
                 all,
                 Some(false),
+                true,
+                no_alt_screen,
             )
             .await?;
             let fork: Conversation = decode_api_response(
@@ -3486,8 +3493,24 @@ async fn current_cli_project_id(
         .project_id)
 }
 
+fn filter_cli_session_candidates(
+    sessions: &mut Vec<Conversation>,
+    project_id: Option<ProjectId>,
+    include_non_interactive: bool,
+) {
+    if !include_non_interactive {
+        sessions.retain(|conversation| {
+            conversation.interaction_kind == ConversationInteractionKind::Interactive
+        });
+    }
+    if let Some(project_id) = project_id {
+        sessions.retain(|conversation| conversation.project_id == Some(project_id));
+    }
+}
+
 fn choose_cli_session(
     sessions: &[Conversation],
+    no_alt_screen: bool,
 ) -> Result<Conversation, Box<dyn std::error::Error>> {
     if !std::io::stdin().is_terminal() {
         return Err("SESSION or --last is required when standard input is not a terminal".into());
@@ -3495,28 +3518,32 @@ fn choose_cli_session(
     if sessions.is_empty() {
         return Err("no matching saved conversations were found".into());
     }
-    eprintln!("Select a conversation:");
-    for (index, conversation) in sessions.iter().enumerate() {
-        eprintln!(
-            "  {}. {}  {}  ({})",
-            index + 1,
-            conversation.title,
-            conversation.id,
-            conversation.updated_at
-        );
-    }
-    eprint!("> ");
-    std::io::stderr().flush()?;
-    let mut selection = String::new();
-    std::io::stdin().read_line(&mut selection)?;
-    let index = selection
-        .trim()
-        .parse::<usize>()
-        .map_err(|_| "conversation selection must be a number")?;
+    let candidates = sessions
+        .iter()
+        .map(|conversation| SessionPickerCandidate {
+            id: conversation.id.to_string(),
+            title: conversation.title.clone(),
+            detail: format!(
+                "{} · {} · {}",
+                conversation
+                    .project_id
+                    .map_or_else(|| "No project".to_owned(), |id| id.to_string()),
+                match conversation.interaction_kind {
+                    ConversationInteractionKind::Interactive => "interactive",
+                    ConversationInteractionKind::NonInteractive => "non-interactive",
+                },
+                conversation.updated_at.format("%Y-%m-%d %H:%M UTC")
+            ),
+        })
+        .collect::<Vec<_>>();
+    let selected = select_session(&candidates, no_alt_screen)?
+        .ok_or("conversation selection was cancelled")?;
+    let selected = ConversationId::from_str(&selected)?;
     sessions
-        .get(index.saturating_sub(1))
+        .iter()
+        .find(|conversation| conversation.id == selected)
         .cloned()
-        .ok_or_else(|| "conversation selection is out of range".into())
+        .ok_or_else(|| "selected conversation is no longer available".into())
 }
 
 async fn resolve_cli_session(
@@ -3528,6 +3555,8 @@ async fn resolve_cli_session(
     last: bool,
     all: bool,
     archived_state: Option<bool>,
+    include_non_interactive: bool,
+    no_alt_screen: bool,
 ) -> Result<Conversation, Box<dyn std::error::Error>> {
     if selector.is_some() && last {
         return Err("SESSION and --last cannot be used together".into());
@@ -3563,10 +3592,12 @@ async fn resolve_cli_session(
             .into()),
         };
     }
-    if !all {
-        let project_id = current_cli_project_id(client, host, token, project).await?;
-        sessions.retain(|conversation| conversation.project_id == Some(project_id));
-    }
+    let project_id = if all {
+        None
+    } else {
+        Some(current_cli_project_id(client, host, token, project).await?)
+    };
+    filter_cli_session_candidates(&mut sessions, project_id, include_non_interactive);
     sessions.sort_by_key(|conversation| std::cmp::Reverse(conversation.updated_at));
     if last {
         sessions
@@ -3574,7 +3605,7 @@ async fn resolve_cli_session(
             .next()
             .ok_or_else(|| "no matching saved conversations were found".into())
     } else {
-        choose_cli_session(&sessions)
+        choose_cli_session(&sessions, no_alt_screen)
     }
 }
 
@@ -3595,6 +3626,8 @@ async fn run_cli_archive(
         false,
         true,
         Some(!archived),
+        true,
+        false,
     )
     .await?;
     let updated: Conversation = decode_api_response(
@@ -3672,6 +3705,8 @@ async fn run_cli_delete(
         false,
         true,
         None,
+        true,
+        false,
     )
     .await?;
     let preview: ConversationDeletionPreview = decode_api_response(
@@ -4369,6 +4404,7 @@ async fn create_interactive_conversation(
                 title: Some(title.to_owned()),
                 project_id,
                 execution_preferences: preferences.clone(),
+                interaction_kind: ConversationInteractionKind::Interactive,
             })
             .send()
             .await?,
@@ -6463,6 +6499,8 @@ async fn run_codex_compatible_exec(
                 last,
                 all,
                 Some(false),
+                true,
+                false,
             )
             .await?;
             if let Some(path) = output_schema.as_deref() {
@@ -6602,7 +6640,7 @@ async fn run_codex_compatible_review(
         "run native read-only review",
     )
     .await?;
-    println!("{}", serde_json::to_string_pretty(&result.turn)?);
+    let rendered = render_codex_review_turn(&result.turn);
     let _: Conversation = decode_api_response(
         client
             .post(format!(
@@ -6616,7 +6654,34 @@ async fn run_codex_compatible_review(
         "archive review control conversation",
     )
     .await?;
+    println!("{}", rendered?);
     Ok(())
+}
+
+fn render_codex_review_turn(
+    turn: &serde_json::Value,
+) -> Result<String, Box<dyn std::error::Error>> {
+    if turn.get("status").and_then(serde_json::Value::as_str) == Some("failed") {
+        let message = turn
+            .pointer("/error/message")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("Codex review failed without a diagnostic");
+        return Err(message.to_owned().into());
+    }
+    let finding = turn
+        .get("items")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|items| {
+            items.iter().rev().find_map(|item| {
+                (item.get("type").and_then(serde_json::Value::as_str) == Some("agentMessage"))
+                    .then(|| item.get("text").and_then(serde_json::Value::as_str))
+                    .flatten()
+                    .map(str::trim)
+                    .filter(|text| !text.is_empty())
+            })
+        })
+        .ok_or("Codex review completed without human-readable findings")?;
+    Ok(finding.to_owned())
 }
 
 async fn run_consumer_submission(
@@ -6646,6 +6711,7 @@ async fn run_consumer_submission(
                 title: Some(title),
                 project_id: Some(project.project.project_id),
                 execution_preferences: preferences.clone(),
+                interaction_kind: ConversationInteractionKind::NonInteractive,
             })
             .send()
             .await?,
@@ -10918,6 +10984,7 @@ async fn run_conversation(
                             speed,
                             approval.into(),
                         ),
+                        interaction_kind: ConversationInteractionKind::Interactive,
                     })
                     .send()
                     .await?,
@@ -11989,6 +12056,63 @@ async fn resolve_approval(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_review_turn_renders_only_the_latest_human_finding() {
+        let turn = serde_json::json!({
+            "id": "turn-1",
+            "status": "completed",
+            "items": [
+                {"id":"reasoning","type":"reasoning","summary":[]},
+                {"id":"message-1","type":"agentMessage","text":"First draft"},
+                {"id":"message-2","type":"agentMessage","text":"## Findings\n\nNo issues found."}
+            ]
+        });
+        assert_eq!(
+            render_codex_review_turn(&turn).expect("review text"),
+            "## Findings\n\nNo issues found."
+        );
+    }
+
+    #[test]
+    fn failed_or_empty_native_review_turns_fail_visibly() {
+        let failed = serde_json::json!({
+            "status": "failed",
+            "error": {"message": "review engine unavailable"},
+            "items": []
+        });
+        assert_eq!(
+            render_codex_review_turn(&failed)
+                .expect_err("failed review")
+                .to_string(),
+            "review engine unavailable"
+        );
+        assert!(
+            render_codex_review_turn(&serde_json::json!({"status":"completed","items":[]}))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn resume_candidate_filter_honors_project_and_non_interactive_switches() {
+        let project = ProjectId::new();
+        let other_project = ProjectId::new();
+        let mut interactive = Conversation::new("Interactive", Some(project));
+        interactive.interaction_kind = ConversationInteractionKind::Interactive;
+        let mut non_interactive = Conversation::new("Exec", Some(project));
+        non_interactive.interaction_kind = ConversationInteractionKind::NonInteractive;
+        let other = Conversation::new("Other", Some(other_project));
+
+        let mut default_candidates =
+            vec![interactive.clone(), non_interactive.clone(), other.clone()];
+        filter_cli_session_candidates(&mut default_candidates, Some(project), false);
+        assert_eq!(default_candidates, vec![interactive.clone()]);
+
+        let mut inclusive = vec![interactive, non_interactive.clone(), other];
+        filter_cli_session_candidates(&mut inclusive, Some(project), true);
+        assert_eq!(inclusive.len(), 2);
+        assert!(inclusive.contains(&non_interactive));
+    }
 
     #[test]
     fn consumer_launch_defaults_allow_complete_generated_file_calls() {

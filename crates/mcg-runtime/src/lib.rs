@@ -67,16 +67,17 @@ use mcg_domain::{
     ConversationAgentKind, ConversationAgentSession, ConversationAgentSessionId,
     ConversationAgentSessionState, ConversationDeliveryTarget, ConversationGoal,
     ConversationGoalStatus, ConversationId, ConversationInputOption, ConversationInputQuestion,
-    ConversationInputRequest, ConversationMention, ConversationMessage, ConversationMessageId,
-    ConversationMode, ConversationPreview, ConversationPreviewId, ConversationPreviewState,
-    ConversationPreviewStrategy, ConversationRole, ConversationState, ConversationTeamState,
-    ConversationTurn, ConversationTurnId, ConversationTurnState, ConversationView,
-    ConversationVisibility, CoordinationBatch, CoordinationBatchId, CoordinationBatchState,
-    CoordinatorReviewDecision, EvaluationId, ExecutionPreferences, ExperimentBenchmarkId,
-    ExperimentDecisionId, ExperimentId, GovernorProposalId, LeaseId, ManagedWorktree,
-    ManagedWorktreeId, ManagedWorktreeState, MemoryClaimId, MemoryTransferId, MentionCandidate,
-    MentionKind, MentionTarget, NotificationSeverity, OrganizationId, OrganizationImportId,
-    OrganizationRevisionId, OrganizationShareReviewId, PLATFORM_SCHEMA_VERSION, PlatformCapability,
+    ConversationInputRequest, ConversationInteractionKind, ConversationMention,
+    ConversationMessage, ConversationMessageId, ConversationMode, ConversationPreview,
+    ConversationPreviewId, ConversationPreviewState, ConversationPreviewStrategy, ConversationRole,
+    ConversationState, ConversationTeamState, ConversationTurn, ConversationTurnId,
+    ConversationTurnState, ConversationView, ConversationVisibility, CoordinationBatch,
+    CoordinationBatchId, CoordinationBatchState, CoordinatorReviewDecision, EvaluationId,
+    ExecutionPreferences, ExperimentBenchmarkId, ExperimentDecisionId, ExperimentId,
+    GovernorProposalId, LeaseId, ManagedWorktree, ManagedWorktreeId, ManagedWorktreeState,
+    MemoryClaimId, MemoryTransferId, MentionCandidate, MentionKind, MentionTarget,
+    NotificationSeverity, OrganizationId, OrganizationImportId, OrganizationRevisionId,
+    OrganizationShareReviewId, PLATFORM_SCHEMA_VERSION, PlatformCapability,
     PlatformCapabilityAvailability, PlatformCapabilityKind, PlatformCapabilitySnapshot,
     PlatformCapabilitySnapshotId, PlatformSession, PlatformSessionEvent, PlatformSessionId,
     PlatformSessionKind, PlatformSessionOwner, PlatformSessionState, PluginCapabilityGrant,
@@ -3816,6 +3817,7 @@ impl AppRuntime {
         title: Option<String>,
         project_id: Option<ProjectId>,
         mut execution_preferences: ExecutionPreferences,
+        interaction_kind: ConversationInteractionKind,
     ) -> Result<Conversation, RuntimeError> {
         if let Some(project_id) = project_id {
             if self.store()?.project(project_id)?.is_none() {
@@ -3830,6 +3832,7 @@ impl AppRuntime {
             project_id,
         );
         conversation.execution_preferences = execution_preferences;
+        conversation.interaction_kind = interaction_kind;
         let event = self.store()?.create_conversation(&conversation, None)?;
         let _ = self.event_sender.send(event);
         Ok(conversation)
@@ -3943,6 +3946,7 @@ impl AppRuntime {
         } else {
             ConversationVisibility::Normal
         };
+        child.interaction_kind = parent.conversation.interaction_kind;
         let event = self.store()?.create_conversation(&child, None)?;
         let _ = self.event_sender.send(event);
 
@@ -27012,6 +27016,7 @@ mod tests {
                 Some("Springfield IT Support".into()),
                 Some(project_id),
                 ExecutionPreferences::default(),
+                ConversationInteractionKind::Interactive,
             )
             .expect("conversation");
         let now = Utc::now();
@@ -27086,6 +27091,7 @@ mod tests {
                 Some("Queued failure settlement".into()),
                 None,
                 ExecutionPreferences::default(),
+                ConversationInteractionKind::Interactive,
             )
             .expect("conversation");
         let now = Utc::now();

@@ -2268,6 +2268,8 @@ pub struct Conversation {
     pub fork_origin_turn_id: Option<ConversationTurnId>,
     #[serde(default)]
     pub visibility: ConversationVisibility,
+    #[serde(default)]
+    pub interaction_kind: ConversationInteractionKind,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -2289,10 +2291,19 @@ impl Conversation {
             parent_conversation_id: None,
             fork_origin_turn_id: None,
             visibility: ConversationVisibility::Normal,
+            interaction_kind: ConversationInteractionKind::Interactive,
             created_at: now,
             updated_at: now,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversationInteractionKind {
+    #[default]
+    Interactive,
+    NonInteractive,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -2540,6 +2551,7 @@ mod tests {
         object.remove("mode");
         object.remove("goal");
         object.remove("pending_input_requests");
+        object.remove("interaction_kind");
 
         let decoded: Conversation = serde_json::from_value(document).expect("legacy conversation");
         assert_eq!(decoded.mode, ConversationMode::Default);
@@ -2565,6 +2577,10 @@ mod tests {
         );
         assert!(decoded.goal.is_none());
         assert!(decoded.pending_input_requests.is_empty());
+        assert_eq!(
+            decoded.interaction_kind,
+            ConversationInteractionKind::Interactive
+        );
     }
 
     #[test]

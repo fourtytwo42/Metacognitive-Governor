@@ -36,16 +36,16 @@ use mcg_config::{AutonomyPreset, CliTuiPreferences, UserSettings, UserSettingsRe
 use mcg_domain::{
     AgentDelegationId, ApprovalId, BlackboardEntryId, BlackboardEntryKind, ComposerMentionInput,
     ComputerActionBatchId, ComputerUseCapability, ComputerUseTarget, Conversation,
-    ConversationAgentSessionId, ConversationGoalStatus, ConversationId, ConversationMode,
-    ConversationPreview, ConversationPreviewId, ConversationTeamState, ConversationTurnId,
-    ConversationTurnState, ConversationView, ExecutionPreferences, ExperimentId,
-    GovernorProposalId, ManagedWorktree, MemoryClaimId, MemoryTransferId, MentionCandidate,
-    NotificationSeverity, OrganizationId, OrganizationImportId, OrganizationRevisionId,
-    OrganizationShareReviewId, PlatformCapabilitySnapshot, PlatformSession, PlatformSessionEvent,
-    PlatformSessionId, PlatformSessionKind, PluginCapabilityGrant, PluginInstallation,
-    PluginInvocationId, PluginInvocationRecord, PluginRevision, ProjectId, ReviewedTopologyPlanId,
-    RiskLevel, RoleId, RunId, SCHEDULE_SCHEMA_VERSION, ScheduleDefinition, ScheduleId,
-    ScheduleOccurrence, ScheduleOccurrenceState, ScheduleState, ScheduleTrigger,
+    ConversationAgentSessionId, ConversationGoalStatus, ConversationId,
+    ConversationInteractionKind, ConversationMode, ConversationPreview, ConversationPreviewId,
+    ConversationTeamState, ConversationTurnId, ConversationTurnState, ConversationView,
+    ExecutionPreferences, ExperimentId, GovernorProposalId, ManagedWorktree, MemoryClaimId,
+    MemoryTransferId, MentionCandidate, NotificationSeverity, OrganizationId, OrganizationImportId,
+    OrganizationRevisionId, OrganizationShareReviewId, PlatformCapabilitySnapshot, PlatformSession,
+    PlatformSessionEvent, PlatformSessionId, PlatformSessionKind, PluginCapabilityGrant,
+    PluginInstallation, PluginInvocationId, PluginInvocationRecord, PluginRevision, ProjectId,
+    ReviewedTopologyPlanId, RiskLevel, RoleId, RunId, SCHEDULE_SCHEMA_VERSION, ScheduleDefinition,
+    ScheduleId, ScheduleOccurrence, ScheduleOccurrenceState, ScheduleState, ScheduleTrigger,
     SchedulerNotification, SchedulerNotificationId, SharedContextHit, Site, SiteDeployment,
     SiteDeploymentCommand, SiteDeploymentId, SiteEnvironment, SiteHealthCheck, SiteHealthCheckId,
     SiteId, SiteMonitor, SiteRevision, SiteState, SshAuthentication, SshHost, SshHostId,
@@ -180,6 +180,8 @@ pub struct CreateConversationRequest {
     pub project_id: Option<ProjectId>,
     #[serde(default)]
     pub execution_preferences: ExecutionPreferences,
+    #[serde(default)]
+    pub interaction_kind: ConversationInteractionKind,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -3878,6 +3880,7 @@ async fn create_conversation(
             request.title,
             request.project_id,
             request.execution_preferences,
+            request.interaction_kind,
         )
         .map_err(map_runtime_error)?;
     Ok((StatusCode::CREATED, Json(conversation)))
@@ -15871,10 +15874,20 @@ form.addEventListener('submit', (event) => {
     async fn conversation_event_stream_replays_only_the_requested_conversation_projection() {
         let runtime = test_runtime();
         let first = runtime
-            .create_conversation(None, None, ExecutionPreferences::default())
+            .create_conversation(
+                None,
+                None,
+                ExecutionPreferences::default(),
+                ConversationInteractionKind::Interactive,
+            )
             .expect("first conversation");
         let second = runtime
-            .create_conversation(None, None, ExecutionPreferences::default())
+            .create_conversation(
+                None,
+                None,
+                ExecutionPreferences::default(),
+                ConversationInteractionKind::Interactive,
+            )
             .expect("second conversation");
         let first_event = runtime
             .events_after(0)
@@ -21529,6 +21542,7 @@ form.addEventListener('submit', (event) => {
                             title: Some("Project-free roots".into()),
                             project_id: None,
                             execution_preferences: preferences.clone(),
+                            interaction_kind: ConversationInteractionKind::Interactive,
                         })
                         .expect("project-free request body"),
                     ))
@@ -21547,6 +21561,7 @@ form.addEventListener('submit', (event) => {
                             title: Some("Governed writable roots".into()),
                             project_id: Some(project.project_id),
                             execution_preferences: preferences,
+                            interaction_kind: ConversationInteractionKind::Interactive,
                         })
                         .expect("project request body"),
                     ))
@@ -21589,6 +21604,7 @@ form.addEventListener('submit', (event) => {
                                 output_schema: Some(schema.clone()),
                                 ..Default::default()
                             },
+                            interaction_kind: ConversationInteractionKind::Interactive,
                         })
                         .expect("structured conversation request"),
                     ))
@@ -21613,6 +21629,7 @@ form.addEventListener('submit', (event) => {
                                 output_schema: Some(serde_json::json!([])),
                                 ..Default::default()
                             },
+                            interaction_kind: ConversationInteractionKind::Interactive,
                         })
                         .expect("invalid structured conversation request"),
                     ))
@@ -21631,6 +21648,7 @@ form.addEventListener('submit', (event) => {
                 Some("CLI parent".into()),
                 None,
                 ExecutionPreferences::default(),
+                ConversationInteractionKind::Interactive,
             )
             .expect("parent conversation");
         let app = router(runtime.clone());
