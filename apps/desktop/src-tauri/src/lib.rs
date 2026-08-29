@@ -5,14 +5,15 @@ use mcg_agents::{
     ShadowExecutionReceipt, SupervisionObservation, TrustedOrganizationPublisher,
 };
 use mcg_api::{
-    AgentRunListResponse, AnswerConversationInputRequest, ApplyComputerActionsRequest,
-    ApprovalListResponse, ArchiveConversationRequest, AttachBrowserSessionRequest,
-    BackupListResponse, BackupSummaryResponse, CheckSiteHealthRequest, ClosePlatformSessionRequest,
-    CorrectMemoryClaimRequest, CreateConversationRequest, CreateEncryptedBackupRequest,
-    CreateGitHubRepository, CreateMemoryClaimRequest, CreateOrganizationRequest,
-    CreatePlatformSessionRequest, CreateScheduleRequest, CreateSiteMonitorRequest,
-    CreateSiteRequest, CreateSshHostRequest, CreateTaskRequest, DecideSharedOrganizationRequest,
-    DelegationMutationRequest, DelegationRetryRequest, DeploySiteRequest, DiscoverProjectRequest,
+    AgentRunListResponse, AnswerConversationInputRequest, ApplyCloudDiffRequest,
+    ApplyComputerActionsRequest, ApprovalListResponse, ArchiveConversationRequest,
+    AttachBrowserSessionRequest, BackupListResponse, BackupSummaryResponse, CheckSiteHealthRequest,
+    ClosePlatformSessionRequest, CloudDiffApplyListResponse, CorrectMemoryClaimRequest,
+    CreateConversationRequest, CreateEncryptedBackupRequest, CreateGitHubRepository,
+    CreateMemoryClaimRequest, CreateOrganizationRequest, CreatePlatformSessionRequest,
+    CreateScheduleRequest, CreateSiteMonitorRequest, CreateSiteRequest, CreateSshHostRequest,
+    CreateTaskRequest, DecideSharedOrganizationRequest, DelegationMutationRequest,
+    DelegationRetryRequest, DeploySiteRequest, DiscoverProjectRequest,
     ExperimentBenchmarkListResponse, ExperimentDecisionListResponse, ExperimentListResponse,
     GitHubConnectionStatus, GitHubLoginStart, GitHubRepository, GitHubRepositoryList,
     GovernorOverviewResponse, GovernorProposalListResponse, ImportOrganizationRequest,
@@ -24,9 +25,9 @@ use mcg_api::{
     OrganizationMutationResponse, OrganizationPublisherListResponse, OrganizationRevisionPreview,
     OrganizationShareReviewListResponse, OwnerGovernorApprovalRequest,
     PlatformSessionHistoryResponse, PlatformSessionListResponse, PluginInvocationHistoryResponse,
-    PluginListResponse, PreviewOrganizationRevisionRequest, ProjectListResponse,
-    ProjectMemoryTransferListResponse, ProjectTopologyPlan, ProviderListResponse,
-    PublishOrganizationRevisionRequest, RequestGovernorImplementationRequest,
+    PluginListResponse, PrepareCloudDiffApplyRequest, PreviewOrganizationRevisionRequest,
+    ProjectListResponse, ProjectMemoryTransferListResponse, ProjectTopologyPlan,
+    ProviderListResponse, PublishOrganizationRevisionRequest, RequestGovernorImplementationRequest,
     ResolveApprovalRequest, ReviewSharedOrganizationRequest, ReviewedTopologyPlan,
     ReviewedTopologyPlanListResponse, RevokeOrganizationPublisherRequest, RunSshOperationRequest,
     ScheduleHistoryResponse, ScheduleListResponse, SchedulerNotificationListResponse,
@@ -45,7 +46,7 @@ use mcg_api::{
 };
 use mcg_config::{AppConfig, UserSettings};
 use mcg_domain::{
-    Conversation, ConversationPreview, ConversationTeamState, ConversationView,
+    CloudDiffApply, Conversation, ConversationPreview, ConversationTeamState, ConversationView,
     PlatformCapabilitySnapshot, PlatformSession, PluginInstallation, ScheduleDefinition,
     SchedulerNotification, Site, SiteMonitor, SshHost, SshWorkflow, TaskEnvelope,
 };
@@ -1533,6 +1534,63 @@ async fn request_governor_implementation(
 #[tauri::command]
 async fn list_managed_worktrees() -> Result<ManagedWorktreeListResponse, String> {
     daemon_get("/api/v1/worktrees", "Managed worktree listing").await
+}
+
+#[tauri::command]
+async fn prepare_cloud_diff_apply(
+    project_id: String,
+    task_id: String,
+) -> Result<CloudDiffApply, String> {
+    let project_id = canonical_uuid(&project_id, "Project identity")?;
+    daemon_post(
+        &format!("/api/v1/projects/{project_id}/codex-cloud-applies"),
+        &PrepareCloudDiffApplyRequest {
+            task_id,
+            config_overrides: Vec::new(),
+            enable_features: Vec::new(),
+            disable_features: Vec::new(),
+        },
+        "Codex cloud diff preparation",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn list_cloud_diff_applies(project_id: String) -> Result<CloudDiffApplyListResponse, String> {
+    let project_id = canonical_uuid(&project_id, "Project identity")?;
+    daemon_get(
+        &format!("/api/v1/projects/{project_id}/codex-cloud-applies"),
+        "Codex cloud diff listing",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn apply_cloud_diff(
+    apply_id: String,
+    expected_revision: u64,
+) -> Result<CloudDiffApply, String> {
+    let apply_id = canonical_uuid(&apply_id, "Cloud diff apply identity")?;
+    daemon_post(
+        &format!("/api/v1/codex-cloud-applies/{apply_id}/apply"),
+        &ApplyCloudDiffRequest { expected_revision },
+        "Codex cloud diff integration",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn discard_cloud_diff_apply(
+    apply_id: String,
+    expected_revision: u64,
+) -> Result<CloudDiffApply, String> {
+    let apply_id = canonical_uuid(&apply_id, "Cloud diff apply identity")?;
+    daemon_post(
+        &format!("/api/v1/codex-cloud-applies/{apply_id}/discard"),
+        &ApplyCloudDiffRequest { expected_revision },
+        "Codex cloud diff discard",
+    )
+    .await
 }
 
 #[tauri::command]
@@ -3967,6 +4025,10 @@ pub fn run() {
             decide_governor_proposal,
             request_governor_implementation,
             list_managed_worktrees,
+            prepare_cloud_diff_apply,
+            list_cloud_diff_applies,
+            apply_cloud_diff,
+            discard_cloud_diff_apply,
             organization_assignments,
             set_global_organization_assignment,
             set_project_organization_assignment,

@@ -27,26 +27,26 @@ use mcg_agents::{
     SuccessCondition, SupervisionObservation, TaskComplexity,
 };
 use mcg_api::{
-    AnswerConversationInputRequest, ApplyComputerActionsRequest, ApprovalListResponse,
-    ArchiveConversationRequest, ArchiveProjectRequest, AssembleContextRequest,
-    AttachBrowserSessionRequest, BackupListResponse, BackupSummaryResponse, CheckSiteHealthRequest,
-    CodexResumeCwdQuery, ConversationDeletionPreview, ConversationDeletionResult,
-    ConversationListResponse, ConversationStreamEvent, CorrectMemoryClaimRequest,
-    CreateConversationRequest, CreateEncryptedBackupRequest, CreateMemoryClaimRequest,
-    CreateOrganizationRequest, CreatePlatformSessionRequest, CreateScheduleRequest,
-    CreateSiteMonitorRequest, CreateSiteRequest, CreateSshHostRequest, CreateTaskRequest,
-    DecideSharedOrganizationRequest, DelegationMutationRequest, DelegationRetryRequest,
-    DeploySiteRequest, DiscoverProjectRequest, EvaluationMutationResponse, ExecuteAgentWorkRequest,
-    ExperimentBenchmarkListResponse, ExperimentDecisionListResponse, ExperimentListResponse,
-    ForkConversationRequest, ImportOrganizationRequest, ImportSharedOrganizationRequest,
-    InheritOrganizationRequest, InstallLocalPluginRequest, InstallRegistryPluginRequest,
-    InvokePluginRequest, LaunchTaskRequest, LaunchTaskResponse, ManagedMemoryResponse,
-    McpListResponse, MemoryClaimHistoryResponse, MemoryClaimListResponse,
+    AnswerConversationInputRequest, ApplyCloudDiffRequest, ApplyComputerActionsRequest,
+    ApprovalListResponse, ArchiveConversationRequest, ArchiveProjectRequest,
+    AssembleContextRequest, AttachBrowserSessionRequest, BackupListResponse, BackupSummaryResponse,
+    CheckSiteHealthRequest, CodexResumeCwdQuery, ConversationDeletionPreview,
+    ConversationDeletionResult, ConversationListResponse, ConversationStreamEvent,
+    CorrectMemoryClaimRequest, CreateConversationRequest, CreateEncryptedBackupRequest,
+    CreateMemoryClaimRequest, CreateOrganizationRequest, CreatePlatformSessionRequest,
+    CreateScheduleRequest, CreateSiteMonitorRequest, CreateSiteRequest, CreateSshHostRequest,
+    CreateTaskRequest, DecideSharedOrganizationRequest, DelegationMutationRequest,
+    DelegationRetryRequest, DeploySiteRequest, DiscoverProjectRequest, EvaluationMutationResponse,
+    ExecuteAgentWorkRequest, ExperimentBenchmarkListResponse, ExperimentDecisionListResponse,
+    ExperimentListResponse, ForkConversationRequest, ImportOrganizationRequest,
+    ImportSharedOrganizationRequest, InheritOrganizationRequest, InstallLocalPluginRequest,
+    InstallRegistryPluginRequest, InvokePluginRequest, LaunchTaskRequest, LaunchTaskResponse,
+    ManagedMemoryResponse, McpListResponse, MemoryClaimHistoryResponse, MemoryClaimListResponse,
     MentionCandidateListResponse, NavigateBrowserSessionRequest, OrganizationHistoryResponse,
     OrganizationListResponse, OrganizationMutationResponse, OrganizationPublisherListResponse,
     OrganizationShareReviewListResponse, PlanAgentRunRequest, PlanWorkRequest,
     PlatformSessionHistoryResponse, PlatformSessionListResponse, PluginInvocationHistoryResponse,
-    PluginListResponse, ProjectHistoryResponse, ProjectListResponse,
+    PluginListResponse, PrepareCloudDiffApplyRequest, ProjectHistoryResponse, ProjectListResponse,
     ProjectMemoryTransferListResponse, ProviderListResponse, ResolveApprovalRequest,
     ReviewSharedOrganizationRequest, ReviewedTopologyPlanListResponse,
     RevokeOrganizationPublisherRequest, RunSshOperationRequest, ScheduleHistoryResponse,
@@ -66,17 +66,17 @@ use mcg_api::{
 use mcg_codex_app_server::CodexResumeCwd;
 use mcg_config::{AppConfig, AutonomyPreset, CliTuiPreferences, UserSettings};
 use mcg_domain::{
-    AgentWakeState, ApprovalMode, CodexConfigOverride, ComposerMentionInput, ComputerUseCapability,
-    ComputerUseRegion, ComputerUseTarget, Conversation, ConversationGoalStatus, ConversationId,
-    ConversationInteractionKind, ConversationMode, ConversationRole, ConversationState,
-    ConversationTurnId, ConversationTurnState, ConversationView, CoordinationBatchState,
-    ExecutionApprovalPolicy, ExecutionPreferences, ExecutionSandboxMode, MemoryClaimId,
-    MemoryTransferId, MentionCandidate, MentionKind, NotificationSeverity, OrganizationId,
-    OrganizationImportId, OrganizationRevisionId, OrganizationShareReviewId,
-    PlatformCapabilitySnapshot, PlatformSession, PlatformSessionId, PlatformSessionKind,
-    PluginCapabilityGrant, PluginInstallSource, PluginInstallation, PluginInvocationId,
-    PluginRevision, PluginRevisionId, PluginSignature, PluginSignatureState, ProjectId,
-    ReviewedTopologyPlanId, RunId, ScheduleId, ScheduleState, ScheduleTrigger,
+    AgentWakeState, ApprovalMode, CloudDiffApply, CodexConfigOverride, ComposerMentionInput,
+    ComputerUseCapability, ComputerUseRegion, ComputerUseTarget, Conversation,
+    ConversationGoalStatus, ConversationId, ConversationInteractionKind, ConversationMode,
+    ConversationRole, ConversationState, ConversationTurnId, ConversationTurnState,
+    ConversationView, CoordinationBatchState, ExecutionApprovalPolicy, ExecutionPreferences,
+    ExecutionSandboxMode, MemoryClaimId, MemoryTransferId, MentionCandidate, MentionKind,
+    NotificationSeverity, OrganizationId, OrganizationImportId, OrganizationRevisionId,
+    OrganizationShareReviewId, PlatformCapabilitySnapshot, PlatformSession, PlatformSessionId,
+    PlatformSessionKind, PluginCapabilityGrant, PluginInstallSource, PluginInstallation,
+    PluginInvocationId, PluginRevision, PluginRevisionId, PluginSignature, PluginSignatureState,
+    ProjectId, ReviewedTopologyPlanId, RunId, ScheduleId, ScheduleState, ScheduleTrigger,
     SchedulerNotification, SchedulerNotificationId, Site, SiteDeploymentCommand, SiteDeploymentId,
     SiteEnvironment, SiteHealthCheckId, SiteId, SiteMonitor, SiteState, SshHost, SshHostId,
     SshWorkflow, SshWorkflowId, TaskEnvelope, TaskId, TaskState, WorkItemId,
@@ -402,6 +402,9 @@ enum CodexCompatCommand {
     /// Run MetaCog non-interactively through the governed agent workflow.
     #[command(alias = "e")]
     Exec(Box<ExecArgs>),
+    /// Apply the latest diff produced by a Codex cloud task to the current project.
+    #[command(alias = "a")]
+    Apply(ApplyArgs),
     /// Continue a previous interactive conversation.
     Resume(Box<ResumeArgs>),
     /// Queue a message for an existing conversation.
@@ -431,6 +434,12 @@ enum CodexCompatCommand {
     },
     /// Run an owner-supplied command inside the pinned Codex Windows sandbox.
     Sandbox(Box<SandboxArgs>),
+}
+
+#[derive(Debug, Args)]
+struct ApplyArgs {
+    /// Codex cloud task identifier whose latest diff should be applied.
+    task_id: String,
 }
 
 #[derive(Debug, Args)]
@@ -2444,6 +2453,8 @@ fn codex_compat_command_requested() -> bool {
     const COMMANDS: &[&str] = &[
         "exec",
         "e",
+        "apply",
+        "a",
         "agents",
         "queue",
         "migrate-rollouts",
@@ -2970,6 +2981,7 @@ async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
     let additional_writable_roots = codex_additional_writable_roots(&add_dirs)?;
     let mut feature_overrides = native_overrides.feature_overrides;
     let config_overrides = native_overrides.config_overrides;
+    let raw_config_overrides = native_overrides.raw_config_overrides;
     let codex_profile = native_overrides.codex_profile;
     let strict_config = native_overrides.strict_config;
     let no_alt_screen = native_overrides.no_alt_screen;
@@ -3007,6 +3019,34 @@ async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
         }
         CodexCompatCommand::Agents => {
             run_codex_agents(&client, host, token).await?;
+        }
+        CodexCompatCommand::Apply(args) => {
+            if model.is_some()
+                || sandbox.is_some()
+                || approval_policy.is_some()
+                || approve_for_me
+                || dangerously_bypass_approvals_and_sandbox
+                || !images.is_empty()
+                || !additional_writable_roots.is_empty()
+                || codex_profile.is_some()
+                || strict_config
+                || no_alt_screen
+            {
+                return Err(
+                    "`mcg apply` accepts Codex's documented -c/--config and feature overrides only"
+                        .into(),
+                );
+            }
+            run_codex_compatible_apply(
+                &client,
+                host,
+                token,
+                &project,
+                &args.task_id,
+                raw_config_overrides,
+                feature_overrides,
+            )
+            .await?;
         }
         CodexCompatCommand::Exec(args) => {
             let ExecArgs {
@@ -3293,6 +3333,80 @@ async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
         CodexCompatCommand::Features { command } => {
             run_codex_features(&client, host, token, command).await?;
         }
+    }
+    Ok(())
+}
+
+async fn run_codex_compatible_apply(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+    project_root: &std::path::Path,
+    task_id: &str,
+    config_overrides: Vec<String>,
+    feature_overrides: BTreeMap<String, bool>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let canonical = std::fs::canonicalize(project_root).map_err(|error| {
+        format!(
+            "cannot resolve project directory {}: {error}",
+            project_root.display()
+        )
+    })?;
+    if !canonical.is_dir() {
+        return Err(format!("project path is not a directory: {}", canonical.display()).into());
+    }
+    let canonical_text = canonical
+        .to_str()
+        .ok_or("project path must be valid Unicode")?;
+    let project = resolve_apply_project(client, host, token, canonical_text).await?;
+    if !project.project.repository.is_git {
+        return Err("`mcg apply` requires a Git repository".into());
+    }
+    let (enable_features, disable_features): (Vec<_>, Vec<_>) = feature_overrides
+        .into_iter()
+        .partition(|(_, enabled)| *enabled);
+    let prepared: CloudDiffApply = decode_api_response(
+        client
+            .post(format!(
+                "{host}/api/v1/projects/{}/codex-cloud-applies",
+                project.project.project_id
+            ))
+            .bearer_auth(token)
+            .json(&PrepareCloudDiffApplyRequest {
+                task_id: task_id.to_owned(),
+                config_overrides,
+                enable_features: enable_features.into_iter().map(|(name, _)| name).collect(),
+                disable_features: disable_features.into_iter().map(|(name, _)| name).collect(),
+            })
+            .send()
+            .await?,
+        "prepare Codex cloud diff",
+    )
+    .await?;
+    let applied: CloudDiffApply = decode_api_response(
+        client
+            .post(format!(
+                "{host}/api/v1/codex-cloud-applies/{}/apply",
+                prepared.id
+            ))
+            .bearer_auth(token)
+            .json(&ApplyCloudDiffRequest {
+                expected_revision: prepared.revision,
+            })
+            .send()
+            .await?,
+        "apply Codex cloud diff",
+    )
+    .await?;
+    if let Some(output) = applied
+        .output
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        println!("{}", output.trim());
+    }
+    for path in &applied.changed_paths {
+        println!("{path}");
     }
     Ok(())
 }
@@ -7412,6 +7526,55 @@ async fn resolve_consumer_project(
         .error_for_status()?
         .json()
         .await?)
+}
+
+async fn resolve_apply_project(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+    canonical_root: &str,
+) -> Result<ProjectMutation, Box<dyn std::error::Error>> {
+    let projects: ProjectListResponse = decode_api_response(
+        client
+            .get(format!("{host}/api/v1/projects"))
+            .bearer_auth(token)
+            .send()
+            .await?,
+        "list projects",
+    )
+    .await?;
+    if let Some(project) = projects
+        .projects
+        .into_iter()
+        .find(|project| paths_match_for_host(std::path::Path::new(&project.root), canonical_root))
+    {
+        return decode_api_response(
+            client
+                .post(format!(
+                    "{host}/api/v1/projects/{}/refresh",
+                    project.project_id
+                ))
+                .bearer_auth(token)
+                .send()
+                .await?,
+            "refresh project",
+        )
+        .await;
+    }
+    decode_api_response(
+        client
+            .post(format!("{host}/api/v1/projects"))
+            .bearer_auth(token)
+            .json(&DiscoverProjectRequest {
+                root: canonical_root.to_owned(),
+                project_id: None,
+                initialize_git: false,
+            })
+            .send()
+            .await?,
+        "discover project",
+    )
+    .await
 }
 
 fn paths_match_for_host(existing: &std::path::Path, canonical_root: &str) -> bool {
@@ -13872,6 +14035,13 @@ mod tests {
         let agents = CodexCompatCli::try_parse_from(["mcg", "agents"])
             .expect("Codex-compatible agents command");
         assert!(matches!(agents.command, CodexCompatCommand::Agents));
+
+        let apply = CodexCompatCli::try_parse_from(["mcg", "a", "task-123"])
+            .expect("Codex-compatible apply alias");
+        assert!(matches!(
+            apply.command,
+            CodexCompatCommand::Apply(ApplyArgs { task_id }) if task_id == "task-123"
+        ));
 
         let migrate = CodexCompatCli::try_parse_from([
             "mcg",

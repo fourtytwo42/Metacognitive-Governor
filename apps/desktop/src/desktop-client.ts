@@ -573,6 +573,17 @@ export interface ManagedWorktree {
   revision: number; retained_reason?: string; storage_bytes: number;
   created_at: string; updated_at: string;
 }
+export interface CloudDiffApply {
+  schema_version: number; id: string; project_id: string; task_id: string;
+  state: "preparing" | "ready" | "applying" | "applied" | "conflict" | "rolled_back" | "failed" | "retained" | "removed";
+  root: string; branch: string; base_head: string; baseline_head: string; baseline_sha256: string;
+  baseline_entries: Array<{ normalized_path: string; source_kind: "tracked" | "untracked"; size: number; mode: number; sha256: string }>;
+  baseline_exclusions: Array<{ normalized_path: string; reason: string; review_blocker: boolean }>;
+  changed_paths: string[];
+  touched_paths: Array<{ normalized_path: string; live_content_id?: string; expected_content_id?: string; preimage_sha256?: string; preimage_path?: string }>;
+  patch_sha256?: string; output?: string; error?: string; revision: number; created_at: string; updated_at: string;
+}
+export interface CloudDiffApplyListResponse { applies: CloudDiffApply[]; }
 export interface DelegationReview { delegation: AgentDelegation; worktree?: ManagedWorktree; patch: string; }
 export interface DelegationRetryMutation { delegation_id: string; retry_of_id: string; replayed: boolean; acknowledgement: string; }
 export interface ConversationTeamState {
@@ -1979,6 +1990,22 @@ export function getConversationTeam(conversationId: string): Promise<Conversatio
 
 export function listManagedWorktrees(): Promise<ManagedWorktreeListResponse> {
   return invoke("list_managed_worktrees");
+}
+
+export function prepareCloudDiffApply(projectId: string, taskId: string): Promise<CloudDiffApply> {
+  return invoke("prepare_cloud_diff_apply", { projectId, taskId });
+}
+
+export function listCloudDiffApplies(projectId: string): Promise<CloudDiffApplyListResponse> {
+  return invoke("list_cloud_diff_applies", { projectId });
+}
+
+export function applyCloudDiff(applyId: string, expectedRevision: number): Promise<CloudDiffApply> {
+  return invoke("apply_cloud_diff", { applyId, expectedRevision });
+}
+
+export function discardCloudDiffApply(applyId: string, expectedRevision: number): Promise<CloudDiffApply> {
+  return invoke("discard_cloud_diff_apply", { applyId, expectedRevision });
 }
 
 export function reviewConversationDelegation(conversationId: string, delegationId: string): Promise<DelegationReview> {

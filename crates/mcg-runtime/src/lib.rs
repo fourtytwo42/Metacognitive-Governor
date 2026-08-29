@@ -43,8 +43,8 @@ use mcg_agents::{
 };
 use mcg_codex_app_server::{
     CODEX_BINARY_VERSION, CODEX_PROTOCOL_VERSION, CodexAccount, CodexAppServerHarness,
-    CodexApprovalMode, CodexApprovalPolicy, CodexApprovalRequest, CodexCommandExecRequest,
-    CodexCommandExecResult, CodexConfigOverride as CodexAppConfigOverride,
+    CodexApprovalMode, CodexApprovalPolicy, CodexApprovalRequest, CodexCloudApplyResult,
+    CodexCommandExecRequest, CodexCommandExecResult, CodexConfigOverride as CodexAppConfigOverride,
     CodexConfigurationStatus, CodexExecutionPreferences, CodexFeature, CodexFsWatch,
     CodexHarnessError, CodexHarnessStatus, CodexMentionInput, CodexModel, CodexPendingRequest,
     CodexPermissionProfile, CodexRateLimits, CodexResumeCwd, CodexReviewDelivery,
@@ -60,7 +60,8 @@ use mcg_domain::{
     AgentDelegationId, AgentDelegationState, AgentInstanceId, AgentLeaseId, AgentMessage,
     AgentMessageId, AgentMessageKind, AgentRoomKind, AgentWake, AgentWakeId, AgentWakeKind,
     AgentWakeState, AgentWakeTarget, ApprovalId, BlackboardEntry, BlackboardEntryId,
-    BlackboardEntryKind, CONVERSATION_TEAM_SCHEMA_VERSION, CodexOwnedThread, CodexRecoveryState,
+    BlackboardEntryKind, CONVERSATION_TEAM_SCHEMA_VERSION, CloudDiffApply, CloudDiffApplyId,
+    CloudDiffApplyState, CloudDiffTouchedPath, CodexOwnedThread, CodexRecoveryState,
     CodexThreadBinding, CodingDelegationBrief, ComposerMentionInput, ComputerActionBatch,
     ComputerActionBatchId, ComputerActionBatchState, ComputerUseCapability, ComputerUseTarget,
     Conversation, ConversationActivity, ConversationActivityKind, ConversationActivityState,
@@ -2347,6 +2348,185 @@ fn direct_workspace_changed_files(worktree: &ManagedWorktree) -> Result<Vec<Stri
     Ok(changed)
 }
 
+fn normalized_git_paths(bytes: &[u8], label: &str) -> Result<Vec<String>, StorageError> {
+    let mut paths = Vec::new();
+    for value in bytes
+        .split(|byte| *byte == 0)
+        .filter(|value| !value.is_empty())
+    {
+        let value = std::str::from_utf8(value)
+            .map_err(|_| StorageError::InvalidData(format!("{label} path is not UTF-8")))?;
+        let path = Path::new(value);
+        if path.is_absolute()
+            || path.components().any(|component| {
+                matches!(
+                    component,
+                    Component::ParentDir | Component::RootDir | Component::Prefix(_)
+                )
+            })
+            || sensitive_baseline_path(value)
+        {
+            return Err(StorageError::InvalidData(format!(
+                "{label} contains unsafe path {value}"
+            )));
+        }
+        paths.push(value.replace('\\', "/"));
+    }
+    paths.sort();
+    paths.dedup();
+    Ok(paths)
+}
+
+fn regular_file_sha256(path: &Path) -> Result<Option<String>, StorageError> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(StorageError::Conflict(format!(
+            "{} is not a regular file",
+            path.display()
+        )));
+    }
+    Ok(Some(format!("{:x}", Sha256::digest(fs::read(path)?))))
+}
+
+fn git_content_id(repository: &Path, relative: &str) -> Result<Option<String>, StorageError> {
+    let path = repository.join(relative);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let metadata = fs::symlink_metadata(&path)?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(StorageError::Conflict(format!(
+            "{} is not a regular file",
+            path.display()
+        )));
+    }
+    let path_argument = format!("--path={relative}");
+    let object = String::from_utf8(git_output(
+        repository,
+        &["hash-object", &path_argument, "--", relative],
+    )?)
+    .map_err(|_| StorageError::InvalidData("Git content identity was not UTF-8".into()))?
+    .trim()
+    .to_owned();
+    if object.is_empty() {
+        return Err(StorageError::InvalidData(format!(
+            "Git did not return a content identity for {relative}"
+        )));
+    }
+    Ok(Some(object))
+}
+
+fn combined_native_apply_output(result: &CodexCloudApplyResult) -> Option<String> {
+    let stdout = result.stdout.trim();
+    let stderr = result.stderr.trim();
+    let value = match (stdout.is_empty(), stderr.is_empty()) {
+        (true, true) => return None,
+        (false, true) => stdout.to_owned(),
+        (true, false) => stderr.to_owned(),
+        (false, false) => format!("{stdout}\n{stderr}"),
+    };
+    Some(value.chars().take(16_384).collect())
+}
+
+fn validate_cloud_apply_overrides(
+    config_overrides: &[String],
+    enable_features: &[String],
+    disable_features: &[String],
+) -> Result<(), StorageError> {
+    const GOVERNED: &[&str] = &[
+        "agent",
+        "agents",
+        "app",
+        "apps",
+        "approval",
+        "approval_policy",
+        "browser",
+        "computer_use",
+        "credential",
+        "credentials",
+        "features",
+        "hooks",
+        "instructions",
+        "mcp_servers",
+        "model_provider",
+        "model_providers",
+        "network_access",
+        "oss_provider",
+        "permissions",
+        "plugin",
+        "plugins",
+        "remote",
+        "rules",
+        "sandbox",
+        "sandbox_mode",
+        "shell_environment_policy",
+        "skills",
+        "tools",
+        "workspace_write",
+    ];
+    if config_overrides.len() > 32
+        || config_overrides.iter().map(String::len).sum::<usize>() > 16 * 1024
+    {
+        return Err(StorageError::InvalidData(
+            "cloud apply configuration overrides exceed the 32-entry or 16 KiB limit".into(),
+        ));
+    }
+    for expression in config_overrides {
+        let (key, _) = expression.split_once('=').ok_or_else(|| {
+            StorageError::InvalidData("Codex configuration overrides use KEY=VALUE".into())
+        })?;
+        if key.trim().is_empty() {
+            return Err(StorageError::InvalidData(
+                "Codex configuration override key cannot be empty".into(),
+            ));
+        }
+        for segment in key.split('.') {
+            let normalized = segment.trim().to_ascii_lowercase().replace('-', "_");
+            let secret = ["api_key", "auth", "bearer", "password", "secret", "token"]
+                .iter()
+                .any(|needle| normalized.contains(needle));
+            if normalized.is_empty() || secret || GOVERNED.contains(&normalized.as_str()) {
+                return Err(StorageError::InvalidData(format!(
+                    "Codex configuration `{key}` is governed by MetaCog and cannot be used for cloud apply"
+                )));
+            }
+        }
+    }
+    let features = enable_features.iter().chain(disable_features);
+    if enable_features.len().saturating_add(disable_features.len()) > 32 {
+        return Err(StorageError::InvalidData(
+            "cloud apply feature overrides exceed the 32-entry limit".into(),
+        ));
+    }
+    for feature in features {
+        if feature.is_empty()
+            || !feature
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+            || matches!(
+                feature.as_str(),
+                "shell_tool"
+                    | "unified_exec"
+                    | "multi_agent"
+                    | "browser_use"
+                    | "computer_use"
+                    | "apps"
+                    | "plugins"
+                    | "image_generation"
+                    | "workspace_dependencies"
+            )
+        {
+            return Err(StorageError::InvalidData(format!(
+                "Codex feature `{feature}` is invalid or governed by MetaCog"
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn parse_delegation_argument(
     arguments: &serde_json::Value,
 ) -> Result<AgentDelegationId, RuntimeError> {
@@ -3234,7 +3414,7 @@ impl AppRuntime {
             &config.data_directory,
             provider_credentials.clone(),
         )?);
-        Ok(Self {
+        let runtime = Self {
             config,
             data_lock,
             settings: Arc::new(RwLock::new(settings)),
@@ -3273,7 +3453,9 @@ impl AppRuntime {
             plugin_runner: package_plugin_runner(),
             plugin_trust: Arc::new(plugin_trust),
             _ephemeral_data_directory: ephemeral_data_directory,
-        })
+        };
+        runtime.reconcile_cloud_diff_apply_recovery()?;
+        Ok(runtime)
     }
 
     fn store(&self) -> Result<MutexGuard<'_, SqliteEventStore>, RuntimeError> {
@@ -7272,6 +7454,722 @@ impl AppRuntime {
     /// Returns an error when durable worktree projections cannot be decoded.
     pub fn managed_worktrees(&self) -> Result<Vec<ManagedWorktree>, RuntimeError> {
         Ok(self.store()?.managed_worktrees()?)
+    }
+
+    fn save_cloud_diff_apply(
+        &self,
+        apply: &CloudDiffApply,
+        patch: &[u8],
+    ) -> Result<(), RuntimeError> {
+        let event = self.store()?.save_cloud_diff_apply(apply, patch)?;
+        let _ = self.event_sender.send(event);
+        Ok(())
+    }
+
+    fn remove_cloud_diff_shadow(
+        repository: &Path,
+        apply: &CloudDiffApply,
+    ) -> Result<(), RuntimeError> {
+        let root = Path::new(&apply.root);
+        if root.exists() {
+            git_output(repository, &["worktree", "remove", "--force", &apply.root])?;
+        }
+        let _ = git_output(repository, &["worktree", "prune"])?;
+        let reference = format!("refs/heads/{}", apply.branch);
+        let branch_exists = Command::new("git")
+            .args(["show-ref", "--verify", "--quiet", &reference])
+            .current_dir(repository)
+            .status()
+            .map_err(StorageError::Io)?
+            .success();
+        if branch_exists {
+            git_output(repository, &["branch", "-D", &apply.branch])?;
+        }
+        Ok(())
+    }
+
+    fn rollback_cloud_diff_apply(
+        repository: &Path,
+        apply: &CloudDiffApply,
+    ) -> Result<(), RuntimeError> {
+        for touched in &apply.touched_paths {
+            let live = repository.join(&touched.normalized_path);
+            if let Some(preimage) = &touched.preimage_path {
+                let preimage = Path::new(preimage);
+                let actual_preimage = regular_file_sha256(preimage)?;
+                if actual_preimage != touched.preimage_sha256 {
+                    return Err(StorageError::Conflict(format!(
+                        "rollback preimage digest mismatch for {}",
+                        touched.normalized_path
+                    ))
+                    .into());
+                }
+                if let Some(parent) = live.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                fs::copy(preimage, &live)?;
+            } else if live.exists() {
+                let metadata = fs::symlink_metadata(&live)?;
+                if metadata.file_type().is_symlink() || !metadata.is_file() {
+                    return Err(StorageError::Conflict(format!(
+                        "rollback encountered non-regular path {}",
+                        touched.normalized_path
+                    ))
+                    .into());
+                }
+                fs::remove_file(&live)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn fail_cloud_diff_preparation(
+        &self,
+        repository: &Path,
+        apply: &mut CloudDiffApply,
+        native: Option<&CodexCloudApplyResult>,
+        error: &RuntimeError,
+    ) -> Result<(), RuntimeError> {
+        apply.state = CloudDiffApplyState::Failed;
+        apply.error = Some(error.to_string());
+        if let Some(native) = native {
+            apply.output = combined_native_apply_output(native);
+        }
+        apply.revision = apply.revision.saturating_add(1);
+        apply.updated_at = Utc::now();
+        if let Err(cleanup) = Self::remove_cloud_diff_shadow(repository, apply) {
+            apply.error = Some(format!(
+                "{}; isolated shadow cleanup remains: {cleanup}",
+                apply
+                    .error
+                    .as_deref()
+                    .unwrap_or("cloud diff preparation failed")
+            ));
+        }
+        self.save_cloud_diff_apply(apply, &[])
+    }
+
+    fn conflict_cloud_diff_apply(
+        &self,
+        apply: &mut CloudDiffApply,
+        patch: &[u8],
+        message: impl Into<String>,
+    ) -> Result<(), RuntimeError> {
+        apply.state = CloudDiffApplyState::Conflict;
+        apply.error = Some(message.into());
+        apply.revision = apply.revision.saturating_add(1);
+        apply.updated_at = Utc::now();
+        self.save_cloud_diff_apply(apply, patch)
+    }
+
+    /// Fetches and applies a Codex cloud task inside an isolated shadow worktree. The returned
+    /// durable candidate is reviewable and has not modified the owner workspace.
+    pub async fn prepare_cloud_diff_apply(
+        &self,
+        project_id: ProjectId,
+        task_id: &str,
+        config_overrides: &[String],
+        enable_features: &[String],
+        disable_features: &[String],
+    ) -> Result<CloudDiffApply, RuntimeError> {
+        validate_cloud_apply_overrides(config_overrides, enable_features, disable_features)?;
+        let task_id = task_id.trim();
+        if task_id.is_empty() || task_id.len() > 256 || task_id.starts_with('-') {
+            return Err(StorageError::InvalidData(
+                "Codex cloud task ID must contain 1 to 256 characters and cannot start with '-'"
+                    .into(),
+            )
+            .into());
+        }
+        let project = self
+            .project(project_id)?
+            .ok_or(StorageError::ProjectNotFound(project_id))?;
+        if !project.repository.is_git {
+            return Err(StorageError::InvalidData(
+                "Codex cloud diffs can only be applied to a Git project".into(),
+            )
+            .into());
+        }
+        let repository = fs::canonicalize(&project.root)?;
+        let apply_id = CloudDiffApplyId::new();
+        let short_id = apply_id.to_string().chars().take(12).collect::<String>();
+        let branch = format!("mcg/cloud/{short_id}");
+        let root = self
+            .config
+            .data_directory
+            .join("cloud-applies")
+            .join(project_id.to_string())
+            .join(apply_id.to_string());
+        fs::create_dir_all(
+            root.parent().ok_or_else(|| {
+                StorageError::InvalidData("cloud apply root has no parent".into())
+            })?,
+        )?;
+        let now = Utc::now();
+        let mut apply = CloudDiffApply {
+            schema_version: CONVERSATION_TEAM_SCHEMA_VERSION,
+            id: apply_id,
+            project_id,
+            task_id: task_id.to_owned(),
+            state: CloudDiffApplyState::Preparing,
+            root: root.to_string_lossy().into_owned(),
+            branch,
+            base_head: String::new(),
+            baseline_head: String::new(),
+            baseline_sha256: String::new(),
+            baseline_entries: Vec::new(),
+            baseline_exclusions: Vec::new(),
+            changed_paths: Vec::new(),
+            touched_paths: Vec::new(),
+            patch_sha256: None,
+            output: None,
+            error: None,
+            revision: 1,
+            created_at: now,
+            updated_at: now,
+        };
+        self.save_cloud_diff_apply(&apply, &[])?;
+
+        let preparation = (|| -> Result<(), RuntimeError> {
+            let lock = self.project_integration_lock(project_id)?;
+            let _guard = lock.lock().map_err(|_| RuntimeError::StorageLock)?;
+            if root.exists() {
+                return Err(StorageError::Conflict(
+                    "cloud apply shadow destination already exists".into(),
+                )
+                .into());
+            }
+            let base_head = String::from_utf8(git_output(&repository, &["rev-parse", "HEAD"])?)
+                .map_err(|_| StorageError::InvalidData("Git HEAD was not UTF-8".into()))?
+                .trim()
+                .to_owned();
+            git_output(
+                &repository,
+                &[
+                    "worktree",
+                    "add",
+                    "-b",
+                    &apply.branch,
+                    &apply.root,
+                    &base_head,
+                ],
+            )?;
+            let prepared = (|| -> Result<_, RuntimeError> {
+                let mut baseline_entries = tracked_baseline_manifest(&repository)?;
+                let dirty_patch = git_output(&repository, &["diff", "--binary", "HEAD", "--"])?;
+                if !dirty_patch.is_empty() {
+                    git_with_input(&root, &["apply", "--whitespace=nowarn", "-"], &dirty_patch)?;
+                }
+                let (untracked, exclusions) = bounded_untracked_overlay(&repository, &root)?;
+                baseline_entries.extend(untracked);
+                baseline_entries
+                    .sort_by(|left, right| left.normalized_path.cmp(&right.normalized_path));
+                git_output(&root, &["add", "-A"])?;
+                let staged = git_output(&root, &["diff", "--cached", "--name-only", "--"])?;
+                let baseline_head = if staged.is_empty() {
+                    base_head.clone()
+                } else {
+                    git_output(
+                        &root,
+                        &[
+                            "-c",
+                            "user.name=MetaCog",
+                            "-c",
+                            "user.email=metacog@local.invalid",
+                            "commit",
+                            "-m",
+                            "MetaCog isolated cloud-apply baseline",
+                        ],
+                    )?;
+                    String::from_utf8(git_output(&root, &["rev-parse", "HEAD"])?)
+                        .map_err(|_| StorageError::InvalidData("shadow HEAD was not UTF-8".into()))?
+                        .trim()
+                        .to_owned()
+                };
+                Ok((
+                    dirty_patch,
+                    staged,
+                    baseline_head,
+                    baseline_entries,
+                    exclusions,
+                ))
+            })();
+            let (dirty_patch, staged, baseline_head, baseline_entries, exclusions) = match prepared
+            {
+                Ok(value) => value,
+                Err(error) => {
+                    let _ =
+                        git_output(&repository, &["worktree", "remove", "--force", &apply.root]);
+                    let _ = git_output(&repository, &["branch", "-D", &apply.branch]);
+                    return Err(error);
+                }
+            };
+            let mut digest = Sha256::new();
+            digest.update(base_head.as_bytes());
+            digest.update(&dirty_patch);
+            digest.update(&staged);
+            for entry in &baseline_entries {
+                digest.update(entry.normalized_path.as_bytes());
+                digest.update(entry.sha256.as_bytes());
+            }
+            apply.base_head = base_head;
+            apply.baseline_head = baseline_head;
+            apply.baseline_sha256 = format!("{:x}", digest.finalize());
+            apply.baseline_entries = baseline_entries;
+            apply.baseline_exclusions = exclusions;
+            if apply
+                .baseline_exclusions
+                .iter()
+                .any(|entry| entry.review_blocker)
+            {
+                return Err(StorageError::Conflict(
+                    "project baseline contains excluded files that require owner review".into(),
+                )
+                .into());
+            }
+            apply.revision = apply.revision.saturating_add(1);
+            apply.updated_at = Utc::now();
+            self.save_cloud_diff_apply(&apply, &[])?;
+            Ok(())
+        })();
+        if let Err(error) = preparation {
+            self.fail_cloud_diff_preparation(&repository, &mut apply, None, &error)?;
+            return Err(error);
+        }
+
+        let native = self
+            .codex_harness
+            .apply_cloud_diff(
+                &root,
+                task_id,
+                config_overrides,
+                enable_features,
+                disable_features,
+            )
+            .await;
+        let native = match native {
+            Ok(native) => native,
+            Err(error) => {
+                let error = RuntimeError::CodexHarness(error);
+                self.fail_cloud_diff_preparation(&repository, &mut apply, None, &error)?;
+                return Err(error);
+            }
+        };
+        let extracted = (|| -> Result<(Vec<u8>, Vec<String>), RuntimeError> {
+            git_output(&root, &["add", "-N", "--", "."])?;
+            let patch = git_output(&root, &["diff", "--binary", &apply.baseline_head, "--"])?;
+            if patch.is_empty() {
+                return Err(StorageError::InvalidData(
+                    "Codex cloud task produced no repository changes".into(),
+                )
+                .into());
+            }
+            if patch.len() > 16 * 1_024 * 1_024 {
+                return Err(StorageError::InvalidData(
+                    "Codex cloud diff exceeds the 16 MiB integration limit".into(),
+                )
+                .into());
+            }
+            let changed = normalized_git_paths(
+                &git_output(
+                    &root,
+                    &["diff", "--name-only", "-z", &apply.baseline_head, "--"],
+                )?,
+                "cloud diff",
+            )?;
+            if changed.is_empty() || changed.len() > 1_000 {
+                return Err(StorageError::InvalidData(
+                    "Codex cloud diff must touch between 1 and 1000 safe paths".into(),
+                )
+                .into());
+            }
+            for relative in &changed {
+                let _ = regular_file_sha256(&root.join(relative))?;
+            }
+            Ok((patch, changed))
+        })();
+        let (patch, changed) = match extracted {
+            Ok(extracted) => extracted,
+            Err(error) => {
+                self.fail_cloud_diff_preparation(&repository, &mut apply, Some(&native), &error)?;
+                return Err(error);
+            }
+        };
+        apply.state = CloudDiffApplyState::Ready;
+        apply.changed_paths = changed;
+        apply.patch_sha256 = Some(format!("{:x}", Sha256::digest(&patch)));
+        apply.output = combined_native_apply_output(&native);
+        apply.error = None;
+        apply.revision = apply.revision.saturating_add(1);
+        apply.updated_at = Utc::now();
+        self.save_cloud_diff_apply(&apply, &patch)?;
+        Ok(apply)
+    }
+
+    /// Integrates one prepared cloud diff into its exact owner baseline with durable rollback.
+    pub fn integrate_cloud_diff_apply(
+        &self,
+        apply_id: CloudDiffApplyId,
+        expected_revision: u64,
+    ) -> Result<CloudDiffApply, RuntimeError> {
+        let (mut apply, patch) = self
+            .store()?
+            .cloud_diff_apply(apply_id)?
+            .ok_or_else(|| StorageError::InvalidData("cloud diff apply was not found".into()))?;
+        if apply.state == CloudDiffApplyState::Applied {
+            return Ok(apply);
+        }
+        let lock = self.project_integration_lock(apply.project_id)?;
+        let _guard = lock.lock().map_err(|_| RuntimeError::StorageLock)?;
+        let (fresh, fresh_patch) = self
+            .store()?
+            .cloud_diff_apply(apply_id)?
+            .ok_or_else(|| StorageError::InvalidData("cloud diff apply was not found".into()))?;
+        apply = fresh;
+        if apply.revision != expected_revision {
+            return Err(
+                StorageError::Conflict("cloud diff changed; refresh and retry".into()).into(),
+            );
+        }
+        if apply.state != CloudDiffApplyState::Ready {
+            return Err(
+                StorageError::Conflict("only a ready cloud diff can be applied".into()).into(),
+            );
+        }
+        let fresh_patch_sha256 = format!("{:x}", Sha256::digest(&fresh_patch));
+        if patch != fresh_patch || apply.patch_sha256.as_deref() != Some(&fresh_patch_sha256) {
+            return Err(StorageError::Conflict("stored cloud diff digest mismatch".into()).into());
+        }
+        let project = self
+            .project(apply.project_id)?
+            .ok_or(StorageError::ProjectNotFound(apply.project_id))?;
+        let repository = fs::canonicalize(project.root)?;
+        let live_head = String::from_utf8(git_output(&repository, &["rev-parse", "HEAD"])?)
+            .map_err(|_| StorageError::InvalidData("Git HEAD was not UTF-8".into()))?
+            .trim()
+            .to_owned();
+        if live_head != apply.base_head {
+            self.conflict_cloud_diff_apply(
+                &mut apply,
+                &fresh_patch,
+                "live repository HEAD changed after cloud diff preparation",
+            )?;
+            return Err(StorageError::Conflict(
+                "live repository HEAD changed; prepare the cloud diff again".into(),
+            )
+            .into());
+        }
+        let current_dirty = git_output(&repository, &["diff", "--binary", "HEAD", "--"])?;
+        let current_staged = git_output(&repository, &["diff", "--cached", "--name-only", "--"])?;
+        let mut digest = Sha256::new();
+        digest.update(live_head.as_bytes());
+        digest.update(&current_dirty);
+        digest.update(&current_staged);
+        for entry in &apply.baseline_entries {
+            let live = regular_file_sha256(&repository.join(&entry.normalized_path))?
+                .unwrap_or_else(|| format!("{:x}", Sha256::digest([])));
+            if live != entry.sha256 {
+                let message = format!(
+                    "baseline path {} changed after cloud diff preparation",
+                    entry.normalized_path
+                );
+                self.conflict_cloud_diff_apply(&mut apply, &fresh_patch, &message)?;
+                return Err(StorageError::Conflict(message).into());
+            }
+            digest.update(entry.normalized_path.as_bytes());
+            digest.update(entry.sha256.as_bytes());
+        }
+        if format!("{:x}", digest.finalize()) != apply.baseline_sha256 {
+            let message = "working tree changed after cloud diff preparation";
+            self.conflict_cloud_diff_apply(&mut apply, &fresh_patch, message)?;
+            return Err(StorageError::Conflict(message.into()).into());
+        }
+        let preimage_root = self
+            .config
+            .data_directory
+            .join("cloud-apply-preimages")
+            .join(apply.id.to_string());
+        fs::create_dir_all(&preimage_root)?;
+        let shadow = Path::new(&apply.root);
+        let mut touched = Vec::new();
+        for relative in &apply.changed_paths {
+            let live = repository.join(relative);
+            let live_content_id = git_content_id(&repository, relative)?;
+            let expected_content_id = git_content_id(shadow, relative)?;
+            let live_sha256 = regular_file_sha256(&live)?;
+            let (preimage_sha256, preimage_path) = if let Some(digest) = &live_sha256 {
+                let backup = preimage_root.join(relative);
+                if let Some(parent) = backup.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                fs::copy(&live, &backup)?;
+                (
+                    Some(digest.clone()),
+                    Some(backup.to_string_lossy().into_owned()),
+                )
+            } else {
+                (None, None)
+            };
+            touched.push(CloudDiffTouchedPath {
+                normalized_path: relative.clone(),
+                live_content_id,
+                expected_content_id,
+                preimage_sha256,
+                preimage_path,
+            });
+        }
+        apply.touched_paths = touched;
+        apply.state = CloudDiffApplyState::Applying;
+        apply.error = None;
+        apply.revision = apply.revision.saturating_add(1);
+        apply.updated_at = Utc::now();
+        self.save_cloud_diff_apply(&apply, &fresh_patch)?;
+
+        let touches_untracked = apply.changed_paths.iter().any(|path| {
+            apply.baseline_entries.iter().any(|entry| {
+                entry.normalized_path == *path
+                    && entry.source_kind == mcg_domain::BaselineSourceKind::Untracked
+            })
+        });
+        let dry_run = if touches_untracked {
+            vec!["apply", "--whitespace=nowarn", "--check", "-"]
+        } else {
+            vec!["apply", "--3way", "--whitespace=nowarn", "--check", "-"]
+        };
+        if let Err(error) = git_with_input(&repository, &dry_run, &fresh_patch) {
+            let _ = fs::remove_dir_all(&preimage_root);
+            apply.touched_paths.clear();
+            self.conflict_cloud_diff_apply(
+                &mut apply,
+                &fresh_patch,
+                format!("cloud diff dry-run failed: {error}"),
+            )?;
+            return Err(error.into());
+        }
+        let arguments = if touches_untracked {
+            vec!["apply", "--whitespace=nowarn", "-"]
+        } else {
+            vec!["apply", "--3way", "--whitespace=nowarn", "-"]
+        };
+        let applied = git_with_input(&repository, &arguments, &fresh_patch);
+        let verified = applied.and_then(|()| {
+            for touched in &apply.touched_paths {
+                if git_content_id(&repository, &touched.normalized_path)?
+                    != touched.expected_content_id
+                {
+                    return Err(StorageError::Conflict(format!(
+                        "post-apply digest mismatch for {}",
+                        touched.normalized_path
+                    )));
+                }
+            }
+            Ok(())
+        });
+        if let Err(error) = verified {
+            apply.error = Some(format!("cloud diff integration failed: {error}"));
+            let rollback = Self::rollback_cloud_diff_apply(&repository, &apply);
+            apply.state = if rollback.is_ok() {
+                CloudDiffApplyState::RolledBack
+            } else {
+                CloudDiffApplyState::Failed
+            };
+            if let Err(rollback) = rollback {
+                apply.error = Some(format!(
+                    "{}; rollback failed: {rollback}",
+                    apply.error.unwrap_or_default()
+                ));
+            }
+            apply.revision = apply.revision.saturating_add(1);
+            apply.updated_at = Utc::now();
+            self.save_cloud_diff_apply(&apply, &fresh_patch)?;
+            return Err(error.into());
+        }
+        apply.state = CloudDiffApplyState::Applied;
+        apply.error = None;
+        apply.revision = apply.revision.saturating_add(1);
+        apply.updated_at = Utc::now();
+        let cleanup = Self::remove_cloud_diff_shadow(&repository, &apply);
+        if let Err(error) = cleanup {
+            apply.error = Some(format!("diff applied; shadow cleanup remains: {error}"));
+        } else {
+            let _ = fs::remove_dir_all(preimage_root);
+        }
+        self.save_cloud_diff_apply(&apply, &fresh_patch)?;
+        Ok(apply)
+    }
+
+    pub fn cloud_diff_applies(
+        &self,
+        project_id: Option<ProjectId>,
+    ) -> Result<Vec<CloudDiffApply>, RuntimeError> {
+        Ok(self.store()?.cloud_diff_applies(project_id)?)
+    }
+
+    pub fn cloud_diff_apply(
+        &self,
+        apply_id: CloudDiffApplyId,
+    ) -> Result<Option<CloudDiffApply>, RuntimeError> {
+        Ok(self
+            .store()?
+            .cloud_diff_apply(apply_id)?
+            .map(|(apply, _)| apply))
+    }
+
+    /// Discards a prepared cloud diff without modifying the owner workspace.
+    ///
+    /// The durable row is retained as a content-free audit marker while its shadow worktree,
+    /// patch, path inventory, and native output are removed.
+    pub fn discard_cloud_diff_apply(
+        &self,
+        apply_id: CloudDiffApplyId,
+        expected_revision: u64,
+    ) -> Result<CloudDiffApply, RuntimeError> {
+        let (mut apply, patch) = self
+            .store()?
+            .cloud_diff_apply(apply_id)?
+            .ok_or_else(|| StorageError::InvalidData("cloud diff apply was not found".into()))?;
+        if apply.revision != expected_revision {
+            return Err(StorageError::Conflict(format!(
+                "cloud diff apply revision changed from {expected_revision} to {}",
+                apply.revision
+            ))
+            .into());
+        }
+        if apply.state == CloudDiffApplyState::Removed {
+            return Ok(apply);
+        }
+        if matches!(
+            apply.state,
+            CloudDiffApplyState::Preparing
+                | CloudDiffApplyState::Applying
+                | CloudDiffApplyState::Applied
+        ) {
+            return Err(StorageError::Conflict(format!(
+                "cloud diff apply in state {:?} cannot be discarded",
+                apply.state
+            ))
+            .into());
+        }
+        let project = self
+            .project(apply.project_id)?
+            .ok_or(StorageError::ProjectNotFound(apply.project_id))?;
+        let repository = fs::canonicalize(&project.root)?;
+        let lock = self.project_integration_lock(apply.project_id)?;
+        let _guard = lock.lock().map_err(|_| RuntimeError::StorageLock)?;
+        if let Err(error) = Self::remove_cloud_diff_shadow(&repository, &apply) {
+            apply.state = CloudDiffApplyState::Retained;
+            apply.error = Some(format!("prepared diff cleanup remains: {error}"));
+            apply.revision = apply.revision.saturating_add(1);
+            apply.updated_at = Utc::now();
+            self.save_cloud_diff_apply(&apply, &patch)?;
+            return Err(error);
+        }
+        apply.state = CloudDiffApplyState::Removed;
+        apply.baseline_entries.clear();
+        apply.baseline_exclusions.clear();
+        apply.changed_paths.clear();
+        apply.touched_paths.clear();
+        apply.patch_sha256 = None;
+        apply.output = None;
+        apply.error = None;
+        apply.revision = apply.revision.saturating_add(1);
+        apply.updated_at = Utc::now();
+        self.save_cloud_diff_apply(&apply, &[])?;
+        Ok(apply)
+    }
+
+    fn reconcile_cloud_diff_apply_recovery(&self) -> Result<(), RuntimeError> {
+        let applies = self.store()?.cloud_diff_applies(None)?;
+        for mut apply in applies {
+            let Some((_, patch)) = self.store()?.cloud_diff_apply(apply.id)? else {
+                continue;
+            };
+            let Some(project) = self.project(apply.project_id)? else {
+                apply.state = CloudDiffApplyState::Retained;
+                apply.error = Some(
+                    "Cloud diff recovery is retained because its project is no longer registered"
+                        .into(),
+                );
+                apply.revision = apply.revision.saturating_add(1);
+                apply.updated_at = Utc::now();
+                self.save_cloud_diff_apply(&apply, &patch)?;
+                continue;
+            };
+            let repository = match fs::canonicalize(&project.root) {
+                Ok(repository) => repository,
+                Err(error) => {
+                    apply.state = CloudDiffApplyState::Retained;
+                    apply.error = Some(format!(
+                        "Cloud diff recovery is retained because the project workspace is unavailable: {error}"
+                    ));
+                    apply.revision = apply.revision.saturating_add(1);
+                    apply.updated_at = Utc::now();
+                    self.save_cloud_diff_apply(&apply, &patch)?;
+                    continue;
+                }
+            };
+            match apply.state {
+                CloudDiffApplyState::Preparing => {
+                    let _ = Self::remove_cloud_diff_shadow(&repository, &apply);
+                    apply.state = CloudDiffApplyState::Failed;
+                    apply.error = Some(
+                        "MetaCog restarted while the cloud diff was being prepared; the owner workspace was not modified"
+                            .into(),
+                    );
+                }
+                CloudDiffApplyState::Applying => {
+                    let matches = |expected: bool| -> Result<bool, RuntimeError> {
+                        for touched in &apply.touched_paths {
+                            let actual = git_content_id(&repository, &touched.normalized_path)?;
+                            let wanted = if expected {
+                                &touched.expected_content_id
+                            } else {
+                                &touched.live_content_id
+                            };
+                            if &actual != wanted {
+                                return Ok(false);
+                            }
+                        }
+                        Ok(true)
+                    };
+                    if matches(true)? {
+                        apply.state = CloudDiffApplyState::Applied;
+                        apply.error = Some(
+                            "Recovered an application that completed before its durable settlement"
+                                .into(),
+                        );
+                        let _ = Self::remove_cloud_diff_shadow(&repository, &apply);
+                    } else if matches(false)? {
+                        apply.state = CloudDiffApplyState::Ready;
+                        apply.error = Some(
+                            "Recovered before repository mutation; the prepared diff remains ready"
+                                .into(),
+                        );
+                        apply.touched_paths.clear();
+                    } else {
+                        let rollback = Self::rollback_cloud_diff_apply(&repository, &apply);
+                        apply.state = if rollback.is_ok() {
+                            CloudDiffApplyState::RolledBack
+                        } else {
+                            CloudDiffApplyState::Failed
+                        };
+                        apply.error = Some(match rollback {
+                            Ok(()) => {
+                                "Recovered a partial application and restored every preimage".into()
+                            }
+                            Err(error) => format!(
+                                "Cloud diff recovery could not restore every preimage: {error}"
+                            ),
+                        });
+                    }
+                }
+                _ => continue,
+            }
+            apply.revision = apply.revision.saturating_add(1);
+            apply.updated_at = Utc::now();
+            self.save_cloud_diff_apply(&apply, &patch)?;
+        }
+        Ok(())
     }
 
     fn audit_agent_claims(
@@ -26576,6 +27474,270 @@ mod tests {
         assert!(mention_path_excluded("node_modules/package/index.js"));
         assert!(mention_path_excluded("config/.env"));
         assert!(!mention_path_excluded("src/config.rs"));
+    }
+
+    fn initialize_cloud_apply_fixture(
+        runtime: &AppRuntime,
+        repository: &Path,
+        data_directory: &Path,
+    ) -> (ProjectId, CloudDiffApply) {
+        if !repository.join(".git").exists() {
+            git_output(repository, &["init", "-b", "main"]).expect("initialize Git");
+            fs::write(repository.join("fixture.txt"), "before\n").expect("fixture");
+            git_output(repository, &["add", "fixture.txt"]).expect("stage fixture");
+            git_output(
+                repository,
+                &[
+                    "-c",
+                    "user.name=MetaCog Test",
+                    "-c",
+                    "user.email=metacog-test@local.invalid",
+                    "commit",
+                    "-m",
+                    "fixture baseline",
+                ],
+            )
+            .expect("commit fixture");
+        }
+        let project_id = ProjectId::new();
+        runtime
+            .discover_project(repository, project_id)
+            .expect("discover project");
+        let id = CloudDiffApplyId::new();
+        let root = data_directory.join("cloud-applies").join(id.to_string());
+        let branch = format!(
+            "mcg/cloud/{}",
+            id.to_string().chars().take(12).collect::<String>()
+        );
+        let base_head = String::from_utf8(git_output(repository, &["rev-parse", "HEAD"]).unwrap())
+            .unwrap()
+            .trim()
+            .to_owned();
+        git_output(
+            repository,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                &branch,
+                root.to_str().expect("UTF-8 shadow"),
+                &base_head,
+            ],
+        )
+        .expect("create shadow");
+        fs::write(root.join("fixture.txt"), "after\n").expect("cloud change");
+        let patch =
+            git_output(&root, &["diff", "--binary", &base_head, "--"]).expect("cloud patch");
+        let mut digest = Sha256::new();
+        digest.update(base_head.as_bytes());
+        let now = Utc::now();
+        let apply = CloudDiffApply {
+            schema_version: CONVERSATION_TEAM_SCHEMA_VERSION,
+            id,
+            project_id,
+            task_id: "task-123".into(),
+            state: CloudDiffApplyState::Ready,
+            root: root.to_string_lossy().into_owned(),
+            branch,
+            base_head: base_head.clone(),
+            baseline_head: base_head,
+            baseline_sha256: format!("{:x}", digest.finalize()),
+            baseline_entries: vec![],
+            baseline_exclusions: vec![],
+            changed_paths: vec!["fixture.txt".into()],
+            touched_paths: vec![],
+            patch_sha256: Some(format!("{:x}", Sha256::digest(&patch))),
+            output: Some("prepared fixture".into()),
+            error: None,
+            revision: 2,
+            created_at: now,
+            updated_at: now,
+        };
+        runtime
+            .save_cloud_diff_apply(&apply, &patch)
+            .expect("save ready apply");
+        (project_id, apply)
+    }
+
+    #[test]
+    fn cloud_diff_integration_applies_exact_patch_and_rejects_a_changed_baseline() {
+        let data = tempfile::tempdir().expect("data");
+        let repository = tempfile::tempdir().expect("repository");
+        let runtime = AppRuntime::open_in_memory(
+            AppConfig {
+                data_directory: data.path().to_path_buf(),
+                ..AppConfig::default()
+            },
+            TEST_TOKEN.to_owned(),
+        )
+        .expect("runtime");
+        let (_, apply) = initialize_cloud_apply_fixture(&runtime, repository.path(), data.path());
+        let applied = runtime
+            .integrate_cloud_diff_apply(apply.id, apply.revision)
+            .expect("integrate exact patch");
+        assert_eq!(applied.state, CloudDiffApplyState::Applied);
+        assert_eq!(
+            fs::read_to_string(repository.path().join("fixture.txt"))
+                .expect("applied file")
+                .replace("\r\n", "\n"),
+            "after\n"
+        );
+        assert!(!Path::new(&apply.root).exists());
+
+        let conflicting_repository = tempfile::tempdir().expect("conflicting repository");
+        let (_, second) =
+            initialize_cloud_apply_fixture(&runtime, conflicting_repository.path(), data.path());
+        fs::write(
+            conflicting_repository.path().join("fixture.txt"),
+            "owner edit\n",
+        )
+        .expect("owner edit");
+        assert!(
+            runtime
+                .integrate_cloud_diff_apply(second.id, second.revision)
+                .is_err()
+        );
+        assert_eq!(
+            fs::read_to_string(conflicting_repository.path().join("fixture.txt"))
+                .expect("owner file"),
+            "owner edit\n"
+        );
+        assert_eq!(
+            runtime
+                .cloud_diff_apply(second.id)
+                .expect("load candidate")
+                .expect("candidate")
+                .state,
+            CloudDiffApplyState::Conflict
+        );
+    }
+
+    #[test]
+    fn cloud_diff_discard_removes_shadow_and_sensitive_candidate_content() {
+        let data = tempfile::tempdir().expect("data");
+        let repository = tempfile::tempdir().expect("repository");
+        let runtime = AppRuntime::open_in_memory(
+            AppConfig {
+                data_directory: data.path().to_path_buf(),
+                ..AppConfig::default()
+            },
+            TEST_TOKEN.to_owned(),
+        )
+        .expect("runtime");
+        let (_, apply) = initialize_cloud_apply_fixture(&runtime, repository.path(), data.path());
+        let discarded = runtime
+            .discard_cloud_diff_apply(apply.id, apply.revision)
+            .expect("discard prepared diff");
+        assert_eq!(discarded.state, CloudDiffApplyState::Removed);
+        assert!(discarded.changed_paths.is_empty());
+        assert!(discarded.output.is_none());
+        assert!(discarded.patch_sha256.is_none());
+        assert!(!Path::new(&apply.root).exists());
+        let (_, patch) = runtime
+            .store()
+            .expect("store")
+            .cloud_diff_apply(apply.id)
+            .expect("load discarded diff")
+            .expect("discarded audit row");
+        assert!(patch.is_empty());
+        assert!(
+            runtime
+                .discard_cloud_diff_apply(apply.id, apply.revision)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn cloud_diff_recovery_restores_a_partial_apply_and_retains_an_unavailable_project() {
+        let data = tempfile::tempdir().expect("data");
+        let repository = tempfile::tempdir().expect("repository");
+        let runtime = AppRuntime::open_in_memory(
+            AppConfig {
+                data_directory: data.path().to_path_buf(),
+                ..AppConfig::default()
+            },
+            TEST_TOKEN.to_owned(),
+        )
+        .expect("runtime");
+        let (_, mut apply) =
+            initialize_cloud_apply_fixture(&runtime, repository.path(), data.path());
+        let preimage = data
+            .path()
+            .join("cloud-apply-preimages")
+            .join(apply.id.to_string())
+            .join("fixture.txt");
+        fs::create_dir_all(preimage.parent().expect("preimage parent")).expect("preimage parent");
+        fs::copy(repository.path().join("fixture.txt"), &preimage).expect("copy preimage");
+        apply.state = CloudDiffApplyState::Applying;
+        apply.touched_paths = vec![CloudDiffTouchedPath {
+            normalized_path: "fixture.txt".into(),
+            live_content_id: git_content_id(repository.path(), "fixture.txt")
+                .expect("live identity"),
+            expected_content_id: git_content_id(Path::new(&apply.root), "fixture.txt")
+                .expect("expected identity"),
+            preimage_sha256: regular_file_sha256(&preimage).expect("preimage digest"),
+            preimage_path: Some(preimage.to_string_lossy().into_owned()),
+        }];
+        apply.revision = apply.revision.saturating_add(1);
+        let patch = runtime
+            .store()
+            .expect("store")
+            .cloud_diff_apply(apply.id)
+            .expect("load apply")
+            .expect("saved apply")
+            .1;
+        runtime
+            .save_cloud_diff_apply(&apply, &patch)
+            .expect("save applying state");
+        fs::write(repository.path().join("fixture.txt"), "partially applied\n")
+            .expect("partial owner mutation");
+
+        runtime
+            .reconcile_cloud_diff_apply_recovery()
+            .expect("reconcile partial apply");
+        let recovered = runtime
+            .cloud_diff_apply(apply.id)
+            .expect("load recovered apply")
+            .expect("recovered apply");
+        assert_eq!(recovered.state, CloudDiffApplyState::RolledBack);
+        assert_eq!(
+            fs::read_to_string(repository.path().join("fixture.txt"))
+                .expect("restored owner file")
+                .replace("\r\n", "\n"),
+            "before\n"
+        );
+
+        let unavailable = tempfile::tempdir().expect("unavailable repository");
+        let (_, mut preparing) =
+            initialize_cloud_apply_fixture(&runtime, unavailable.path(), data.path());
+        preparing.state = CloudDiffApplyState::Preparing;
+        preparing.revision = preparing.revision.saturating_add(1);
+        let unavailable_patch = runtime
+            .store()
+            .expect("store")
+            .cloud_diff_apply(preparing.id)
+            .expect("load unavailable apply")
+            .expect("saved unavailable apply")
+            .1;
+        runtime
+            .save_cloud_diff_apply(&preparing, &unavailable_patch)
+            .expect("save preparing state");
+        fs::remove_dir_all(unavailable.path()).expect("remove unavailable project root");
+
+        runtime
+            .reconcile_cloud_diff_apply_recovery()
+            .expect("unavailable project must not block startup recovery");
+        let retained = runtime
+            .cloud_diff_apply(preparing.id)
+            .expect("load retained apply")
+            .expect("retained apply");
+        assert_eq!(retained.state, CloudDiffApplyState::Retained);
+        assert!(
+            retained
+                .error
+                .as_deref()
+                .is_some_and(|error| error.contains("workspace is unavailable"))
+        );
     }
     use tokio::net::TcpStream;
 

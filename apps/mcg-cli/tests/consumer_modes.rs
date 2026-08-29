@@ -12,10 +12,16 @@ use axum::{
     extract::{Path, State},
     routing::{get, post, put},
 };
+use chrono::Utc;
+use mcg_api::{ApplyCloudDiffRequest, PrepareCloudDiffApplyRequest, ProjectListResponse};
 use mcg_config::AppConfig;
-use mcg_domain::{ConversationInteractionKind, ExecutionPreferences, ProjectId};
+use mcg_domain::{
+    CONVERSATION_TEAM_SCHEMA_VERSION, CloudDiffApply, CloudDiffApplyId, CloudDiffApplyState,
+    ConversationInteractionKind, ExecutionPreferences, ProjectId,
+};
 use mcg_providers::{CONTRACT_VERSION, ProviderAuthMode, ProviderConnection, ProviderKind};
 use mcg_runtime::AppRuntime;
+use mcg_runtime::ProjectMutation;
 use tokio::{net::TcpListener, task::JoinHandle};
 
 const TEST_TOKEN: &str = "0123456789abcdef0123456789abcdef";
@@ -184,6 +190,187 @@ fn run_cli_with_stdin(
         .write_all(stdin.as_bytes())
         .expect("write child stdin");
     child.wait_with_output().expect("CLI output")
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn codex_apply_alias_uses_reviewable_two_stage_api_and_prints_changed_files() {
+    #[derive(Clone)]
+    struct ApplyFixture {
+        project: ProjectMutation,
+        candidate: CloudDiffApply,
+        requests: Arc<Mutex<Vec<serde_json::Value>>>,
+    }
+
+    async fn projects(State(state): State<ApplyFixture>) -> Json<ProjectListResponse> {
+        Json(ProjectListResponse {
+            projects: vec![state.project.project],
+            archived_projects: Vec::new(),
+        })
+    }
+
+    async fn refresh(State(state): State<ApplyFixture>) -> Json<ProjectMutation> {
+        Json(state.project)
+    }
+
+    async fn prepare(
+        State(state): State<ApplyFixture>,
+        Json(request): Json<PrepareCloudDiffApplyRequest>,
+    ) -> (axum::http::StatusCode, Json<CloudDiffApply>) {
+        state
+            .requests
+            .lock()
+            .expect("apply request log")
+            .push(serde_json::to_value(request).expect("prepare request JSON"));
+        (axum::http::StatusCode::CREATED, Json(state.candidate))
+    }
+
+    async fn apply(
+        State(state): State<ApplyFixture>,
+        Json(request): Json<ApplyCloudDiffRequest>,
+    ) -> Json<CloudDiffApply> {
+        state
+            .requests
+            .lock()
+            .expect("apply request log")
+            .push(serde_json::to_value(request).expect("apply request JSON"));
+        let mut applied = state.candidate;
+        applied.state = CloudDiffApplyState::Applied;
+        applied.revision = applied.revision.saturating_add(1);
+        Json(applied)
+    }
+
+    let project_root = tempfile::tempdir().expect("apply project");
+    let git = Command::new("git")
+        .args(["init", "-b", "main"])
+        .current_dir(project_root.path())
+        .output()
+        .expect("initialize apply project");
+    assert!(
+        git.status.success(),
+        "{}",
+        String::from_utf8_lossy(&git.stderr)
+    );
+    std::fs::write(project_root.path().join("README.md"), "fixture\n")
+        .expect("apply project fixture");
+    let add = Command::new("git")
+        .args(["add", "README.md"])
+        .current_dir(project_root.path())
+        .output()
+        .expect("stage apply project");
+    assert!(
+        add.status.success(),
+        "{}",
+        String::from_utf8_lossy(&add.stderr)
+    );
+    let commit = Command::new("git")
+        .args([
+            "-c",
+            "user.name=MetaCog Test",
+            "-c",
+            "user.email=metacog-test@local.invalid",
+            "commit",
+            "-m",
+            "fixture baseline",
+        ])
+        .current_dir(project_root.path())
+        .output()
+        .expect("commit apply project");
+    assert!(
+        commit.status.success(),
+        "{}",
+        String::from_utf8_lossy(&commit.stderr)
+    );
+    let runtime = AppRuntime::open_in_memory(AppConfig::default(), TEST_TOKEN.to_owned())
+        .expect("apply fixture runtime");
+    let project = runtime
+        .discover_project(project_root.path(), ProjectId::new())
+        .expect("discover apply project");
+    let now = Utc::now();
+    let candidate = CloudDiffApply {
+        schema_version: CONVERSATION_TEAM_SCHEMA_VERSION,
+        id: CloudDiffApplyId::new(),
+        project_id: project.project.project_id,
+        task_id: "cloud-task-42".into(),
+        state: CloudDiffApplyState::Ready,
+        root: project_root
+            .path()
+            .join("shadow")
+            .to_string_lossy()
+            .into_owned(),
+        branch: "mcg/cloud/test".into(),
+        base_head: "abc123".into(),
+        baseline_head: "abc123".into(),
+        baseline_sha256: "baseline".into(),
+        baseline_entries: Vec::new(),
+        baseline_exclusions: Vec::new(),
+        changed_paths: vec!["src/lib.rs".into(), "README.md".into()],
+        touched_paths: Vec::new(),
+        patch_sha256: Some("patch".into()),
+        output: Some("Applied cloud diff".into()),
+        error: None,
+        revision: 2,
+        created_at: now,
+        updated_at: now,
+    };
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let state = ApplyFixture {
+        project,
+        candidate,
+        requests: requests.clone(),
+    };
+    let app = Router::new()
+        .route("/api/v1/projects", get(projects))
+        .route("/api/v1/projects/{project_id}/refresh", post(refresh))
+        .route(
+            "/api/v1/projects/{project_id}/codex-cloud-applies",
+            post(prepare),
+        )
+        .route("/api/v1/codex-cloud-applies/{apply_id}/apply", post(apply))
+        .with_state(state);
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("apply fixture listener");
+    let address = listener.local_addr().expect("apply fixture address");
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .await
+            .expect("apply fixture server");
+    });
+
+    let output = tokio::task::block_in_place(|| {
+        run_cli(
+            &format!("http://{address}"),
+            project_root.path(),
+            &[
+                "-c",
+                "tui.animations=false",
+                "--enable",
+                "memories",
+                "--disable",
+                "sqlite",
+                "a",
+                "cloud-task-42",
+            ],
+        )
+    });
+    server.abort();
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "Applied cloud diff\nsrc/lib.rs\nREADME.md\n"
+    );
+    let requests = requests.lock().expect("apply request log");
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0]["task_id"], "cloud-task-42");
+    assert_eq!(requests[0]["config_overrides"][0], "tui.animations=false");
+    assert_eq!(requests[0]["enable_features"][0], "memories");
+    assert_eq!(requests[0]["disable_features"][0], "sqlite");
+    assert_eq!(requests[1]["expected_revision"], 2);
 }
 
 #[test]

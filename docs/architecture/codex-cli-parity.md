@@ -53,7 +53,8 @@ Environment variables alone are not capability discovery.
 | `migrate-rollouts` | Native | Daemon-free pass-through to the pinned Codex 0.150.1 migration engine with dry-run default, `--apply`, repeated `--thread`, throughput, JSON, and verbose controls. MetaCog does not reinterpret Codex rollout storage. |
 | global `--approve-for-me` | Native | Maps to MetaCog's existing governed Auto Review mode and forces the workspace-write sandbox and on-request policy while organization limits remain authoritative. It is mutually exclusive with explicit approval policy and full bypass. |
 | `sandbox` | Native | `mcg sandbox` is a daemon-free pass-through to the pinned Codex 0.150.1 Windows restricted-token sandbox. It preserves explicit state JSON, readable roots, network disabling, named permission/config profiles, managed configuration, working directory, literal command arguments, and repeatable config/feature overrides. The child process exit code and diagnostics pass through unchanged. |
-| `apply`, `update` | Missing | `apply` must not mutate Git outside MetaCog's review/apply authority, and `update` must update the signed MetaCog bundle rather than only its Codex sidecar. Native governed equivalents remain to be implemented. |
+| `apply` / `a` | Native | Resolves the current canonical Git project, runs the pinned `codex apply TASK_ID` in an isolated shadow worktree seeded with the exact tracked, staged, dirty, and bounded-untracked owner baseline, validates and persists the resulting diff, then integrates it only if the live baseline is unchanged. Digest checks, dry-run application, preimage journaling, rollback, restart recovery, and project-scoped cleanup keep the owner workspace governed. The desktop exposes the same contract as a review-first Pull Requests flow with explicit Apply and Discard actions. |
+| `update` | Missing | MetaCog must update and verify the complete signed application bundle rather than updating only its pinned Codex sidecar. |
 | `mcp-server` | Superseded | Current Codex documentation marks this family deprecated and directs integrations to app-server. MetaCog already uses its pinned app-server contract and will not add a new deprecated ungoverned endpoint. |
 | `app-server`, `cloud`, `debug`, `execpolicy`, `remote-control` | Missing | Experimental families remain gated until their contracts can be safely supported. |
 
@@ -204,6 +205,19 @@ every preference. Choosing current performs an explicit governed project rebind
 before the TUI opens; choosing session preserves the saved authority boundary.
 Project-free conversations remain unbound unless `-C` explicitly targets a
 project. Invalid values and non-interactive ambiguous choices fail visibly.
+
+Cycle 22 adds native top-level `apply` and alias `a` without allowing Codex to
+mutate the owner workspace directly. MetaCog creates a project-scoped shadow
+worktree, overlays the exact tracked, staged, dirty, and bounded-untracked
+baseline, invokes the pinned Codex cloud-apply command there, and stores a
+bounded binary patch plus normalized path and digest evidence. Integration
+revalidates HEAD and every baseline entry, dry-runs the patch, journals
+preimages, verifies post-apply content identities, and rolls back on failure.
+Interrupted preparation or integration is reconciled on daemon restart, and
+discard removes both the isolated worktree and sensitive durable patch content.
+The desktop Pull Requests surface lists recoverable candidates and keeps cloud
+changes reviewable until an explicit Apply action; its light- and dark-theme
+controls share the application tokens and meet the same accessibility gate.
 
 Codex-compatible support remains incomplete for local providers/OSS, remote
 endpoints/authentication, exact event schemas, and hook trust. Current Codex 0.150.1

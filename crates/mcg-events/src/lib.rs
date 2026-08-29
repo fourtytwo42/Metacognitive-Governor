@@ -26,6 +26,7 @@ pub enum EventKind {
     ConversationPreviewUpdated,
     BlackboardEntryRecorded,
     ManagedWorktreeUpdated,
+    CloudDiffApplyUpdated,
     CodexHarnessEvent,
     TaskCreated,
     TaskStarted,
@@ -103,6 +104,7 @@ impl EventKind {
             Self::ConversationPreviewUpdated => "conversation_preview_updated",
             Self::BlackboardEntryRecorded => "blackboard_entry_recorded",
             Self::ManagedWorktreeUpdated => "managed_worktree_updated",
+            Self::CloudDiffApplyUpdated => "cloud_diff_apply_updated",
             Self::CodexHarnessEvent => "codex_harness_event",
             Self::TaskCreated => "task_created",
             Self::TaskStarted => "task_started",
@@ -205,6 +207,7 @@ impl EventKind {
             "managed_worktree_updated" | "ManagedWorktreeUpdated" => {
                 Ok(Self::ManagedWorktreeUpdated)
             }
+            "cloud_diff_apply_updated" | "CloudDiffApplyUpdated" => Ok(Self::CloudDiffApplyUpdated),
             "codex_harness_event" | "CodexHarnessEvent" => Ok(Self::CodexHarnessEvent),
             "task_created" | "TaskCreated" => Ok(Self::TaskCreated),
             "task_started" | "TaskStarted" => Ok(Self::TaskStarted),

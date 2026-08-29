@@ -120,6 +120,10 @@ const client = vi.hoisted(() => ({
   decideGovernorProposal: vi.fn(),
   requestGovernorImplementation: vi.fn(),
   listManagedWorktrees: vi.fn(),
+  listCloudDiffApplies: vi.fn(),
+  prepareCloudDiffApply: vi.fn(),
+  applyCloudDiff: vi.fn(),
+  discardCloudDiffApply: vi.fn(),
   listAgentRuns: vi.fn(),
   setGlobalOrganizationAssignment: vi.fn(),
   setProjectOrganizationAssignment: vi.fn(),
@@ -314,6 +318,10 @@ vi.mock("./desktop-client", () => ({
   decideGovernorProposal: client.decideGovernorProposal,
   requestGovernorImplementation: client.requestGovernorImplementation,
   listManagedWorktrees: client.listManagedWorktrees,
+  listCloudDiffApplies: client.listCloudDiffApplies,
+  prepareCloudDiffApply: client.prepareCloudDiffApply,
+  applyCloudDiff: client.applyCloudDiff,
+  discardCloudDiffApply: client.discardCloudDiffApply,
   listAgentRuns: client.listAgentRuns,
   setGlobalOrganizationAssignment: client.setGlobalOrganizationAssignment,
   setProjectOrganizationAssignment: client.setProjectOrganizationAssignment,
@@ -522,6 +530,10 @@ beforeEach(() => {
   client.decideGovernorProposal.mockReset();
   client.requestGovernorImplementation.mockReset();
   client.listManagedWorktrees.mockReset();
+  client.listCloudDiffApplies.mockReset();
+  client.prepareCloudDiffApply.mockReset();
+  client.applyCloudDiff.mockReset();
+  client.discardCloudDiffApply.mockReset();
   client.listAgentRuns.mockReset();
   client.setGlobalOrganizationAssignment.mockReset();
   client.setProjectOrganizationAssignment.mockReset();
@@ -777,6 +789,35 @@ beforeEach(() => {
   });
   client.listGovernorProposals.mockResolvedValue({ proposals: [] });
   client.listManagedWorktrees.mockResolvedValue({ worktrees: [] });
+  client.listCloudDiffApplies.mockResolvedValue({ applies: [] });
+  client.prepareCloudDiffApply.mockResolvedValue({
+    schema_version: 1,
+    id: "00000000-0000-4000-8000-000000000ca1",
+    project_id: "00000000-0000-4000-8000-000000000702",
+    task_id: "cloud-task-123",
+    state: "ready",
+    root: "C:\\MetaCog\\cloud-apply",
+    branch: "mcg/cloud/fixture",
+    base_head: "abc123",
+    baseline_head: "abc123",
+    baseline_sha256: "a".repeat(64),
+    baseline_entries: [],
+    baseline_exclusions: [],
+    changed_paths: ["src/app.ts", "src/app.test.ts"],
+    touched_paths: [],
+    patch_sha256: "b".repeat(64),
+    output: "Applied cloud task in isolated worktree",
+    revision: 3,
+    created_at: "2026-08-29T00:00:00Z",
+    updated_at: "2026-08-29T00:00:01Z"
+  });
+  client.applyCloudDiff.mockImplementation(async (_applyId: string, expectedRevision: number) => ({
+    ...(await client.prepareCloudDiffApply()),
+    state: "applied",
+    revision: expectedRevision + 1,
+    updated_at: "2026-08-29T00:00:02Z"
+  }));
+  client.discardCloudDiffApply.mockResolvedValue({ state: "removed" });
   client.listAgentRuns.mockResolvedValue({ runs: [] });
   client.listOrganizationPublishers.mockResolvedValue([]);
   client.listOrganizationShareReviews.mockResolvedValue([]);
@@ -1938,6 +1979,69 @@ test("simple Pull requests starts a read-only repository review instead of expos
   expect(goal).toContain("Review code changes in review-me");
   expect(goal).toContain("all staged, unstaged, and untracked changes");
   expect(goal).toContain("Do not modify the working tree during the review");
+});
+
+test("Pull requests prepares a Codex cloud task in isolation before explicit application", async () => {
+  const project = {
+    schema_version: 1,
+    id: "00000000-0000-4000-8000-000000000701",
+    project_id: "00000000-0000-4000-8000-000000000702",
+    root: "C:\\Projects\\review-me",
+    fingerprint: "fixture",
+    observed_at: "2026-08-29T00:00:00Z",
+    repository: { is_git: true, branch: "feature/review", head: "abc123", dirty: true, recent_commits: [] },
+    languages: ["TypeScript"],
+    build_systems: ["npm"],
+    test_systems: ["vitest"],
+    package_managers: ["npm"],
+    services: [],
+    ci_systems: [],
+    important_directories: [],
+    commands: [],
+    instructions: { conflicts: [] },
+    world: { nodes: [], relationships: [] },
+    watched_inputs: {}
+  };
+  client.listProjects.mockResolvedValue({ projects: [project], archived_projects: [] });
+  render(<App />);
+
+  const panel = await screen.findByRole("region", { name: "Pull requests" });
+  fireEvent.click(within(within(panel).getByLabelText("Code change actions")).getByRole("button", { name: "Apply cloud task" }));
+  expect(within(panel).getByRole("heading", { name: "Apply a Codex cloud task" })).toBeVisible();
+  expect(within(panel).getByText(/project is unchanged while MetaCog prepares/i)).toBeVisible();
+
+  fireEvent.change(within(panel).getByLabelText("Repository"), { target: { value: project.project_id } });
+  await waitFor(() => expect(within(panel).getByLabelText("Codex cloud task ID")).toBeEnabled());
+  fireEvent.change(within(panel).getByLabelText("Codex cloud task ID"), { target: { value: "cloud-task-123" } });
+  const checkChanges = within(panel).getByRole("button", { name: "Check changes" });
+  await waitFor(() => expect(checkChanges).toBeEnabled());
+  fireEvent.click(checkChanges);
+
+  await waitFor(() => expect(client.prepareCloudDiffApply).toHaveBeenCalledWith(project.project_id, "cloud-task-123"));
+  expect(await within(panel).findByText("2 changed files")).toBeVisible();
+  expect(within(panel).getByText("src/app.ts")).toBeVisible();
+  expect(within(panel).getByText("src/app.test.ts")).toBeVisible();
+  expect(within(panel).getByText(/will apply this exact validated diff/i)).toBeVisible();
+
+  fireEvent.click(within(panel).getByRole("button", { name: "Discard prepared changes" }));
+  await waitFor(() => expect(client.discardCloudDiffApply).toHaveBeenCalledWith(
+    "00000000-0000-4000-8000-000000000ca1",
+    3
+  ));
+  expect(within(panel).queryByText("src/app.ts")).not.toBeInTheDocument();
+  await waitFor(() => expect(within(panel).getByLabelText("Codex cloud task ID")).toBeEnabled());
+  fireEvent.change(within(panel).getByLabelText("Codex cloud task ID"), { target: { value: "cloud-task-123" } });
+  const checkAgain = within(panel).getByRole("button", { name: "Check changes" });
+  await waitFor(() => expect(checkAgain).toBeEnabled());
+  fireEvent.click(checkAgain);
+  await waitFor(() => expect(client.prepareCloudDiffApply).toHaveBeenCalledTimes(2));
+
+  fireEvent.click(within(panel).getByRole("button", { name: "Apply changes" }));
+  await waitFor(() => expect(client.applyCloudDiff).toHaveBeenCalledWith(
+    "00000000-0000-4000-8000-000000000ca1",
+    3
+  ));
+  expect(await within(panel).findByText("Changes applied to the working tree.")).toBeVisible();
 });
 
 test("advanced Pull requests separates governed approvals from code review", async () => {

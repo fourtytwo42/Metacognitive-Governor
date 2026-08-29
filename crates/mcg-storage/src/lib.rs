@@ -7,10 +7,10 @@ use mcg_agents::{AgentInstance, AgentLease, AgentRun, WorkPlan};
 use mcg_domain::{
     AgentContextCheckpoint, AgentCredentialAudit, AgentDelegation, AgentMessage, AgentWake,
     AgentWakeId, AgentWakeKind, AgentWakeState, AgentWakeTarget, ApprovalId, BlackboardEntry,
-    CodexThreadBinding, Conversation, ConversationActivity, ConversationAgentSession,
-    ConversationId, ConversationMessage, ConversationMessageId, ConversationPreview,
-    ConversationPreviewId, ConversationPreviewState, ConversationTeamState, ConversationTurn,
-    ConversationTurnId, ConversationView, CoordinationBatch, CoordinationBatchId,
+    CloudDiffApply, CloudDiffApplyId, CodexThreadBinding, Conversation, ConversationActivity,
+    ConversationAgentSession, ConversationId, ConversationMessage, ConversationMessageId,
+    ConversationPreview, ConversationPreviewId, ConversationPreviewState, ConversationTeamState,
+    ConversationTurn, ConversationTurnId, ConversationView, CoordinationBatch, CoordinationBatchId,
     CoordinationBatchState, LeaseId, ManagedWorktree, MemoryClaimId, MemoryTransferId, ProjectId,
     ProjectSnapshotId, SharedContextHit, SharedContextSourceKind, TaskEnvelope, TaskId, TaskState,
     ToolExecutionId, ToolRequestId, effective_delegation_attempt_ids,
@@ -70,7 +70,7 @@ pub use scheduler::{ScheduleClaim, ScheduleWakeMutation};
 pub use shadow_workspaces::ShadowWorkspaceMutation;
 
 type EventRow = (i64, String, i64, String, Option<String>, String, String);
-pub const STORAGE_SCHEMA_VERSION: i64 = 49;
+pub const STORAGE_SCHEMA_VERSION: i64 = 50;
 
 const MIGRATION_1: &str = r"
 CREATE TABLE IF NOT EXISTS events (
@@ -1678,6 +1678,22 @@ CREATE TABLE IF NOT EXISTS cli_tui_preferences (
 );
 ";
 
+const MIGRATION_50: &str = r"
+CREATE TABLE IF NOT EXISTS cloud_diff_applies (
+    apply_id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    state TEXT NOT NULL,
+    apply_json TEXT NOT NULL,
+    patch_blob BLOB NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(project_id) REFERENCES projects(project_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS cloud_diff_applies_project_updated
+    ON cloud_diff_applies(project_id, updated_at DESC, apply_id);
+";
+
 #[derive(Debug, Error)]
 pub enum StorageError {
     #[error("storage I/O failed: {0}")]
@@ -1862,6 +1878,7 @@ impl SqliteEventStore {
             (47_i64, MIGRATION_47),
             (48_i64, MIGRATION_48),
             (49_i64, MIGRATION_49),
+            (50_i64, MIGRATION_50),
         ] {
             let applied = self.connection.query_row(
                 "SELECT EXISTS(SELECT 1 FROM mcg_schema WHERE version = ?1)",
@@ -2936,6 +2953,88 @@ impl SqliteEventStore {
         let event = Self::insert_event(&transaction, &event)?;
         transaction.commit()?;
         Ok(event)
+    }
+
+    /// Persists one governed Codex cloud-diff application and its bounded patch atomically.
+    pub fn save_cloud_diff_apply(
+        &mut self,
+        apply: &CloudDiffApply,
+        patch: &[u8],
+    ) -> Result<EventEnvelope, StorageError> {
+        if patch.len() > 16 * 1_024 * 1_024 {
+            return Err(StorageError::InvalidData(
+                "cloud diff patch exceeds the 16 MiB storage limit".into(),
+            ));
+        }
+        let event = EventEnvelope::new(
+            EventKind::CloudDiffApplyUpdated,
+            None,
+            serde_json::json!({"project_id": apply.project_id, "apply": apply}),
+        );
+        let transaction = self.connection.transaction()?;
+        transaction.execute(
+            "INSERT INTO cloud_diff_applies(apply_id, project_id, task_id, state, apply_json, patch_blob, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(apply_id) DO UPDATE SET state=excluded.state, apply_json=excluded.apply_json, patch_blob=excluded.patch_blob, updated_at=excluded.updated_at",
+            params![
+                apply.id.to_string(),
+                apply.project_id.to_string(),
+                apply.task_id,
+                serde_json::to_string(&apply.state)?,
+                serde_json::to_string(apply)?,
+                patch,
+                apply.created_at.to_rfc3339(),
+                apply.updated_at.to_rfc3339(),
+            ],
+        )?;
+        let event = Self::insert_event(&transaction, &event)?;
+        transaction.commit()?;
+        Ok(event)
+    }
+
+    pub fn cloud_diff_apply(
+        &self,
+        apply_id: CloudDiffApplyId,
+    ) -> Result<Option<(CloudDiffApply, Vec<u8>)>, StorageError> {
+        self.connection
+            .query_row(
+                "SELECT apply_json, patch_blob FROM cloud_diff_applies WHERE apply_id=?1",
+                [apply_id.to_string()],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?)),
+            )
+            .optional()?
+            .map(|(value, patch)| {
+                serde_json::from_str(&value)
+                    .map(|apply| (apply, patch))
+                    .map_err(StorageError::from)
+            })
+            .transpose()
+    }
+
+    pub fn cloud_diff_applies(
+        &self,
+        project_id: Option<ProjectId>,
+    ) -> Result<Vec<CloudDiffApply>, StorageError> {
+        let mut applies = Vec::new();
+        if let Some(project_id) = project_id {
+            let mut statement = self.connection.prepare(
+                "SELECT apply_json FROM cloud_diff_applies WHERE project_id=?1 ORDER BY updated_at DESC, apply_id",
+            )?;
+            let rows =
+                statement.query_map([project_id.to_string()], |row| row.get::<_, String>(0))?;
+            for row in rows {
+                applies.push(serde_json::from_str(&row?)?);
+            }
+        } else {
+            let mut statement = self.connection.prepare(
+                "SELECT apply_json FROM cloud_diff_applies ORDER BY updated_at DESC, apply_id",
+            )?;
+            let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+            for row in rows {
+                applies.push(serde_json::from_str(&row?)?);
+            }
+        }
+        Ok(applies)
     }
 
     /// Appends secret-free credential lifecycle evidence. Bearer and bootstrap values are never
@@ -5544,6 +5643,70 @@ mod tests {
         assert_eq!(
             store.codex_thread_bindings().expect("all bindings").len(),
             2
+        );
+    }
+
+    #[test]
+    fn cloud_diff_apply_and_patch_are_atomic_bounded_and_project_scoped() {
+        let project_root = tempfile::tempdir().expect("project root");
+        std::fs::write(project_root.path().join("Cargo.toml"), "[workspace]").expect("manifest");
+        let project_id = ProjectId::new();
+        let project =
+            ProjectDiscoverer::discover(project_root.path(), project_id).expect("discover project");
+        let mut store = SqliteEventStore::open_in_memory().expect("store");
+        store
+            .record_project_snapshot(&project)
+            .expect("record project");
+        let now = Utc::now();
+        let apply = CloudDiffApply {
+            schema_version: mcg_domain::CONVERSATION_TEAM_SCHEMA_VERSION,
+            id: CloudDiffApplyId::new(),
+            project_id,
+            task_id: "task-123".into(),
+            state: mcg_domain::CloudDiffApplyState::Ready,
+            root: project_root
+                .path()
+                .join("shadow")
+                .to_string_lossy()
+                .into_owned(),
+            branch: "mcg/cloud/fixture".into(),
+            base_head: "abc123".into(),
+            baseline_head: "abc123".into(),
+            baseline_sha256: "a".repeat(64),
+            baseline_entries: vec![],
+            baseline_exclusions: vec![],
+            changed_paths: vec!["src/lib.rs".into()],
+            touched_paths: vec![],
+            patch_sha256: Some("b".repeat(64)),
+            output: Some("prepared".into()),
+            error: None,
+            revision: 2,
+            created_at: now,
+            updated_at: now,
+        };
+        let patch = b"diff --git a/src/lib.rs b/src/lib.rs\n";
+        let event = store
+            .save_cloud_diff_apply(&apply, patch)
+            .expect("save cloud diff");
+        assert_eq!(event.kind, EventKind::CloudDiffApplyUpdated);
+        assert_eq!(
+            store.cloud_diff_apply(apply.id).expect("load cloud diff"),
+            Some((apply.clone(), patch.to_vec()))
+        );
+        assert_eq!(
+            store
+                .cloud_diff_applies(Some(project_id))
+                .expect("project applies"),
+            vec![apply.clone()]
+        );
+        assert!(
+            store
+                .save_cloud_diff_apply(&apply, &vec![0; 16 * 1_024 * 1_024 + 1])
+                .is_err()
+        );
+        assert_eq!(
+            store.cloud_diff_apply(apply.id).expect("unchanged record"),
+            Some((apply, patch.to_vec()))
         );
     }
 

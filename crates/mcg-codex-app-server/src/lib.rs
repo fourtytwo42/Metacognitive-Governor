@@ -363,7 +363,7 @@ pub struct CodexExecutionPreferences {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub config_overrides: Vec<CodexConfigOverride>,
     /// A validated, sanitized snapshot of the selected Codex profile. The runtime owns this
-    /// field; callers cannot use it to bypass MetaCog's configuration boundary.
+    /// field; callers cannot use it to bypass `MetaCog`'s configuration boundary.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile_config: Option<Value>,
 }
@@ -927,6 +927,35 @@ pub struct CodexTurnResult {
     pub raw_turn: Value,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodexCloudApplyResult {
+    pub stdout: String,
+    pub stderr: String,
+}
+
+fn cloud_apply_arguments(
+    task_id: &str,
+    config_overrides: &[String],
+    enable_features: &[String],
+    disable_features: &[String],
+) -> Vec<String> {
+    let mut arguments = vec!["apply".to_owned()];
+    for value in config_overrides {
+        arguments.push("-c".to_owned());
+        arguments.push(value.clone());
+    }
+    for value in enable_features {
+        arguments.push("--enable".to_owned());
+        arguments.push(value.clone());
+    }
+    for value in disable_features {
+        arguments.push("--disable".to_owned());
+        arguments.push(value.clone());
+    }
+    arguments.push(task_id.to_owned());
+    arguments
+}
+
 struct Process {
     child: Child,
     stdin: Arc<Mutex<ChildStdin>>,
@@ -1022,6 +1051,81 @@ impl CodexAppServerHarness {
             .values()
             .cloned()
             .collect()
+    }
+
+    /// Applies a cloud-task diff only inside the caller-provided isolated workspace.
+    ///
+    /// The caller owns baseline capture, integration, and rollback. This helper deliberately
+    /// exposes no arbitrary argv: only Codex's documented `apply` task identifier and already
+    /// validated configuration/feature overrides can reach the pinned executable.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the task identifier or override counts are invalid, the pinned
+    /// executable cannot start, the bounded operation times out, or Codex rejects the apply.
+    pub async fn apply_cloud_diff(
+        &self,
+        cwd: &Path,
+        task_id: &str,
+        config_overrides: &[String],
+        enable_features: &[String],
+        disable_features: &[String],
+    ) -> Result<CodexCloudApplyResult, CodexHarnessError> {
+        let task_id = task_id.trim();
+        if task_id.is_empty()
+            || task_id.len() > 256
+            || task_id.starts_with('-')
+            || task_id.chars().any(char::is_control)
+        {
+            return Err(CodexHarnessError::Protocol(
+                "Codex cloud task ID must contain 1 to 256 non-control characters and cannot start with '-'"
+                    .into(),
+            ));
+        }
+        if config_overrides.len() > 32
+            || enable_features.len().saturating_add(disable_features.len()) > 32
+        {
+            return Err(CodexHarnessError::Protocol(
+                "Codex cloud apply override count exceeds the supported limit".into(),
+            ));
+        }
+        let executable = self.inner.lock().await.executable.clone();
+        let mut command = Command::new(executable);
+        command
+            .args(cloud_apply_arguments(
+                task_id,
+                config_overrides,
+                enable_features,
+                disable_features,
+            ))
+            .current_dir(cwd)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        let output = tokio::time::timeout(Duration::from_secs(300), command.output())
+            .await
+            .map_err(|_| CodexHarnessError::Timeout)?
+            .map_err(|error| CodexHarnessError::Start(error.to_string()))?;
+        let bounded = |bytes: &[u8]| {
+            let value = String::from_utf8_lossy(bytes);
+            let mut value = value.chars().take(16_384).collect::<String>();
+            if bytes.len() > 16_384 {
+                value.push_str("\n[output truncated]");
+            }
+            value
+        };
+        let stdout = bounded(&output.stdout);
+        let stderr = bounded(&output.stderr);
+        if !output.status.success() {
+            let diagnostic = if stderr.trim().is_empty() {
+                format!("Codex cloud apply exited with {}", output.status)
+            } else {
+                stderr.clone()
+            };
+            return Err(CodexHarnessError::Protocol(diagnostic));
+        }
+        Ok(CodexCloudApplyResult { stdout, stderr })
     }
 
     /// Loads the effective Codex configuration through the pinned binary's
@@ -2674,6 +2778,28 @@ fn thread_has_source(thread: &Value, thread_source: &str) -> bool {
 mod tests {
     use super::*;
     use sha2::{Digest, Sha256};
+
+    #[test]
+    fn cloud_apply_arguments_preserve_only_structured_supported_overrides() {
+        assert_eq!(
+            cloud_apply_arguments(
+                "task-123",
+                &["model_verbosity=\"high\"".into()],
+                &["memories".into()],
+                &["sqlite".into()],
+            ),
+            [
+                "apply",
+                "-c",
+                "model_verbosity=\"high\"",
+                "--enable",
+                "memories",
+                "--disable",
+                "sqlite",
+                "task-123",
+            ]
+        );
+    }
 
     #[test]
     fn pinned_contract_and_unknown_fields_are_tolerated() {

@@ -61,6 +61,7 @@ domain_id!(AgentWakeId);
 domain_id!(ConversationPreviewId);
 domain_id!(ManagedWorktreeId);
 domain_id!(IntegrationJournalId);
+domain_id!(CloudDiffApplyId);
 domain_id!(AgentCredentialAuditId);
 domain_id!(TaskId);
 domain_id!(RunId);
@@ -1834,6 +1835,63 @@ pub struct ManagedWorktree {
     pub updated_at: DateTime<Utc>,
 }
 
+/// Durable state for applying the latest diff produced by a Codex cloud task.
+///
+/// The native Codex client is allowed to mutate only an isolated shadow worktree. `MetaCog` then
+/// integrates the resulting bounded patch into the owner workspace under the same preimage and
+/// rollback guarantees used by governed coding work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CloudDiffApplyState {
+    Preparing,
+    Ready,
+    Applying,
+    Applied,
+    Conflict,
+    RolledBack,
+    Failed,
+    Retained,
+    Removed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CloudDiffTouchedPath {
+    pub normalized_path: String,
+    pub live_content_id: Option<String>,
+    pub expected_content_id: Option<String>,
+    pub preimage_sha256: Option<String>,
+    pub preimage_path: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CloudDiffApply {
+    pub schema_version: u16,
+    pub id: CloudDiffApplyId,
+    pub project_id: ProjectId,
+    pub task_id: String,
+    pub state: CloudDiffApplyState,
+    pub root: String,
+    pub branch: String,
+    pub base_head: String,
+    pub baseline_head: String,
+    pub baseline_sha256: String,
+    #[serde(default)]
+    pub baseline_entries: Vec<WorktreeBaselineEntry>,
+    #[serde(default)]
+    pub baseline_exclusions: Vec<WorktreeBaselineExclusion>,
+    #[serde(default)]
+    pub changed_paths: Vec<String>,
+    #[serde(default)]
+    pub touched_paths: Vec<CloudDiffTouchedPath>,
+    pub patch_sha256: Option<String>,
+    pub output: Option<String>,
+    pub error: Option<String>,
+    #[serde(default)]
+    pub revision: u64,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentCredentialAuditKind {
@@ -2126,7 +2184,7 @@ pub struct ExecutionPreferences {
     pub sandbox_mode: Option<ExecutionSandboxMode>,
     /// Optional named Codex permission profile selected by the owner. The
     /// runtime re-resolves it against the pinned Codex catalog before use and
-    /// never permits it to expand MetaCog role or organization authority.
+    /// never permits it to expand `MetaCog` role or organization authority.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission_profile: Option<String>,
     /// Optional Codex v2 configuration profile selected with `--profile`/`-p`.
@@ -2143,14 +2201,14 @@ pub struct ExecutionPreferences {
     /// SHA-256 of the exact profile file used to create the snapshot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub codex_profile_digest: Option<String>,
-    /// Profile paths intentionally removed because MetaCog governs them.
+    /// Profile paths intentionally removed because `MetaCog` governs them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub codex_profile_ignored_keys: Vec<String>,
     /// Owner-selected, canonical local directories that a workspace-write turn may also mutate.
     /// Runtime validation re-resolves these paths before every originating turn.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub additional_writable_roots: Vec<String>,
-    /// Per-run Codex feature overrides. These are validated against MetaCog's
+    /// Per-run Codex feature overrides. These are validated against `MetaCog`'s
     /// authority boundary and never mutate the shared Codex configuration.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub codex_feature_overrides: BTreeMap<String, bool>,

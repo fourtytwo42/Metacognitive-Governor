@@ -100,6 +100,7 @@ test.beforeEach(async ({ page }) => {
     let sshWorkflows: any[] = [];
     let reviewedPlans: any[] = [];
     let reviewedRunCount = 0;
+    let cloudApplyCandidate: any = null;
     const history = [{ settings: initial, reason: "initial settings", changed_at: initial.updated_at }];
     Object.defineProperty(window, "__TAURI_INTERNALS__", {
       value: {
@@ -112,6 +113,44 @@ test.beforeEach(async ({ page }) => {
           if (command === "list_ssh_hosts") return { hosts: sshHosts };
           if (command === "list_ssh_workflows") return { workflows: sshWorkflows };
           if (command === "list_projects") return { projects: [project] };
+          if (command === "prepare_cloud_diff_apply") {
+            cloudApplyCandidate = {
+              schema_version: 1,
+              id: "00000000-0000-4000-8000-000000000271",
+              project_id: args.projectId,
+              task_id: args.taskId,
+              state: "ready",
+              root: "C:\\MetaCog\\cloud-applies\\fixture",
+              branch: "mcg/cloud/fixture",
+              base_head: "abc",
+              baseline_head: "abc",
+              baseline_sha256: "b".repeat(64),
+              baseline_entries: [],
+              baseline_exclusions: [],
+              changed_paths: Array.from({ length: 18 }, (_, index) => `src/cloud/change-${String(index + 1).padStart(2, "0")}.ts`),
+              touched_paths: [],
+              patch_sha256: "c".repeat(64),
+              output: "Applied patch to 18 files in the isolated MetaCog worktree.",
+              error: null,
+              revision: 2,
+              created_at: now,
+              updated_at: now
+            };
+            return cloudApplyCandidate;
+          }
+          if (command === "list_cloud_diff_applies") {
+            return { applies: cloudApplyCandidate?.state === "ready" ? [cloudApplyCandidate] : [] };
+          }
+          if (command === "apply_cloud_diff") {
+            if (!cloudApplyCandidate || args.applyId !== cloudApplyCandidate.id || args.expectedRevision !== cloudApplyCandidate.revision) throw new Error("stale cloud apply candidate");
+            cloudApplyCandidate = { ...cloudApplyCandidate, state: "applied", revision: cloudApplyCandidate.revision + 1, updated_at: "2026-08-18T00:01:00Z" };
+            return cloudApplyCandidate;
+          }
+          if (command === "discard_cloud_diff_apply") {
+            if (!cloudApplyCandidate || args.applyId !== cloudApplyCandidate.id || args.expectedRevision !== cloudApplyCandidate.revision) throw new Error("stale cloud apply candidate");
+            cloudApplyCandidate = { ...cloudApplyCandidate, state: "removed", changed_paths: [], output: null, revision: cloudApplyCandidate.revision + 1, updated_at: "2026-08-18T00:01:00Z" };
+            return cloudApplyCandidate;
+          }
           if (command === "codex_permission_profiles") return [
             { id: "workspace-safe", description: "Write only inside the project.", allowed: true },
             { id: "organization-blocked", description: "Blocked by managed policy.", allowed: false }
@@ -399,6 +438,65 @@ test("consumer shell starts simple and can reveal advanced status", async ({ pag
   await scheduler.getByLabel("Scheduled work").fill("Summarize important project changes every morning");
   await scheduler.getByRole("button", { name: "Set up in chat" }).click();
   await expect(page.getByRole("textbox", { name: "Message" })).toHaveValue(/Summarize important project changes every morning/);
+});
+
+test("Codex cloud apply stays reviewable and contained before explicit integration", async ({ page }) => {
+  await page.goto("/");
+  await page.getByRole("link", { name: "Pull requests", exact: true }).click();
+  const pullRequests = page.getByRole("region", { name: "Pull requests" });
+  const codeChangeActions = pullRequests.getByLabel("Code change actions");
+  const applyCloudTask = codeChangeActions.getByRole("button", { name: "Apply cloud task" });
+  await applyCloudTask.click();
+  await expect(pullRequests.getByRole("heading", { name: "Apply a Codex cloud task" })).toBeVisible();
+  await expect(pullRequests.getByText("Your project is unchanged while MetaCog prepares and validates the diff.")).toBeVisible();
+  await pullRequests.getByLabel("Repository").selectOption("00000000-0000-4000-8000-000000000242");
+  await pullRequests.getByLabel("Codex cloud task ID").fill("cloud-task-42");
+  await pullRequests.getByRole("button", { name: "Check changes" }).click();
+
+  const files = pullRequests.getByLabel("Cloud task changed files");
+  await expect(files).toBeVisible();
+  await expect(files.getByText("src/cloud/change-01.ts")).toBeVisible();
+  await expect(pullRequests.getByText("18 changed files")).toBeVisible();
+  await expect(pullRequests.getByText(/If the repository changed since preparation/)).toBeVisible();
+  const geometry = await files.evaluate((element) => ({
+    clientHeight: element.clientHeight,
+    scrollHeight: element.scrollHeight,
+    right: element.getBoundingClientRect().right,
+    viewport: document.documentElement.clientWidth
+  }));
+  expect(geometry.scrollHeight).toBeGreaterThan(geometry.clientHeight);
+  expect(geometry.right).toBeLessThanOrEqual(geometry.viewport);
+  await files.hover();
+  await page.mouse.wheel(0, 500);
+  await expect.poll(() => files.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
+
+  const darkAccessibility = await new AxeBuilder({ page }).include(".pull-request-detail-pane").analyze();
+  expect(darkAccessibility.violations, "cloud apply dark-theme accessibility violations").toEqual([]);
+  await page.evaluate(() => document.documentElement.setAttribute("data-theme", "light"));
+  const lightActionContrast = await applyCloudTask.evaluate((button) => {
+    const parseRgb = (value: string) => value.match(/[\d.]+/g)?.slice(0, 3).map(Number) ?? [];
+    const luminance = (value: string) => {
+      const [red, green, blue] = parseRgb(value).map((channel) => {
+        const normalized = channel / 255;
+        return normalized <= 0.04045
+          ? normalized / 12.92
+          : ((normalized + 0.055) / 1.055) ** 2.4;
+      });
+      return 0.2126 * red + 0.7152 * green + 0.0722 * blue;
+    };
+    const style = getComputedStyle(button);
+    const foreground = luminance(style.color);
+    const background = luminance(style.backgroundColor);
+    return (Math.max(foreground, background) + 0.05) / (Math.min(foreground, background) + 0.05);
+  });
+  expect(lightActionContrast, "light-theme Pull Requests action contrast").toBeGreaterThanOrEqual(4.5);
+  const lightAccessibility = await new AxeBuilder({ page }).include(".pull-request-detail-pane").analyze();
+  expect(lightAccessibility.violations, "cloud apply light-theme accessibility violations").toEqual([]);
+  await page.evaluate(() => document.documentElement.setAttribute("data-theme", "dark"));
+
+  await pullRequests.getByRole("button", { name: "Apply changes" }).click();
+  await expect(pullRequests.getByRole("status")).toHaveText("Changes applied to the working tree.");
+  await expect(page.locator("html")).toHaveJSProperty("scrollWidth", await page.locator("html").evaluate((element) => element.clientWidth));
 });
 
 test("new chat run menus stay compact, aligned, and use the shared icon set", async ({ page }) => {

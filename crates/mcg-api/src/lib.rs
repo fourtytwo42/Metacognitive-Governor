@@ -34,23 +34,24 @@ use mcg_agents::{
 };
 use mcg_config::{AutonomyPreset, CliTuiPreferences, UserSettings, UserSettingsRevision};
 use mcg_domain::{
-    AgentDelegationId, ApprovalId, BlackboardEntryId, BlackboardEntryKind, ComposerMentionInput,
-    ComputerActionBatchId, ComputerUseCapability, ComputerUseTarget, Conversation,
-    ConversationAgentSessionId, ConversationGoalStatus, ConversationId,
-    ConversationInteractionKind, ConversationMode, ConversationPreview, ConversationPreviewId,
-    ConversationTeamState, ConversationTurnId, ConversationTurnState, ConversationView,
-    ExecutionPreferences, ExperimentId, GovernorProposalId, ManagedWorktree, MemoryClaimId,
-    MemoryTransferId, MentionCandidate, NotificationSeverity, OrganizationId, OrganizationImportId,
-    OrganizationRevisionId, OrganizationShareReviewId, PlatformCapabilitySnapshot, PlatformSession,
-    PlatformSessionEvent, PlatformSessionId, PlatformSessionKind, PluginCapabilityGrant,
-    PluginInstallation, PluginInvocationId, PluginInvocationRecord, PluginRevision, ProjectId,
-    ReviewedTopologyPlanId, RiskLevel, RoleId, RunId, SCHEDULE_SCHEMA_VERSION, ScheduleDefinition,
-    ScheduleId, ScheduleOccurrence, ScheduleOccurrenceState, ScheduleState, ScheduleTrigger,
-    SchedulerNotification, SchedulerNotificationId, SharedContextHit, Site, SiteDeployment,
-    SiteDeploymentCommand, SiteDeploymentId, SiteEnvironment, SiteHealthCheck, SiteHealthCheckId,
-    SiteId, SiteMonitor, SiteRevision, SiteState, SshAuthentication, SshHost, SshHostId,
-    SshHostPlatform, SshHostRevision, SshHostState, SshOperation, SshOperationId, SshOperationKind,
-    SshWorkflow, SshWorkflowId, TaskBudget, TaskEnvelope, TaskId, TaskState, ThreadId, WorkItemId,
+    AgentDelegationId, ApprovalId, BlackboardEntryId, BlackboardEntryKind, CloudDiffApply,
+    CloudDiffApplyId, ComposerMentionInput, ComputerActionBatchId, ComputerUseCapability,
+    ComputerUseTarget, Conversation, ConversationAgentSessionId, ConversationGoalStatus,
+    ConversationId, ConversationInteractionKind, ConversationMode, ConversationPreview,
+    ConversationPreviewId, ConversationTeamState, ConversationTurnId, ConversationTurnState,
+    ConversationView, ExecutionPreferences, ExperimentId, GovernorProposalId, ManagedWorktree,
+    MemoryClaimId, MemoryTransferId, MentionCandidate, NotificationSeverity, OrganizationId,
+    OrganizationImportId, OrganizationRevisionId, OrganizationShareReviewId,
+    PlatformCapabilitySnapshot, PlatformSession, PlatformSessionEvent, PlatformSessionId,
+    PlatformSessionKind, PluginCapabilityGrant, PluginInstallation, PluginInvocationId,
+    PluginInvocationRecord, PluginRevision, ProjectId, ReviewedTopologyPlanId, RiskLevel, RoleId,
+    RunId, SCHEDULE_SCHEMA_VERSION, ScheduleDefinition, ScheduleId, ScheduleOccurrence,
+    ScheduleOccurrenceState, ScheduleState, ScheduleTrigger, SchedulerNotification,
+    SchedulerNotificationId, SharedContextHit, Site, SiteDeployment, SiteDeploymentCommand,
+    SiteDeploymentId, SiteEnvironment, SiteHealthCheck, SiteHealthCheckId, SiteId, SiteMonitor,
+    SiteRevision, SiteState, SshAuthentication, SshHost, SshHostId, SshHostPlatform,
+    SshHostRevision, SshHostState, SshOperation, SshOperationId, SshOperationKind, SshWorkflow,
+    SshWorkflowId, TaskBudget, TaskEnvelope, TaskId, TaskState, ThreadId, WorkItemId,
 };
 use mcg_events::{EventEnvelope, EventKind};
 use mcg_mcp::{McpConnection, McpCredential, McpError, McpToolCatalog};
@@ -983,6 +984,27 @@ pub struct ManagedWorktreeListResponse {
     pub worktrees: Vec<ManagedWorktree>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrepareCloudDiffApplyRequest {
+    pub task_id: String,
+    #[serde(default)]
+    pub config_overrides: Vec<String>,
+    #[serde(default)]
+    pub enable_features: Vec<String>,
+    #[serde(default)]
+    pub disable_features: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApplyCloudDiffRequest {
+    pub expected_revision: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CloudDiffApplyListResponse {
+    pub applies: Vec<CloudDiffApply>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OwnerGovernorApprovalRequest {
     pub expected: GovernorProposalState,
@@ -1527,6 +1549,22 @@ fn router_with_shutdown(runtime: Arc<AppRuntime>, shutdown: Option<watch::Sender
         .route("/api/v1/governor/policy", get(get_governor_policy))
         .route("/api/v1/governor/proposals", post(create_governor_proposal))
         .route("/api/v1/worktrees", get(list_managed_worktrees))
+        .route(
+            "/api/v1/projects/{project_id}/codex-cloud-applies",
+            get(list_cloud_diff_applies).post(prepare_cloud_diff_apply),
+        )
+        .route(
+            "/api/v1/codex-cloud-applies/{apply_id}",
+            get(get_cloud_diff_apply),
+        )
+        .route(
+            "/api/v1/codex-cloud-applies/{apply_id}/apply",
+            post(apply_cloud_diff),
+        )
+        .route(
+            "/api/v1/codex-cloud-applies/{apply_id}/discard",
+            post(discard_cloud_diff_apply),
+        )
         .route(
             "/api/v1/governor/organizations/{organization_id}/proposals",
             get(list_governor_proposals),
@@ -3035,6 +3073,114 @@ async fn list_managed_worktrees(
             .managed_worktrees()
             .map_err(map_runtime_error)?,
     }))
+}
+
+async fn list_cloud_diff_applies(
+    State(state): State<ApiState>,
+    Path(project_id): Path<String>,
+) -> Result<Json<CloudDiffApplyListResponse>, ApiError> {
+    let project_id = project_id
+        .parse::<ProjectId>()
+        .map_err(|_| ApiError::bad_request("project id is invalid"))?;
+    if state
+        .runtime
+        .project(project_id)
+        .map_err(map_runtime_error)?
+        .is_none()
+    {
+        return Err(ApiError::not_found("project was not found"));
+    }
+    Ok(Json(CloudDiffApplyListResponse {
+        applies: state
+            .runtime
+            .cloud_diff_applies(Some(project_id))
+            .map_err(map_runtime_error)?,
+    }))
+}
+
+async fn prepare_cloud_diff_apply(
+    State(state): State<ApiState>,
+    Path(project_id): Path<String>,
+    Json(request): Json<PrepareCloudDiffApplyRequest>,
+) -> Result<(StatusCode, Json<CloudDiffApply>), ApiError> {
+    let project_id = project_id
+        .parse::<ProjectId>()
+        .map_err(|_| ApiError::bad_request("project id is invalid"))?;
+    let apply = state
+        .runtime
+        .prepare_cloud_diff_apply(
+            project_id,
+            &request.task_id,
+            &request.config_overrides,
+            &request.enable_features,
+            &request.disable_features,
+        )
+        .await
+        .map_err(map_runtime_error)?;
+    Ok((StatusCode::CREATED, Json(apply)))
+}
+
+async fn get_cloud_diff_apply(
+    State(state): State<ApiState>,
+    Path(apply_id): Path<String>,
+) -> Result<Json<CloudDiffApply>, ApiError> {
+    let apply_id = apply_id
+        .parse::<CloudDiffApplyId>()
+        .map_err(|_| ApiError::bad_request("cloud diff apply id is invalid"))?;
+    state
+        .runtime
+        .cloud_diff_apply(apply_id)
+        .map_err(map_runtime_error)?
+        .map(Json)
+        .ok_or_else(|| ApiError::not_found("cloud diff apply was not found"))
+}
+
+async fn apply_cloud_diff(
+    State(state): State<ApiState>,
+    Path(apply_id): Path<String>,
+    Json(request): Json<ApplyCloudDiffRequest>,
+) -> Result<Json<CloudDiffApply>, ApiError> {
+    let apply_id = apply_id
+        .parse::<CloudDiffApplyId>()
+        .map_err(|_| ApiError::bad_request("cloud diff apply id is invalid"))?;
+    if state
+        .runtime
+        .cloud_diff_apply(apply_id)
+        .map_err(map_runtime_error)?
+        .is_none()
+    {
+        return Err(ApiError::not_found("cloud diff apply was not found"));
+    }
+    Ok(Json(
+        state
+            .runtime
+            .integrate_cloud_diff_apply(apply_id, request.expected_revision)
+            .map_err(map_runtime_error)?,
+    ))
+}
+
+async fn discard_cloud_diff_apply(
+    State(state): State<ApiState>,
+    Path(apply_id): Path<String>,
+    Json(request): Json<ApplyCloudDiffRequest>,
+) -> Result<Json<CloudDiffApply>, ApiError> {
+    let apply_id = apply_id
+        .parse::<CloudDiffApplyId>()
+        .map_err(|_| ApiError::bad_request("cloud diff apply id is invalid"))?;
+    if state
+        .runtime
+        .cloud_diff_apply(apply_id)
+        .map_err(map_runtime_error)?
+        .is_none()
+    {
+        return Err(ApiError::not_found("cloud diff apply was not found"));
+    }
+    Ok(Json(
+        state
+            .runtime
+            .discard_cloud_diff_apply(apply_id, request.expected_revision)
+            .map_err(map_runtime_error)?,
+    ))
 }
 
 async fn create_governor_proposal(
@@ -7619,6 +7765,103 @@ mod tests {
             .await
             .expect("permission profile response");
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn cloud_diff_apply_routes_enforce_authentication_identity_and_input_bounds() {
+        let app = router(test_runtime());
+        let project_id = ProjectId::new();
+        let unauthorized = app
+            .clone()
+            .oneshot(
+                Request::get(format!("/api/v1/projects/{project_id}/codex-cloud-applies"))
+                    .body(Body::empty())
+                    .expect("unauthorized cloud apply request"),
+            )
+            .await
+            .expect("unauthorized cloud apply response");
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let invalid_project = app
+            .clone()
+            .oneshot(
+                authorized(Request::get(
+                    "/api/v1/projects/not-a-project/codex-cloud-applies",
+                ))
+                .body(Body::empty())
+                .expect("invalid project request"),
+            )
+            .await
+            .expect("invalid project response");
+        assert_eq!(invalid_project.status(), StatusCode::BAD_REQUEST);
+
+        let missing_project = app
+            .clone()
+            .oneshot(
+                authorized(Request::get(format!(
+                    "/api/v1/projects/{project_id}/codex-cloud-applies"
+                )))
+                .body(Body::empty())
+                .expect("missing project request"),
+            )
+            .await
+            .expect("missing project response");
+        assert_eq!(missing_project.status(), StatusCode::NOT_FOUND);
+
+        let empty_task = app
+            .clone()
+            .oneshot(
+                authorized(Request::post(format!(
+                    "/api/v1/projects/{project_id}/codex-cloud-applies"
+                )))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"task_id":""}"#))
+                .expect("empty task request"),
+            )
+            .await
+            .expect("empty task response");
+        assert_eq!(empty_task.status(), StatusCode::BAD_REQUEST);
+
+        let missing_apply_id = CloudDiffApplyId::new();
+        let missing_apply = app
+            .clone()
+            .oneshot(
+                authorized(Request::get(format!(
+                    "/api/v1/codex-cloud-applies/{missing_apply_id}"
+                )))
+                .body(Body::empty())
+                .expect("missing apply request"),
+            )
+            .await
+            .expect("missing apply response");
+        assert_eq!(missing_apply.status(), StatusCode::NOT_FOUND);
+
+        let invalid_apply = app
+            .clone()
+            .oneshot(
+                authorized(Request::post(
+                    "/api/v1/codex-cloud-applies/not-an-apply/apply",
+                ))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"expected_revision":1}"#))
+                .expect("invalid apply request"),
+            )
+            .await
+            .expect("invalid apply response");
+        assert_eq!(invalid_apply.status(), StatusCode::BAD_REQUEST);
+
+        let missing_discard = app
+            .oneshot(
+                authorized(Request::post(format!(
+                    "/api/v1/codex-cloud-applies/{missing_apply_id}/discard"
+                )))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"expected_revision":1}"#))
+                .expect("missing discard request"),
+            )
+            .await
+            .expect("missing discard response");
+        assert_eq!(missing_discard.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

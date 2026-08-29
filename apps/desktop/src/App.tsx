@@ -16,6 +16,7 @@ import {
   ChevronRight,
   Clock3,
   Cloud,
+  CloudDownload,
   Command,
   Copy,
   Cpu,
@@ -106,6 +107,8 @@ function isChatGptSiteUrl(value: string) {
 
 import {
   approveRequest,
+  applyCloudDiff,
+  discardCloudDiffApply,
   applyComputerActions,
   attachBrowserSession,
   attachComputerSession,
@@ -157,6 +160,7 @@ import {
   listAgentRuns,
   listGovernorProposals,
   listManagedWorktrees,
+  listCloudDiffApplies,
   listPlugins,
   listExperiments,
   listSupervisionObservations,
@@ -174,6 +178,7 @@ import {
   listProjectMemoryTransfers,
   listReviewedTopologyPlans,
   projectTopologyPlan,
+  prepareCloudDiffApply,
   listPlatformSessions,
   listCodexSites,
   listSites,
@@ -284,6 +289,7 @@ import {
   type ConversationView,
   type ConversationInputRequest,
   type ManagedWorktree,
+  type CloudDiffApply,
   type CodexModel,
   type CodexFeature,
   type CodexPermissionProfile,
@@ -2603,6 +2609,13 @@ export function App() {
   const [codeReviewStatusFilter, setCodeReviewStatusFilter] = useState<"all" | "open" | "finished">("all");
   const [codeReviewFilterOpen, setCodeReviewFilterOpen] = useState(false);
   const [codeReviewSetupOpen, setCodeReviewSetupOpen] = useState(false);
+  const [cloudApplySetupOpen, setCloudApplySetupOpen] = useState(false);
+  const [cloudApplyTaskId, setCloudApplyTaskId] = useState("");
+  const [cloudApplyCandidate, setCloudApplyCandidate] = useState<CloudDiffApply | null>(null);
+  const [cloudApplyCandidates, setCloudApplyCandidates] = useState<CloudDiffApply[]>([]);
+  const [cloudApplyOperation, setCloudApplyOperation] = useState<"loading" | "preparing" | "applying" | "discarding" | null>(null);
+  const cloudApplyBusy = cloudApplyOperation !== null;
+  const [cloudApplyError, setCloudApplyError] = useState<string | null>(null);
   const [selectedCodeReviewTaskId, setSelectedCodeReviewTaskId] = useState<string | null>(null);
   const [sidebarSearchOpen, setSidebarSearchOpen] = useState(false);
   const [taskLaunch, setTaskLaunch] = useState<Record<string, string>>({});
@@ -3217,6 +3230,100 @@ export function App() {
     setCodeReviewError(null);
     navigateSurface("tasks");
     window.requestAnimationFrame(() => goalInputRef.current?.focus());
+  }
+
+  function openLocalReviewSetup() {
+    setCodeReviewSetupOpen(true);
+    setCloudApplySetupOpen(false);
+    setSelectedCodeReviewTaskId(null);
+    setCodeReviewError(null);
+  }
+
+  async function loadCloudApplyCandidates(projectId: string) {
+    setCloudApplyOperation("loading");
+    setCloudApplyError(null);
+    try {
+      const response = await listCloudDiffApplies(projectId);
+      const ready = response.applies.filter((candidate) => candidate.state === "ready");
+      setCloudApplyCandidates(ready);
+      setCloudApplyCandidate(ready[0] ?? null);
+      if (ready[0]) setCloudApplyTaskId(ready[0].task_id);
+    } catch (error) {
+      setCloudApplyCandidates([]);
+      setCloudApplyCandidate(null);
+      setCloudApplyError(errorMessage(error));
+    } finally {
+      setCloudApplyOperation((current) => current === "loading" ? null : current);
+    }
+  }
+
+  function openCloudApplySetup() {
+    setCloudApplySetupOpen(true);
+    setCodeReviewSetupOpen(false);
+    setSelectedCodeReviewTaskId(null);
+    setCloudApplyCandidate(null);
+    setCloudApplyCandidates([]);
+    setCloudApplyError(null);
+    if (selectedProject?.repository.is_git) void loadCloudApplyCandidates(selectedProject.project_id);
+  }
+
+  async function prepareCodexCloudApply() {
+    if (!selectedProject?.repository.is_git) {
+      setCloudApplyError("Choose a project backed by a Git repository before checking cloud changes.");
+      return;
+    }
+    const taskId = cloudApplyTaskId.trim();
+    if (!taskId) {
+      setCloudApplyError("Enter the Codex cloud task ID.");
+      return;
+    }
+    setCloudApplyOperation("preparing");
+    setCloudApplyError(null);
+    try {
+      const candidate = await prepareCloudDiffApply(selectedProject.project_id, taskId);
+      setCloudApplyCandidate(candidate);
+      setCloudApplyCandidates((current) => [candidate, ...current.filter((item) => item.id !== candidate.id)]);
+    } catch (error) {
+      setCloudApplyCandidate(null);
+      setCloudApplyError(errorMessage(error));
+    } finally {
+      setCloudApplyOperation((current) => current === "preparing" ? null : current);
+    }
+  }
+
+  async function confirmCodexCloudApply() {
+    if (!cloudApplyCandidate) return;
+    setCloudApplyOperation("applying");
+    setCloudApplyError(null);
+    try {
+      const applied = await applyCloudDiff(cloudApplyCandidate.id, cloudApplyCandidate.revision);
+      setCloudApplyCandidate(applied);
+      setCloudApplyCandidates((current) => current.filter((item) => item.id !== applied.id));
+      const projectList = await listProjects();
+      setProjects(projectList.projects);
+      setArchivedProjects(projectList.archived_projects ?? []);
+    } catch (error) {
+      setCloudApplyError(errorMessage(error));
+    } finally {
+      setCloudApplyOperation((current) => current === "applying" ? null : current);
+    }
+  }
+
+  async function discardCodexCloudApply() {
+    if (!cloudApplyCandidate) return;
+    setCloudApplyOperation("discarding");
+    setCloudApplyError(null);
+    try {
+      await discardCloudDiffApply(cloudApplyCandidate.id, cloudApplyCandidate.revision);
+      const remaining = cloudApplyCandidates.filter((item) => item.id !== cloudApplyCandidate.id);
+      setCloudApplyOperation(null);
+      setCloudApplyCandidates(remaining);
+      setCloudApplyCandidate(remaining[0] ?? null);
+      setCloudApplyTaskId(remaining[0]?.task_id ?? "");
+    } catch (error) {
+      setCloudApplyError(errorMessage(error));
+      setCloudApplyOperation(null);
+    }
   }
 
   function continueSiteChat(site: Site) {
@@ -7939,20 +8046,24 @@ export function App() {
                   key={value}
                 >{label}</button>)}
               </div>
+              <div className="pull-request-primary-actions" aria-label="Code change actions">
+                <button type="button" onClick={openLocalReviewSetup}><GitPullRequest aria-hidden="true" />New review</button>
+                <button type="button" onClick={openCloudApplySetup}><CloudDownload aria-hidden="true" />Apply cloud task</button>
+              </div>
               <div className="pull-request-search-row">
                 <label className="pull-request-search"><span aria-hidden="true">⌕</span><span className="sr-only">Search pull requests</span><input type="search" aria-label="Search pull requests" value={codeReviewSearch} onChange={(event) => setCodeReviewSearch(event.target.value)} placeholder="Search pull requests" /></label>
                 <div className="pull-request-filter-menu" data-transient-popover-root="review-filter">
                   <button className={`pull-request-filter${codeReviewFilterOpen || codeReviewStatusFilter !== "all" ? " active" : ""}`} type="button" aria-label="Filter pull requests" title="Filter" aria-expanded={codeReviewFilterOpen} onClick={() => setCodeReviewFilterOpen((current) => !current)}><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 5h16l-6.2 7.1v5.2l-3.6 1.8v-7z" /></svg></button>
-                  {codeReviewFilterOpen && <div className="pull-request-filter-popover" role="menu" aria-label="Pull request filters"><strong>Review state</strong>{([['all', 'All'], ['open', 'Open'], ['finished', 'Finished']] as const).map(([value, label]) => <button type="button" role="menuitemradio" aria-checked={codeReviewStatusFilter === value} onClick={() => { setCodeReviewStatusFilter(value); setCodeReviewFilterOpen(false); }} key={value}><span aria-hidden="true">{codeReviewStatusFilter === value ? "●" : "○"}</span>{label}</button>)}<hr /><button type="button" role="menuitem" onClick={() => { setCodeReviewFilterOpen(false); setCodeReviewSetupOpen(true); setSelectedCodeReviewTaskId(null); }}><span aria-hidden="true">＋</span>New local review</button></div>}
+                  {codeReviewFilterOpen && <div className="pull-request-filter-popover" role="menu" aria-label="Pull request filters"><strong>Review state</strong>{([['all', 'All'], ['open', 'Open'], ['finished', 'Finished']] as const).map(([value, label]) => <button type="button" role="menuitemradio" aria-checked={codeReviewStatusFilter === value} onClick={() => { setCodeReviewStatusFilter(value); setCodeReviewFilterOpen(false); }} key={value}><span aria-hidden="true">{codeReviewStatusFilter === value ? "●" : "○"}</span>{label}</button>)}<hr /><button type="button" role="menuitem" onClick={() => { setCodeReviewFilterOpen(false); openLocalReviewSetup(); }}><GitPullRequest aria-hidden="true" />New local review</button><button type="button" role="menuitem" onClick={() => { setCodeReviewFilterOpen(false); openCloudApplySetup(); }}><CloudDownload aria-hidden="true" />Apply cloud task</button></div>}
                 </div>
               </div>
               <div className="pull-request-group-heading"><span>{codeReviewTab === "reviewing" ? "Reviewing" : codeReviewTab === "authored" ? "Authored locally" : "Local reviews"}</span><span>{filteredCodeReviewTasks.length}</span></div>
               <div className="pull-request-list">
-                {filteredCodeReviewTasks.length === 0 ? <div className="pull-request-list-empty"><strong>{codeReviewSearch.trim() ? "No matching reviews" : codeReviewTab === "reviewing" ? "No reviews in progress" : "No local reviews yet"}</strong><span>{codeReviewSearch.trim() ? "Try another search." : "Start a read-only review of a Git project."}</span><button type="button" onClick={() => { setCodeReviewSetupOpen(true); setSelectedCodeReviewTaskId(null); }}>Start local review</button></div> : filteredCodeReviewTasks.map((task) => {
+                {filteredCodeReviewTasks.length === 0 ? <div className="pull-request-list-empty"><strong>{codeReviewSearch.trim() ? "No matching reviews" : codeReviewTab === "reviewing" ? "No reviews in progress" : "No local reviews yet"}</strong><span>{codeReviewSearch.trim() ? "Try another search." : "Start a read-only review of a Git project."}</span><button type="button" onClick={openLocalReviewSetup}>Start local review</button></div> : filteredCodeReviewTasks.map((task) => {
                   const project = projects.find((candidate) => candidate.project_id === task.project_id);
                   const projectName = project?.root.split(/[\\/]/).filter(Boolean).at(-1) ?? "Repository unavailable";
-                  return <button className={`pull-request-row${selectedCodeReviewTaskId === task.id ? " selected" : ""}`} type="button" aria-pressed={selectedCodeReviewTaskId === task.id} onClick={() => { setSelectedCodeReviewTaskId(task.id); setCodeReviewSetupOpen(false); }} key={task.id}>
-                    <span className="pull-request-state-icon" data-state={task.state} aria-hidden="true">⑂</span>
+                  return <button className={`pull-request-row${selectedCodeReviewTaskId === task.id ? " selected" : ""}`} type="button" aria-pressed={selectedCodeReviewTaskId === task.id} onClick={() => { setSelectedCodeReviewTaskId(task.id); setCodeReviewSetupOpen(false); setCloudApplySetupOpen(false); }} key={task.id}>
+                    <GitPullRequest className="pull-request-state-icon" data-state={task.state} aria-hidden="true" />
                     <span className="pull-request-row-copy"><strong>{task.goal.replace(CODE_REVIEW_GOAL_PREFIX, "").trim() || "Code review"}</strong><small>{projectName} · {task.state.replaceAll("_", " ")}</small></span>
                     <time dateTime={task.updated_at}>{new Date(task.updated_at).toLocaleDateString(undefined, { month: "short", day: "numeric" })}</time>
                   </button>;
@@ -7961,8 +8072,53 @@ export function App() {
               <p className="pull-request-sync-note">GitHub titles, comments, checks, and changed files will appear after GitHub is connected. Local Git review works now.</p>
             </section>
             <section className="pull-request-detail-pane" aria-label="Pull request details">
-              {codeReviewSetupOpen ? <div className="pull-request-review-setup">
-                <div className="pull-request-detail-heading"><span className="pull-request-detail-icon" aria-hidden="true">⑂</span><div><h2>Start a local review</h2><p>Review code without changing the repository.</p></div></div>
+              {cloudApplySetupOpen ? <div className="pull-request-review-setup cloud-apply-setup">
+                <div className="pull-request-detail-heading"><span className="pull-request-detail-icon" aria-hidden="true"><CloudDownload /></span><div><h2>Apply a Codex cloud task</h2><p>Inspect the latest cloud diff in isolation, then choose whether to apply it.</p></div></div>
+                <div className="code-review-start-card cloud-apply-start-card">
+                  <span className="cloud-apply-note"><ShieldCheck aria-hidden="true" />Your project is unchanged while MetaCog prepares and validates the diff.</span>
+                  <label>
+                    <span>Repository</span>
+                    <select value={selectedProject?.repository.is_git ? selectedProject.project_id : ""} disabled={cloudApplyBusy || cloudApplyCandidate?.state === "ready"} onChange={(event) => {
+                      const project = projects.find((candidate) => candidate.project_id === event.target.value) ?? null;
+                      setSelectedProject(project);
+                      setCloudApplyCandidate(null);
+                      setCloudApplyCandidates([]);
+                      setCloudApplyError(null);
+                      setCloudApplyTaskId("");
+                      if (project?.repository.is_git) void loadCloudApplyCandidates(project.project_id);
+                    }}>
+                      <option value="">Choose a Git project</option>
+                      {projects.filter((project) => project.repository.is_git).map((project) => <option key={project.project_id} value={project.project_id}>{project.root.split(/[\\/]/).filter(Boolean).at(-1) ?? project.root}</option>)}
+                    </select>
+                  </label>
+                  {cloudApplyCandidates.length > 0 && <label>
+                    <span>Prepared changes</span>
+                    <select value={cloudApplyCandidate?.id ?? ""} disabled={cloudApplyBusy} onChange={(event) => {
+                      const candidate = cloudApplyCandidates.find((item) => item.id === event.target.value) ?? null;
+                      setCloudApplyCandidate(candidate);
+                      setCloudApplyTaskId(candidate?.task_id ?? "");
+                      setCloudApplyError(null);
+                    }}>
+                      <option value="">Start another cloud task</option>
+                      {cloudApplyCandidates.map((candidate) => <option key={candidate.id} value={candidate.id}>{candidate.task_id} · {candidate.changed_paths.length} files</option>)}
+                    </select>
+                  </label>}
+                  <label>
+                    <span>Codex cloud task ID</span>
+                    <input value={cloudApplyTaskId} disabled={cloudApplyBusy || cloudApplyCandidate?.state === "ready"} onChange={(event) => { setCloudApplyTaskId(event.target.value); setCloudApplyCandidate(null); setCloudApplyError(null); }} placeholder="Task ID" autoComplete="off" spellCheck={false} />
+                  </label>
+                  {!cloudApplyCandidate && <button className="primary" type="button" disabled={cloudApplyBusy || !selectedProject?.repository.is_git || !cloudApplyTaskId.trim()} onClick={() => void prepareCodexCloudApply()}>{cloudApplyOperation === "loading" ? "Loading…" : cloudApplyOperation === "preparing" ? "Checking…" : "Check changes"}</button>}
+                  {cloudApplyCandidate && <div className="cloud-apply-candidate" aria-live="polite">
+                    <div className="cloud-apply-candidate-heading"><span className={`task-state state-${cloudApplyCandidate.state}`}>{cloudApplyCandidate.state}</span><strong>{cloudApplyCandidate.changed_paths.length} changed {cloudApplyCandidate.changed_paths.length === 1 ? "file" : "files"}</strong></div>
+                    <div className="cloud-apply-files" data-scroll-chain tabIndex={0} aria-label="Cloud task changed files">{cloudApplyCandidate.changed_paths.map((path) => <code key={path}><File aria-hidden="true" />{path}</code>)}</div>
+                    {cloudApplyCandidate.output && <TechnicalDetails title="Codex output" summary="Cloud apply preparation result"><pre>{cloudApplyCandidate.output}</pre></TechnicalDetails>}
+                    {cloudApplyCandidate.state === "ready" && <div className="cloud-apply-confirmation"><p>MetaCog will apply this exact validated diff to the current working tree. If the repository changed since preparation, it will stop without overwriting those changes.</p><div><button className="secondary danger-subtle" type="button" disabled={cloudApplyBusy} onClick={() => void discardCodexCloudApply()}><Trash2 aria-hidden="true" />{cloudApplyOperation === "discarding" ? "Discarding…" : "Discard prepared changes"}</button><button className="primary" type="button" disabled={cloudApplyBusy} onClick={() => void confirmCodexCloudApply()}>{cloudApplyOperation === "applying" ? "Applying…" : "Apply changes"}</button></div></div>}
+                    {cloudApplyCandidate.state === "applied" && <p className="cloud-apply-success" role="status"><Check aria-hidden="true" />Changes applied to the working tree.</p>}
+                  </div>}
+                  {cloudApplyError && <p className="error-message" role="alert">{cloudApplyError}</p>}
+                </div>
+              </div> : codeReviewSetupOpen ? <div className="pull-request-review-setup">
+                <div className="pull-request-detail-heading"><span className="pull-request-detail-icon" aria-hidden="true"><GitPullRequest /></span><div><h2>Start a local review</h2><p>Review code without changing the repository.</p></div></div>
                 <div className="code-review-start-card">
                   <span className="read-only-note">Review is read-only. It will not modify files.</span>
                   <label>
@@ -7987,11 +8143,11 @@ export function App() {
                   {codeReviewError && <p className="error-message" role="alert">{codeReviewError}</p>}
                 </div>
               </div> : selectedCodeReviewTask ? <article className="pull-request-detail-card">
-                <header><span className="pull-request-detail-icon" aria-hidden="true">⑂</span><div><span className={`task-state state-${selectedCodeReviewTask.state}`}>{selectedCodeReviewTask.state.replaceAll("_", " ")}</span><h2>{selectedCodeReviewTask.goal.replace(CODE_REVIEW_GOAL_PREFIX, "").trim() || "Code review"}</h2><p>{projects.find((project) => project.project_id === selectedCodeReviewTask.project_id)?.root ?? "Repository unavailable"}</p></div></header>
+                <header><span className="pull-request-detail-icon" aria-hidden="true"><GitPullRequest /></span><div><span className={`task-state state-${selectedCodeReviewTask.state}`}>{selectedCodeReviewTask.state.replaceAll("_", " ")}</span><h2>{selectedCodeReviewTask.goal.replace(CODE_REVIEW_GOAL_PREFIX, "").trim() || "Code review"}</h2><p>{projects.find((project) => project.project_id === selectedCodeReviewTask.project_id)?.root ?? "Repository unavailable"}</p></div></header>
                 <div className="pull-request-detail-summary"><div><span>Review type</span><strong>Local, read-only</strong></div><div><span>Updated</span><strong>{new Date(selectedCodeReviewTask.updated_at).toLocaleString()}</strong></div></div>
                 <p>The review findings and discussion live in the associated MetaCog chat.</p>
                 <button className="primary" type="button" onClick={() => openChat(selectedCodeReviewTask.id)}>Open review</button>
-              </article> : <div className="pull-request-detail-empty"><span aria-hidden="true">⑂</span><strong>Select a review to view</strong><p>Choose a local review from the list, or start a new one.</p></div>}
+              </article> : <div className="pull-request-detail-empty"><GitPullRequest aria-hidden="true" /><strong>Select a review to view</strong><p>Choose a local review, start a new one, or apply changes from a Codex cloud task.</p><div><button type="button" onClick={openLocalReviewSetup}>New review</button><button type="button" onClick={openCloudApplySetup}>Apply cloud task</button></div></div>}
             </section>
           </div>{advanced && <TechnicalDetails title="Technical review controls" summary="Runtime approvals and legacy review administration">
           <div className="section-heading">
