@@ -779,7 +779,7 @@ launch_and_capture() {
   wait_for_health "$port"
   local window_id=""
   for attempt in $(seq 1 100); do
-    window_id="$(runuser -u "$uat_user" -- env DISPLAY="$display" xdotool search --name '^(MCG|MetaCog)$' 2>/dev/null | head -n 1 || true)"
+    window_id="$(runuser -u "$uat_user" -- env DISPLAY="$display" xdotool search --name '^(MCG|MetaCog)( v[0-9].*)?$' 2>/dev/null | head -n 1 || true)"
     [[ -n "$window_id" ]] && break
     sleep 0.1
   done
@@ -839,10 +839,14 @@ appimage_root="$uat_root/appimage"
 mkdir "$appimage_root"
 chown "$uat_user":"$(id -gn "$uat_user")" "$appimage_root"
 runuser -u "$uat_user" -- sh -c 'cd "$1" && "$2" --appimage-extract >/dev/null' sh "$appimage_root" "$appimage"
-for file in AppRun usr/bin/mcg-desktop usr/bin/mcg-service usr/bin/mcg usr/bin/mcg-plugin-runner usr/bin/mcg-shadow-runner usr/bin/mcg-updater \
-  usr/share/applications/MCG.desktop; do
+for file in AppRun usr/bin/mcg-desktop usr/bin/mcg-service usr/bin/mcg usr/bin/mcg-plugin-runner usr/bin/mcg-shadow-runner usr/bin/mcg-updater; do
   [[ -f "$appimage_root/squashfs-root/$file" ]] || { echo "AppImage is missing $file." >&2; exit 1; }
 done
+[[ -f "$appimage_root/squashfs-root/usr/share/applications/MetaCog.desktop" || \
+   -f "$appimage_root/squashfs-root/usr/share/applications/MCG.desktop" ]] || {
+  echo "AppImage is missing its desktop entry." >&2
+  exit 1
+}
 find "$appimage_root/squashfs-root" -type f -name THIRD_PARTY_NOTICES.md -print -quit | grep -q .
 find "$appimage_root/squashfs-root" -type f -name Apache-2.0.txt -print -quit | grep -q .
 find "$appimage_root/squashfs-root" -type f -name Wasmtime-Apache-2.0-WITH-LLVM-exception.txt -print -quit | grep -q .

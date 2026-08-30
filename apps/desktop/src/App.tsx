@@ -849,8 +849,8 @@ function NewChatProjectSelector({
   return <details className="new-chat-context-selector new-chat-project-selector" data-transient-popover onToggle={(event) => {
     if (!(event.currentTarget as HTMLDetailsElement).open) setQuery("");
   }}>
-    <summary aria-label="Choose project" title={value?.root ?? "Choose a project for this chat"}>
-      <FolderOpen aria-hidden="true" /><span>{value ? projectDisplayName(value) : "Choose project"}</span><ChevronDown aria-hidden="true" />
+    <summary aria-labelledby="project-picker-label" title={value?.root ?? "Choose a project for this chat"}>
+      <span className="sr-only" id="project-picker-label">Choose project</span><FolderOpen aria-hidden="true" /><span aria-hidden="true">{value ? projectDisplayName(value) : "Choose project"}</span><ChevronDown aria-hidden="true" />
     </summary>
     <div className="new-chat-context-popover project-context-popover">
       {projects.length > 0 && <label className="context-search"><Search aria-hidden="true" /><input aria-label="Search projects" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search projects" /></label>}

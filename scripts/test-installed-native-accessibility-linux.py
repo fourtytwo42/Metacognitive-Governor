@@ -396,8 +396,16 @@ def main() -> int:
     }
     missing = [name for name, node in required.items() if node is None]
     if missing:
+        available_buttons = sorted(
+            {
+                accessible_name(node)
+                for node in nodes
+                if role_name(node) == "push button" and accessible_name(node).strip()
+            }
+        )
         raise RuntimeError(
-            f"AT-SPI is missing required native controls: {', '.join(missing)}"
+            f"AT-SPI is missing required native controls: {', '.join(missing)}; "
+            f"available push buttons: {available_buttons[:100]}"
         )
 
     focusable_required = [
