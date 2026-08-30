@@ -27,5 +27,11 @@ zeroize.workspace = true
 [dev-dependencies]
 tempfile.workspace = true
 
+[[bin]]
+name = "mcg-protected-root-action-fault-fixture"
+path = "src/bin/action_fault_fixture.rs"
+test = false
+bench = false
+
 [lints]
 workspace = true
