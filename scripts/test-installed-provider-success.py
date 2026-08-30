@@ -135,6 +135,7 @@ def invoke_cli(
     label: str,
     arguments: list[str],
     stdin: bytes = b"",
+    timeout_seconds: int = 120,
 ) -> subprocess.CompletedProcess[bytes]:
     result = subprocess.run(
         [
@@ -150,7 +151,7 @@ def invoke_cli(
         input=stdin,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        timeout=120,
+        timeout=timeout_seconds,
         check=False,
     )
     evidence_root.joinpath(f"{label}.stdout").write_bytes(result.stdout)
@@ -355,6 +356,11 @@ def exercise(args: argparse.Namespace) -> None:
                 "verify its exact bytes, and report completion."
             ],
             f"{PRIVATE_CONTEXT}\n".encode(),
+            # This path runs the real Chat -> Coordinator -> Coder chain. Keep
+            # short metadata and replay operations on the stricter default,
+            # while allowing the governed multi-agent turn the same five-minute
+            # envelope used by the representative project package UATs.
+            timeout_seconds=300,
         )
         captured_results.append(human)
         require_success(human, "provider-success-human")

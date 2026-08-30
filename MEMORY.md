@@ -2,6 +2,15 @@
 
 Durable project context lives here. Update this file whenever information should survive chat context compression or future agent handoff.
 
+### 2026-08-30 - Stage 2 provider UAT timeout classification correction
+
+- Context: Exact `48cc71dbcf9fd2208244912bce003b6cae62a87b` Windows owner-authenticated UAT reached the concrete Chat → Coordinator → Coder journey after granting the Coder exactly its isolated worktree, but the provider-success verifier terminated the CLI at its generic 120-second subprocess limit. Before the durable database could be compactly classified, the retained exact checkout, log, scheduled task, and temporary UAT root were no longer present on the host; no success or rejection may be inferred from that missing evidence.
+- Decision: Give only the real provider-backed multi-agent human journey a 300-second envelope, matching representative project agent UAT. Keep metadata, replay, audit, JSON, and streaming CLI calls at the existing 120-second limit. A timeout remains a failed qualification and must retain durable state for diagnosis.
+- Files: `scripts/test-installed-provider-success.py`, `docs/testing/strategy.md`, and `MEMORY.md`.
+- Commands/tests: Python compilation, packaging contracts, documentation validation, and diff hygiene pass locally.
+- Result: `48cc71d` remains unqualified. A new exact commit/package/native-UAT cycle is required; this change does not weaken runtime authority or acceptance criteria.
+- Follow-up: Commit/push this harness correction, build a clean commit-bound Windows package, repeat owner-authenticated installed UAT through exact file integration, accepted report, terminal coordination batch, and owner settlement, then continue the matching Linux/macOS package gates.
+
 ### 2026-08-30 - Stage 2 explicit isolated-worktree grant correction
 
 - Context: Exact pushed `9528c6e5947b663fe6e722b6b34793733d8a700a` rebuilt clean/verified packages and repeated native qualification. Linux rootless AppImage UAT passed. In Windows owner-authenticated UAT the Coder no longer received interactive approval requests and reached `report_result`, but its report correctly marked both conditions unsatisfied because Windows Codex rejected commands/file changes as outside the writable project. The turn-level `workspaceWrite` sandbox had no explicit `writableRoots` after inherited external roots were cleared, leaving worktree authority to inference.
