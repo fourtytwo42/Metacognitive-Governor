@@ -10097,7 +10097,7 @@ export function App() {
             </div>}
             {userSettings.interface_complexity === "developer" && <TechnicalDetails title="Runtime contract inspector" summary="Current compatibility projection">
               <p className="form-note">This read-only projection exposes the shared settings contract and disclosed Protected Root health. Root mutation authority, credentials, and evaluator internals remain outside this client.</p>
-              <pre aria-label="Current runtime settings contract">{JSON.stringify({
+              <pre aria-label="Current runtime settings contract" aria-readonly="true" role="textbox" tabIndex={0}>{JSON.stringify({
                 stable_type_id: "metacog.user_settings.v2",
                 schema_version: userSettings.schema_version,
                 revision: userSettings.revision,

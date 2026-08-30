@@ -1371,8 +1371,10 @@ test("interface complexity exposes three presentation levels without changing ru
   }));
   expect(within(panel).getByText(/Developer mode remains governed/)).toBeInTheDocument();
   expect(within(panel).getByRole("button", { name: "Runtime contract inspector" })).toBeInTheDocument();
-  expect(within(panel).getByLabelText("Current runtime settings contract")).toHaveTextContent("protected-root");
-  expect(within(panel).getByLabelText("Current runtime settings contract")).toHaveTextContent("pre-root.mcgb");
+  const runtimeContract = within(panel).getByRole("textbox", { name: "Current runtime settings contract" });
+  expect(runtimeContract).toHaveAttribute("aria-readonly", "true");
+  expect(runtimeContract).toHaveTextContent("protected-root");
+  expect(runtimeContract).toHaveTextContent("pre-root.mcgb");
 });
 
 test("unsigned development builds fail closed instead of offering an update fallback", async () => {
