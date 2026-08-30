@@ -74,15 +74,33 @@ pub fn open(config: AppConfig) -> Result<Arc<AppRuntime>, ProtectedRootError> {
     )?);
     let identity = current_runtime_identity()?;
     runtime.initialize_root_ownership(identity, migration_receipt)?;
-    let workflow_recovery = runtime.recover_expired_workflows(Utc::now())?;
-    if workflow_recovery.fenced_expired > 0 {
+    let recovered_at = Utc::now();
+    let reconciliation_recovery = runtime.recover_action_reconciliations(recovered_at)?;
+    if reconciliation_recovery.requeued > 0 || reconciliation_recovery.escalated > 0 {
+        info!(
+            inspected_running = reconciliation_recovery.inspected_running,
+            requeued = reconciliation_recovery.requeued,
+            escalated = reconciliation_recovery.escalated,
+            "fenced expired action reconciliation without redispatching external effects"
+        );
+    }
+    let workflow_recovery = runtime.recover_expired_workflows(recovered_at)?;
+    if workflow_recovery.fenced_expired > 0
+        || workflow_recovery.settled_cancellations > 0
+        || workflow_recovery.cancellations_awaiting_reconciliation > 0
+        || workflow_recovery.quarantined_cancellations > 0
+    {
         info!(
             fenced_expired = workflow_recovery.fenced_expired,
             awaiting_reconciliation = workflow_recovery.awaiting_reconciliation,
             requeued_for_verification = workflow_recovery.requeued_for_verification,
             requeued_satisfied_dependencies = workflow_recovery.requeued_satisfied_dependencies,
             requeued_elapsed_backoffs = workflow_recovery.requeued_elapsed_backoffs,
-            "recovered canonical workflow leases and satisfied waits"
+            settled_cancellations = workflow_recovery.settled_cancellations,
+            cancellations_awaiting_reconciliation =
+                workflow_recovery.cancellations_awaiting_reconciliation,
+            quarantined_cancellations = workflow_recovery.quarantined_cancellations,
+            "recovered canonical workflow leases, waits, and cancellation settlement"
         );
     }
     Ok(runtime)
@@ -678,7 +696,7 @@ mod tests {
     }
 
     #[test]
-    fn root_startup_resumes_elapsed_backoff_without_guessing_other_waits_or_cancellation() {
+    fn root_startup_resumes_elapsed_backoff_and_settles_effect_free_cancellation() {
         let temporary = tempfile::tempdir().expect("temporary Root data directory");
         let config = AppConfig::default().with_data_directory(temporary.path());
         let seeded_at = Utc::now() - chrono::Duration::minutes(3);
@@ -756,13 +774,12 @@ mod tests {
                 .expect("approval workflow"),
             approval_waiting
         );
-        assert_eq!(
-            store
-                .workflow_attempt(cancelling.attempt_id)
-                .expect("cancellation query")
-                .expect("cancelling workflow"),
-            cancelling
-        );
+        let cancelled = store
+            .workflow_attempt(cancelling.attempt_id)
+            .expect("cancellation query")
+            .expect("cancelling workflow");
+        assert_eq!(cancelled.state, WorkflowState::Cancelled);
+        assert_eq!(cancelled.revision, cancelling.revision + 1);
     }
 
     #[test]

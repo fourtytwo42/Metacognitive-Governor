@@ -30,7 +30,7 @@ This matrix is updated as implementation lands. `Implemented / cumulative UAT pe
 | Root and Evaluator maintain separate canonical histories | 7 | Cross-store reference tests | Disclosed-summary inspection | Planned |
 | Large immutable artifacts use verified atomic content-addressed storage | 2, 7 | Temp/flush/hash/rename tests | Crash during artifact creation | Planned |
 | Derived indexes are rebuildable and non-authoritative | 8 | Delete/rebuild equivalence | Search before/after rebuild | Planned |
-| Existing MetaCog data migrates into a default runtime lineage | 2 | Migration fixtures | Packaged upgrade UAT | Schema 50→53, interruption retry, verified restore, data preservation, stable Root identity, and current migration-process tests pass / current-source packaged UAT pending |
+| Existing MetaCog data migrates into a default runtime lineage | 2 | Migration fixtures | Packaged upgrade UAT | Schema 50→54, interruption retry, verified restore, data preservation, stable Root identity, and current migration-process tests pass / current-source packaged UAT pending |
 | Unsafe downgrade fails clearly | 2 | Version downgrade tests | Old package against new data copy | Newer schema refusal implemented / old-package UAT pending |
 
 ## 3. IPC and Process Security
@@ -42,7 +42,7 @@ This matrix is updated as implementation lands. `Implemented / cumulative UAT pe
 | OS peer identity and per-launch capability | 2 | Wrong-peer/session tests | Forged client attack | Capability/session rejection implemented / cross-platform peer UAT pending |
 | Replay/idempotency protection | 2–4 | Duplicate request tests | Replayed action request | Root request-ID replay rejection plus durable exact workflow cancellation replay/substitution rejection implemented / action coverage grows in Stage 4 |
 | Oversized/malformed/unknown-version messages fail closed | 2 | Fuzz/boundary tests | Hostile client process | Boundary/version rejection implemented / hostile-process UAT pending |
-| Cancellation and late responses are safe | 3–5 | State/process tests | Cancel during execution | Stage 3 generation fencing, stale-result rejection, and authenticated IPC/CLI cancellation request implemented / child/effect propagation pending |
+| Cancellation and late responses are safe | 3–5 | State/process tests | Cancel during execution | Workflow and action generations are fenced; pre-dispatch/observational work settles no-effect; dispatched effectful work becomes `OUTCOME_UNKNOWN`; late reconcilers are rejected; authenticated IPC/CLI/Desktop cancellation passes / child propagation, real-effect process E2E, and package UAT pending |
 | Root/Runtime/Evaluator death has an explicit restart story | 3–7 | Crash matrix | Packaged kill/restart UAT | Root startup scanner handles expired Running/Verifying leases / complete process and action matrix pending |
 
 ## 4. Workflow and Leases
@@ -53,20 +53,20 @@ This matrix is updated as implementation lands. `Implemented / cumulative UAT pe
 | Only legal workflow transitions occur | 3 | Generated state-machine tests | Invalid transition through API/CLI | Exhaustive contract table, Root-owned revision/generation CAS transitions, authenticated IPC, CLI parser/process coverage, and Desktop cancellation fencing pass / packaged invalid-transition UAT pending |
 | Terminal workflows do not ordinarily reactivate | 3 | Property tests | Retry creates explicit new attempt | Terminal monotonicity and explicit parent-linked retry attempts pass / cumulative process UAT pending |
 | Generation-fenced leases prevent stale commit | 3 | Race/property tests | Kill owner, reassign, deliver stale result | Claim/heartbeat/cancel/recovery CAS, concurrent-claim winner, and stale-result tests pass / delayed-worker process E2E pending |
-| Restart scanner resumes only satisfied work | 3 | Recovery integration | Process/application restart | Root startup fences expired Running work to reconciliation, requeues expired Verifying work, and resumes only objectively satisfied dependency/retry-backoff waits; approval and cancellation remain untouched in real Root reopen coverage / external trigger, action-aware cancellation, and forced-process matrix pending |
-| Cancellation is durable and propagated | 3–5 | Cancellation tests | UI/CLI cancel and restart | Durable CancelRequested fencing plus authenticated `mcg workflow cancel` and revision/generation-fenced Desktop cancellation pass deterministic IPC/CLI/component/browser E2E / child, external-effect, restart, native, and packaged UAT pending |
+| Restart scanner resumes only satisfied work | 3 | Recovery integration | Process/application restart | Root startup fences expired Running work, requeues expired Verifying work, resumes only objectively satisfied dependency/retry-backoff waits, fences expired reconciliation workers without redispatch, escalates elapsed reconciliation deadlines, and settles effect-free cancellations / external trigger and full forced-process/package matrix pending |
+| Cancellation is durable and propagated | 3–5 | Cancellation tests | UI/CLI cancel and restart | Durable CancelRequested fencing plus authenticated `mcg workflow cancel`, Desktop cancellation, action-effect fencing, reconciliation waiting, and post-reconciliation settlement pass deterministic tests / child propagation, actual-effect crash E2E, native, and packaged UAT pending |
 | UI reconnect cannot alter backend truth | 3 | Projection tests | Close/reopen during work | Simple/Advanced/Developer deterministic component/browser E2E projects one unchanged Root attempt and cancellation result / real process/application reconnect and packaged UAT pending |
 
 ## 5. Actions and External Effects
 
 | Requirement | Stage | Automated evidence | E2E/UAT evidence | Status |
 |---|---:|---|---|---|
-| Intent is durable before an external effect | 4 | Crash injection | Kill immediately around effect | Planned |
-| Authorization binds the exact normalized operation | 4 | Substitution/hash tests | Change target after approval | Planned |
-| Execution and observation are distinct | 4 | State tests | Dropped receipt scenario | Planned |
-| `NO_EFFECT`, `EFFECT_CONFIRMED`, and `OUTCOME_UNKNOWN` are explicit | 4 | Outcome classification tests | Native reconciliation display | Planned |
-| Consequential unknown effects are not blindly retried | 4 | Crash/property tests | Effect succeeds, receipt lost | Planned |
-| Reconciliation resolves or escalates ambiguity | 4 | Reconciler tests | Restart and confirm existing file | Planned |
+| Intent is durable before an external effect | 4 | Crash injection | Kill immediately around effect | Schema-54 immutable envelope plus atomic Authorized execution/event implemented and tested / actual runner boundary crash injection pending |
+| Authorization binds the exact normalized operation | 4 | Substitution/hash tests | Change target after approval | Canonical operation hash, authority, budget, task-contract, workflow revision/generation, and actor substitution are rejected / approval UI and process attack pending |
+| Execution and observation are distinct | 4 | State tests | Dropped receipt scenario | Separate mutable execution and immutable receipt/event persistence implemented; lost-receipt path becomes unknown / real external adapter pending |
+| `NO_EFFECT`, `EFFECT_CONFIRMED`, and `OUTCOME_UNKNOWN` are explicit | 4 | Outcome classification tests | Native reconciliation display | Typed outcomes and legal execution transitions implemented / Root IPC/CLI/Desktop projection pending |
+| Consequential unknown effects are not blindly retried | 4 | Crash/property tests | Effect succeeds, receipt lost | Dispatch is legal only from Authorized; unknown/reconciling states reject dispatch; late reconciler generations are fenced; restart requeues reconciliation only / actual exactly-once filesystem E2E pending |
+| Reconciliation resolves or escalates ambiguity | 4 | Reconciler tests | Restart and confirm existing file | Due discovery, generation-fenced claim, confirmed occurred/not-occurred, safe defer, real-store reopen recovery, deadline escalation, immutable receipts/events, and cancellation settlement implemented / filesystem reconciler process and native presentation pending |
 | Compensation is a new causal action | 4 | Ledger tests | Revert visible in history | Planned |
 | Irreversible actions receive stronger authority treatment | 4 | Policy tests | Approval UAT | Planned |
 | Read-only operations cannot mutate state | 4 | Snapshot/security tests | Governed read attack | Planned |
@@ -179,13 +179,13 @@ This matrix is updated as implementation lands. `Implemented / cumulative UAT pe
 
 | Evidence | Required frequency | Status |
 |---|---|---|
-| Unit/property/integration test receipt | Every implementation change | Stage 3 affected Rust suites pass locally; cumulative workspace/package receipt pending |
+| Unit/property/integration test receipt | Every implementation change | Contracts 12/12, storage 97/97, runtime 108 passed plus two explicit Windows Sandbox ignores, Protected Root 6/6, protected-root migration process 1/1, and affected all-target checks pass locally; cumulative workspace/package receipt pending |
 | Crash and process-boundary receipt | Every affected durable boundary | Root open/startup recovery integration passes; forced-kill package matrix pending |
 | Security/adversarial receipt | Every affected trust/capability boundary | Planned |
 | Desktop deterministic E2E receipt | Every visible workflow change | Complete Desktop Vitest 122/122 and Playwright 29/29 pass, including Simple/Advanced/Developer canonical projection and revision/generation-fenced cancellation |
 | Native Simple/Advanced/Developer UAT | Every meaningful interface stage | Windows portable and Linux AppImage Stage 2 slices pass; current-source Windows installer and macOS remain open |
 | Windows/macOS/Linux package receipt | Every process/package identity change and final candidate | Exact `cea1e07` Linux clean manifest/scan and AppImage native UAT pass; Debian install/remove plus current-source Windows/macOS remain open |
-| Migration + backup/restore receipt | Every schema/ownership change | Schema 50→53 protected-root migration-process test passes / packaged backup/restore UAT pending |
+| Migration + backup/restore receipt | Every schema/ownership change | Schema 50→54 protected-root migration-process test passes / packaged backup/restore UAT pending |
 | Golden payload/hash compatibility receipt | Every codec/schema release | TaskContract v1 fixture/hash plus existing canonical-v1 fixtures pass / cross-version package replay pending |
 | Experiment artifact set | Every protected experiment | Planned |
-| Commit/remote parity and artifact manifest | Every verified major stage | Stage 3 kernel, TaskContract head CAS, and Root IPC/CLI commits are pushed through `293d34d`; Desktop projection remains uncommitted pending cumulative gates |
+| Commit/remote parity and artifact manifest | Every verified major stage | Stage 3 kernel, TaskContract head CAS, Root IPC/CLI, Desktop projection, and objective wait recovery are pushed through `24b3de4`; schema-54 action/reconciliation checkpoint is verified, with cumulative release artifacts pending |

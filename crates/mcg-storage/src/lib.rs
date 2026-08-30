@@ -29,6 +29,7 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use thiserror::Error;
 use uuid::Uuid;
 
+mod actions;
 mod agents;
 mod backup;
 mod backup_secrets;
@@ -60,6 +61,10 @@ pub use backup_secrets::{
     decrypt_backup_secrets, encrypt_backup_secrets,
 };
 
+pub use actions::{
+    ActionAuthorizationReceipt, ReconciliationClaimReceipt, ReconciliationRecoveryReport,
+    ReconciliationResolutionReceipt,
+};
 pub use agents::{
     AgentRecoveryReport, AgentTurnCommit, AgentTurnDisposition, ConsumerEvaluationCheckpoint,
     ConsumerEvaluationCheckpointState, InterfaceRunReceipt,
@@ -74,7 +79,7 @@ pub use shadow_workspaces::ShadowWorkspaceMutation;
 pub use workflows::{TaskContractHead, WorkflowRecoveryReport, task_contract_content_hash};
 
 type EventRow = (i64, String, i64, String, Option<String>, String, String);
-pub const STORAGE_SCHEMA_VERSION: i64 = 53;
+pub const STORAGE_SCHEMA_VERSION: i64 = 54;
 
 const MIGRATION_1: &str = r"
 CREATE TABLE IF NOT EXISTS events (
@@ -1802,6 +1807,117 @@ CREATE TABLE IF NOT EXISTS task_contract_mutations (
 );
 ";
 
+const MIGRATION_54: &str = r"
+CREATE TABLE IF NOT EXISTS action_envelopes (
+    action_id TEXT PRIMARY KEY,
+    workflow_id TEXT NOT NULL,
+    workflow_attempt_id TEXT NOT NULL,
+    task_contract_id TEXT NOT NULL,
+    task_contract_version INTEGER NOT NULL,
+    operation_hash_json TEXT NOT NULL,
+    effect_class TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    envelope_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(workflow_id, idempotency_key),
+    FOREIGN KEY(workflow_attempt_id) REFERENCES workflow_attempts(attempt_id),
+    FOREIGN KEY(task_contract_id, task_contract_version)
+        REFERENCES task_contract_versions(task_contract_id, version)
+);
+CREATE INDEX IF NOT EXISTS action_envelopes_workflow_attempt
+    ON action_envelopes(workflow_id, workflow_attempt_id, created_at, action_id);
+CREATE TABLE IF NOT EXISTS action_executions (
+    execution_id TEXT PRIMARY KEY,
+    action_id TEXT NOT NULL,
+    attempt_number INTEGER NOT NULL CHECK(attempt_number > 0),
+    state TEXT NOT NULL,
+    revision INTEGER NOT NULL CHECK(revision > 0),
+    lease_generation INTEGER NOT NULL CHECK(lease_generation >= 0),
+    executor TEXT,
+    execution_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(action_id, attempt_number),
+    FOREIGN KEY(action_id) REFERENCES action_envelopes(action_id)
+);
+CREATE INDEX IF NOT EXISTS action_executions_state_updated
+    ON action_executions(state, updated_at, action_id);
+CREATE TABLE IF NOT EXISTS action_receipts (
+    receipt_id TEXT PRIMARY KEY,
+    action_id TEXT NOT NULL,
+    execution_id TEXT NOT NULL,
+    receipt_json TEXT NOT NULL,
+    observed_at TEXT NOT NULL,
+    FOREIGN KEY(action_id) REFERENCES action_envelopes(action_id),
+    FOREIGN KEY(execution_id) REFERENCES action_executions(execution_id)
+);
+CREATE INDEX IF NOT EXISTS action_receipts_execution_observed
+    ON action_receipts(execution_id, observed_at, receipt_id);
+CREATE TABLE IF NOT EXISTS action_events (
+    event_id TEXT PRIMARY KEY,
+    action_id TEXT NOT NULL,
+    sequence INTEGER NOT NULL CHECK(sequence > 0),
+    execution_id TEXT,
+    type_id TEXT NOT NULL,
+    schema_version INTEGER NOT NULL CHECK(schema_version > 0),
+    correlation_id TEXT NOT NULL,
+    causation_id TEXT,
+    idempotency_key TEXT NOT NULL,
+    event_json TEXT NOT NULL,
+    occurred_at TEXT NOT NULL,
+    UNIQUE(action_id, sequence),
+    UNIQUE(action_id, idempotency_key),
+    FOREIGN KEY(action_id) REFERENCES action_envelopes(action_id),
+    FOREIGN KEY(execution_id) REFERENCES action_executions(execution_id),
+    FOREIGN KEY(causation_id) REFERENCES action_events(event_id)
+);
+CREATE TABLE IF NOT EXISTS reconciliation_jobs (
+    reconciliation_job_id TEXT PRIMARY KEY,
+    action_id TEXT NOT NULL,
+    execution_id TEXT NOT NULL UNIQUE,
+    state TEXT NOT NULL,
+    revision INTEGER NOT NULL CHECK(revision > 0),
+    lease_generation INTEGER NOT NULL CHECK(lease_generation >= 0),
+    lease_owner TEXT,
+    lease_expires_at TEXT,
+    next_attempt_at TEXT NOT NULL,
+    deadline TEXT NOT NULL,
+    job_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(action_id) REFERENCES action_envelopes(action_id),
+    FOREIGN KEY(execution_id) REFERENCES action_executions(execution_id)
+);
+CREATE INDEX IF NOT EXISTS reconciliation_jobs_state_due
+    ON reconciliation_jobs(state, next_attempt_at, deadline, reconciliation_job_id);
+CREATE INDEX IF NOT EXISTS reconciliation_jobs_lease_expiry
+    ON reconciliation_jobs(state, lease_expires_at, reconciliation_job_id);
+CREATE TRIGGER IF NOT EXISTS action_envelopes_no_update
+BEFORE UPDATE ON action_envelopes BEGIN
+    SELECT RAISE(FAIL, 'action envelopes are immutable intent');
+END;
+CREATE TRIGGER IF NOT EXISTS action_envelopes_no_delete
+BEFORE DELETE ON action_envelopes BEGIN
+    SELECT RAISE(FAIL, 'action envelopes are durable history');
+END;
+CREATE TRIGGER IF NOT EXISTS action_receipts_no_update
+BEFORE UPDATE ON action_receipts BEGIN
+    SELECT RAISE(FAIL, 'action receipts are immutable observations');
+END;
+CREATE TRIGGER IF NOT EXISTS action_receipts_no_delete
+BEFORE DELETE ON action_receipts BEGIN
+    SELECT RAISE(FAIL, 'action receipts are durable history');
+END;
+CREATE TRIGGER IF NOT EXISTS action_events_no_update
+BEFORE UPDATE ON action_events BEGIN
+    SELECT RAISE(FAIL, 'action events are immutable history');
+END;
+CREATE TRIGGER IF NOT EXISTS action_events_no_delete
+BEFORE DELETE ON action_events BEGIN
+    SELECT RAISE(FAIL, 'action events are durable history');
+END;
+";
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RootOwnership {
     pub runtime_identity: RuntimeIdentity,
@@ -2071,6 +2187,7 @@ impl SqliteEventStore {
             (51_i64, MIGRATION_51),
             (52_i64, MIGRATION_52),
             (53_i64, MIGRATION_53),
+            (54_i64, MIGRATION_54),
         ] {
             let applied = self.connection.query_row(
                 "SELECT EXISTS(SELECT 1 FROM mcg_schema WHERE version = ?1)",
@@ -5841,14 +5958,19 @@ mod tests {
             store
                 .connection
                 .execute_batch(
-                    "DROP TABLE task_contract_mutations;
+                    "DROP TABLE reconciliation_jobs;
+                     DROP TABLE action_events;
+                     DROP TABLE action_receipts;
+                     DROP TABLE action_executions;
+                     DROP TABLE action_envelopes;
+                     DROP TABLE task_contract_mutations;
                      DROP TABLE workflow_events;
                      DROP TABLE workflow_attempts;
                      DROP TABLE task_contract_dependencies;
                      DROP TABLE task_contract_heads;
                      DROP TABLE task_contract_versions;
                      DROP TABLE root_ownership;
-                     DELETE FROM mcg_schema WHERE version IN (51, 52, 53);",
+                     DELETE FROM mcg_schema WHERE version IN (51, 52, 53, 54);",
                 )
                 .expect("downgrade fixture to schema 50");
         }

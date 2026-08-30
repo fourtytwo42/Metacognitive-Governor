@@ -142,10 +142,10 @@ use mcg_providers::{
 };
 use mcg_storage::{
     AgentRecoveryReport, AgentTurnDisposition, BackupMcpSecret, BackupProviderSecret,
-    BackupSecretSnapshot, DataDirectoryLock, RecoveryReport, RootMigrationReceipt, RootOwnership,
-    STORAGE_SCHEMA_VERSION, SqliteEventStore, StorageError, WorkflowRecoveryReport,
-    acquire_data_directory_lock, create_encrypted_backup_bundle_from_snapshot,
-    decrypt_backup_bundle_secrets,
+    BackupSecretSnapshot, DataDirectoryLock, ReconciliationRecoveryReport, RecoveryReport,
+    RootMigrationReceipt, RootOwnership, STORAGE_SCHEMA_VERSION, SqliteEventStore, StorageError,
+    WorkflowRecoveryReport, acquire_data_directory_lock,
+    create_encrypted_backup_bundle_from_snapshot, decrypt_backup_bundle_secrets,
 };
 pub use mcg_storage::{
     AgentTurnCommit, AutomaticExperimentDisposition, AutomaticExperimentOutcome,
@@ -3429,6 +3429,19 @@ impl AppRuntime {
         Ok(self
             .store()?
             .recover_expired_workflow_leases(CorrelationId::new(), now)?)
+    }
+
+    /// Fences expired Root-owned reconciliation workers without repeating external effects.
+    ///
+    /// # Errors
+    /// Returns a runtime error when authoritative action evidence cannot be read or committed.
+    pub fn recover_action_reconciliations(
+        &self,
+        now: DateTime<Utc>,
+    ) -> Result<ReconciliationRecoveryReport, RuntimeError> {
+        Ok(self
+            .store()?
+            .recover_reconciliation_jobs(CorrelationId::new(), now)?)
     }
 
     /// Lists the latest authoritative attempt for every canonical workflow.

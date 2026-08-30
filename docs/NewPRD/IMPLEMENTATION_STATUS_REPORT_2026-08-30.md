@@ -4,23 +4,26 @@
 
 **Branch:** `codex/v34-updater-version-binding`
 
-**Pushed checkpoint:** `293d34d` (`Expose canonical workflows through Root IPC and CLI`)
+**Pushed checkpoint:** `24b3de4` (`Resume only satisfied workflow waits`)
+
+**Audit boundary:** pushed Stage 3 base plus the verified schema-54 governed-action checkpoint. The concurrent untracked `STAGE_3_DURABLE_WORKFLOW.md` is excluded from this audit's changes and commits.
 
 **Specifications audited:** Adaptive Cognitive Agent Runtime PRD v1.4.2, Cognitive Runtime Implementation Contract v0.1, Cognitive Runtime Experimental Protocol Specification v0.2, the staged implementation plan, ADRs, traceability matrix, current source, tests, and durable repository memory.
 
 ## Executive assessment
 
-The new PRD is **not production-complete**. MetaCog has completed the architectural foundation and most of the first three delivery stages, but the protected action, runtime-worker, governed provider/tool, evaluator, persistent cognition, improvement, culture, and research layers remain to be built.
+The new PRD is **not production-complete**. MetaCog has completed the architectural foundation, the stable contracts, the Protected Root implementation, and a substantial canonical durable-workflow slice. A governed-action ledger is now under active local development. The separate runtime-worker, Root-permitted provider/tool pipeline, Protected Evaluator, persistent cognition, bounded improvement, culture, and longitudinal research layers remain to be built.
 
 The current state is best summarized as:
 
 - **Stage 0:** substantively complete, but its checklist document is stale.
 - **Stage 1:** implementation complete; cumulative packaged compatibility/UAT remains.
 - **Stage 2:** implementation complete; two owner-bound native package lanes and the final cumulative release gate remain.
-- **Stage 3:** canonical kernel and Root IPC/CLI are implemented; Desktop projection is uncommitted work in progress and the full recovery/cancellation/process/package gate remains.
-- **Stages 4–13:** not implemented as the new canonical cognitive-runtime architecture. Existing MetaCog capabilities provide useful compatibility foundations, but they do not satisfy these stages' new authority, persistence, reconstruction, evaluation, or experimental requirements.
+- **Stage 3:** canonical kernel, Root IPC/CLI, Desktop projection, and objectively provable dependency/backoff recovery are pushed. The complete recovery/event/process/package gate remains open.
+- **Stage 4:** a schema-54 action/effect ledger and reconciliation kernel is implemented and focused-test green, but it is not exposed through product interfaces, connected to real external effects, or release-qualified.
+- **Stages 5–13:** not implemented as the new canonical cognitive-runtime architecture. Existing MetaCog capabilities provide useful compatibility foundations, but they do not satisfy these stages' new authority, persistence, reconstruction, evaluation, or experimental requirements.
 
-The traceability ledger currently contains 110 assessable requirement/evidence rows: 80 are still marked `Planned` and 30 contain some implementation or partial evidence. This is an inventory count, not a completion percentage; later requirements are substantially larger than early contract rows, and several Stage 3 rows are stale relative to the current code.
+The traceability ledger is useful as a requirements inventory but is not a completion percentage. This report classifies evidence directly from current source, pushed history, and freshly run tests.
 
 ## Stage-by-stage status
 
@@ -29,8 +32,8 @@ The traceability ledger currently contains 110 assessable requirement/evidence r
 | 0 — Baseline and architecture freeze | **Substantively complete; documentation reconciliation required** | Hook-trust prerequisite released and pushed; three-interface decision accepted; current-to-target map, staged plan, traceability matrix, and ADR-001 through ADR-014 exist. | Reconcile the unchecked Stage 0 exit checklist with actual evidence and record a single current baseline receipt. |
 | 1 — Stable contracts and canonical encoding | **Implementation complete** | `mcg-contracts`; stable IDs/discriminators; canonical CBOR/normalization; domain-separated hashes; golden fixtures; upcasters; shared error/redaction contracts; dependency boundary; Simple/Advanced/Developer setting and legacy migration. | Final cross-version/package replay and final packaged migration/UAT on all supported platforms. |
 | 2 — Protected Root and authoritative storage | **Code complete; release gate open** | Real `mcg-protected-rootd`; exclusive authoritative-store ownership; migration backup/restore; Root identity; bounded authenticated local IPC; Windows named pipes; Unix sockets; capability/session/replay/version checks; Root-owned compatibility adapter; `mcg runtime status/inspect`; GUI Root inspection. | Exact Debian install/repair/restart/native/uninstall UAT with owner-entered sudo; macOS owner-authenticated provider/restart/native UAT; final cumulative workspace, Desktop, package, migration, and release-smoke rerun. Trusted production signing/notarization remains external. |
-| 3 — Durable workflows, leases, and recovery | **Partially complete** | Schema 53; immutable TaskContract versions/heads/dependencies; head revision CAS; WorkflowAttempts and ordered events; legal transitions; terminal monotonicity; generation-fenced claim/heartbeat/cancel/retry; dependency gating; exact idempotent replay; Root startup recovery for expired Running/Verifying work and objectively satisfied dependency/retry-backoff waits; authenticated Root workflow list/show/cancel IPC; `mcg workflow list/show/cancel`; deterministic Desktop projection/E2E. | Machine-readable event streaming; compatibility projection/reattachment for existing conversations/tasks/runs; child and external-effect-aware cancellation; external/approval/protected-component wake triggers; kill/restart matrix for every nonterminal state; delayed-worker/forced-kill tests; three-platform packaged UAT. |
-| 4 — Governed actions and reconciliation | **Not built in the new architecture** | ADR and initial Stage 1 DTO vocabulary exist; legacy governed integrations provide reusable implementation knowledge. | Durable intent/authorization/execution/receipt chain; exact operation binding; explicit effect outcome classification; reconciliation and compensation; sandbox capability profiles; exact approval-source navigation; crash/security/E2E/UAT matrix. |
+| 3 — Durable workflows, leases, and recovery | **Substantially implemented; release gate open** | Schema 53; immutable TaskContract versions/heads/dependencies; head revision CAS; WorkflowAttempts and ordered events; legal transitions; terminal monotonicity; generation-fenced claim/heartbeat/cancel/retry; dependency gating; exact idempotent replay; Root startup recovery for expired Running/Verifying work and objectively satisfied dependency/retry-backoff waits; authenticated Root workflow list/show/cancel IPC; `mcg workflow list/show/cancel`; deterministic Simple/Advanced/Developer Desktop projection and E2E. The current worktree additionally fences action executions during cancellation and settles effect-free cancellations on restart. | Machine-readable event streaming; compatibility projection/reattachment for existing conversations/tasks/runs; child propagation; external/approval/protected-component wake triggers; reconciliation completion before cancellation settlement; kill/restart matrix for every nonterminal state; delayed-worker/forced-kill tests; three-platform packaged UAT. |
+| 4 — Governed actions and reconciliation | **Ledger and reconciliation kernel partially built** | Schema 54 action envelopes/executions/receipts/events/reconciliation jobs; immutable intent/observation/event history; exact operation, authority, budget, task-contract, workflow revision, generation, and actor binding; explicit `NO_EFFECT_CONFIRMED`, `EFFECT_CONFIRMED`, and `OUTCOME_UNKNOWN`; no blind redispatch after a lost receipt; due-job discovery; generation-fenced reconciler claim; confirmed occurred/not-occurred resolution; safe deferral; expired-lease recovery; deadline escalation; action-aware cancellation settlement; focused contracts/storage/Root/migration tests pass. | Expose the ledger through authenticated Root API/IPC/CLI/Desktop; connect a real filesystem reconciler/runner; validate and commit confirmed effects; require compensation as a new causal action; enforce irreversible-action policy and sandbox capability profiles; exact approval-source navigation; real external-effect crash injection; security/adversarial, E2E, native UAT, and packaged qualification. |
 | 5 — Runtime worker and reconstructable cognition | **Not built** | Existing agent/runtime code and role terminology offer compatibility inputs. | Separate `runtime-worker`; authenticated Root-to-Runtime protocol; deterministic fake Work/Verify path; complete ContextManifest/InvocationManifest/CompletionCertificate persistence; invocation reconstruction; canonical global workflow/invocation browser; process-death and late/duplicate-response gates. |
 | 6 — Governed providers, tools, hooks, and plugins | **Not built as a Root-permit pipeline** | Existing hook trust is complete, including exact-hash trust and invocation-only `--dangerously-bypass-hook-trust`; MetaCog already has providers, tools, plugins, MCP, browser/computer, and Codex compatibility surfaces. | Route these capabilities through exact Root-bound egress/tool permits and opaque secret handles; enforce manifests, scopes, sandbox requirements, redaction, escalation resistance, and end-to-end CompletionCertificate production. Existing capability is not evidence that the new trust path exists. |
 | 7 — Protected Evaluator and Phase 0 gate | **Not built** | Contracts and accepted ADRs only. | Separate protected evaluator process/store/artifacts; EvaluationSeed equivalence; immutable experiments; fixtures/TCB/exposure; signed disclosures; invalidation; bounded search; Root-only promotion; full Phase 0 integrity/adversarial gate. |
@@ -59,38 +62,46 @@ The pushed Stage 3 commits are:
 
 - `466d27d` — canonical durable workflow kernel;
 - `41c1ed3` — atomic TaskContract revision/head CAS;
-- `293d34d` — authenticated Root workflow IPC and CLI projection.
+- `293d34d` — authenticated Root workflow IPC and CLI projection;
+- `3c16346` — Simple/Advanced/Developer Desktop workflow projection;
+- `24b3de4` — objective dependency and retry-backoff wait recovery.
 
 The kernel includes exact historical snapshots, ordered correlation/causation/idempotency evidence, concurrent-claim protection, stale-generation rejection, retry ancestry, dependency gating, and deterministic startup handling for expired Running and Verifying attempts. The canonical TaskContract fixture hash is `18b0ba14d68d758351d78d11c1d6a0e9839bd509930f1d3ba27a718e51918c32`.
 
-## Current uncommitted work
+## Current implementation checkpoint
 
-The worktree is not a release-clean checkpoint. Five Desktop files currently contain an uncommitted Stage 3 projection:
+The schema-54 checkpoint adds:
 
-- Tauri commands for workflow list/show/cancel;
-- TypeScript canonical workflow contracts and client calls;
-- Simple lifecycle labels, Advanced lease/attempt/criteria inspection, and Developer raw canonical evidence;
-- revision/generation-fenced cancellation confirmation;
-- focused component coverage and layout styling.
+- stable governed-action, effect-outcome, and reconciliation contracts;
+- immutable action intent, receipt, and event storage plus mutable generation-fenced execution state;
+- atomic authorization that rejects operation, authority, budget, actor, workflow-revision, generation, and idempotency substitution;
+- separate dispatch, observation, and outcome-classification phases;
+- durable `OUTCOME_UNKNOWN` handling with reconciliation-job creation and no blind redispatch;
+- bounded due-job discovery, exact revision/generation claims, and independent reconciler leases;
+- typed `CONFIRMED_NOT_OCCURRED`, `CONFIRMED_OCCURRED(receipt)`, and `STILL_UNKNOWN` observations;
+- safe reconciliation deferral, immutable confirmed-occurrence receipts, deadline escalation, and real-store reopen recovery;
+- action-aware cancellation: pre-dispatch or observational work can settle `NO_EFFECT`, while uncertain effectful work moves to reconciliation;
+- Root restart fencing of expired reconcilers, settlement for effect-free cancellation, and durable waiting for uncertain effects;
+- schema-50→54 migration coverage.
 
-Audit verification of that uncommitted slice:
+Fresh audit verification on 2026-08-30:
 
-- `cargo check -p mcg-desktop --all-targets` — passed;
-- focused Vitest `durable workflows progressively disclose Root evidence and fence cancellation` — passed;
-- complete Desktop Vitest — 122/122 passed;
-- complete deterministic Playwright — 29/29 passed, including one-Root-truth Simple/Advanced/Developer projection and revision/generation-fenced cancellation;
-- native GUI UAT, packaged UAT, and final release qualification — not yet demonstrated for this slice.
+- `cargo test -p mcg-contracts` — 12/12 passed;
+- `cargo test -p mcg-storage` — 97/97 passed;
+- `cargo test -p mcg-protected-root` — 6/6 passed;
+- `cargo test -p mcg-runtime` — 108 passed, with two explicit Windows Sandbox package qualifications ignored;
+- `cargo test -p mcg-protected-rootd --test migration_process` — 1/1 passed.
 
-`docs/NewPRD/STAGE_3_DURABLE_WORKFLOW.md` is also untracked concurrent-agent work and was not changed by this audit.
+These results establish a local implementation foundation only. There is no Root action IPC, CLI or Desktop action browser, external filesystem reconciler/runner, confirmed-effect validation/commit boundary, causal compensation, real external-effect adapter, full crash matrix, native GUI UAT, or packaged qualification yet. The concurrent untracked `docs/NewPRD/STAGE_3_DURABLE_WORKFLOW.md` was not changed by this audit.
 
 ## Highest-priority remaining build sequence
 
-1. Finish and verify the Stage 3 Desktop projection without mixing or overwriting concurrent work.
-2. Complete child/effect-aware cancellation, waiting-condition recovery, existing-work projection, event streaming, and the complete nonterminal restart matrix.
-3. Run deterministic process, CLI, Desktop, crash, migration, and adversarial E2E for Stage 3.
-4. Close the exact Debian sudo and macOS authenticated Stage 2/3 package lanes; rerun the matched Windows candidate because product binaries have changed since the last package evidence.
-5. Implement Stage 4 governed effects and approval-source navigation before adding new autonomous execution paths.
-6. Implement Stage 5 runtime-worker separation and replace the global-agent-browser concept with the canonical workflow/invocation browser while preserving compatibility labels and `agents --remote` where applicable.
+1. Finish the schema-54 action ledger: confirmed-effect validation/commit, causal compensation, irreversible-effect policy, and a real governed filesystem read/write/reconciler path.
+2. Complete Stage 3 compatibility projection, child cancellation, event streaming, external/approval/protected-component wake triggers, and the complete nonterminal restart matrix.
+3. Expose canonical workflows and actions consistently through Root IPC, CLI, and Simple/Advanced/Developer Desktop views, including exact approval-source navigation.
+4. Run deterministic process, CLI, Desktop, migration, real-effect crash-injection, and adversarial E2E for Stages 3–4.
+5. Close the exact Debian sudo and macOS authenticated package lanes; rebuild and rerun the matched Windows candidate because product binaries and schema have changed.
+6. Implement Stage 5 runtime-worker separation and the canonical workflow/invocation browser while preserving compatibility labels and `agents --remote` where applicable.
 7. Implement Stage 6 Root-bound provider/tool/hook/plugin permits and complete security/redaction qualification.
 8. Implement and pass Stage 7 protected evaluation before any recursive optimizer work.
 9. Proceed through Stages 8–13 only when each preceding scientific and production gate is recorded as passing.
@@ -100,12 +111,12 @@ Audit verification of that uncommitted slice:
 The following documents cannot presently be treated as an exact live status dashboard:
 
 - `STAGE_0_ALIGNMENT.md` still has unchecked exit items that repository memory and later evidence say are complete.
-- `STAGE_3_DURABLE_WORKFLOW.md` says canonical persistence, IPC, and CLI do not exist, but the pushed Stage 3 commits now implement them.
-- `REQUIREMENTS_TRACEABILITY.md` still labels several Stage 3 API/CLI/interface items as pending even though list/show/cancel and the Desktop work-in-progress now exist.
+- The concurrent untracked `STAGE_3_DURABLE_WORKFLOW.md` must be reconciled by its owner against the pushed schema-53, Root IPC/CLI, Desktop, and wait-recovery implementation before it becomes release evidence.
+- `REQUIREMENTS_TRACEABILITY.md` now records the local schema-54 ledger/reconciliation evidence but must be advanced again after product interfaces, real effects, and package gates exist.
 - The implementation plan still says “Proposed staged delivery plan,” although Stages 0–3 are already underway.
 
 Before the next release claim, reconcile those documents so every row is one of: implemented with evidence, partially implemented with an explicit remaining gate, superseded with a reason, unavailable through capability discovery, or not started.
 
 ## Release conclusion
 
-MetaCog has a credible, well-tested foundation for the new PRD, but it is still early in the total program. The protected contracts, interface model, Root boundary, and durable workflow kernel are real. Production completion still requires the remainder of Stage 3, all canonical work in Stages 4–12, any justified Stage 13 mechanisms, and the complete matched Windows/macOS/Linux automated, E2E, native UAT, migration, packaging, signing/notarization, cleanup, commit, and push gates.
+MetaCog has a credible, well-tested foundation for the new PRD, but it is not close to a production-complete claim for the full cognitive runtime. The protected contracts, three-level interface model, Root boundary, durable workflow kernel, and early action/effect ledger are real. Production completion still requires the remainder of Stages 3–4, all canonical work in Stages 5–12, any justified Stage 13 mechanisms, and the complete matched Windows/macOS/Linux automated, crash/security E2E, native UAT, migration, packaging, signing/notarization, cleanup, commit, and push gates.

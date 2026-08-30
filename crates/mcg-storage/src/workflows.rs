@@ -6,7 +6,10 @@ use mcg_contracts::{
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
-use crate::{SqliteEventStore, StorageError};
+use crate::{
+    SqliteEventStore, StorageError,
+    actions::{cancellation_effect_status, fence_actions_for_workflow_cancellation},
+};
 
 const TASK_CONTRACT_HASH_DOMAIN: &str = "MetaCog.TaskContract";
 const WORKFLOW_CREATED_TYPE_ID: &str = "mcg.workflow_created.v1";
@@ -14,6 +17,7 @@ const WORKFLOW_CLAIMED_TYPE_ID: &str = "mcg.workflow_claimed.v1";
 const WORKFLOW_HEARTBEAT_TYPE_ID: &str = "mcg.workflow_heartbeat.v1";
 const WORKFLOW_LEASE_EXPIRED_TYPE_ID: &str = "mcg.workflow_lease_expired.v1";
 const WORKFLOW_WAIT_SATISFIED_TYPE_ID: &str = "mcg.workflow_wait_satisfied.v1";
+const WORKFLOW_CANCELLATION_RECOVERED_TYPE_ID: &str = "mcg.workflow_cancellation_recovered.v1";
 const WORKFLOW_RETRIED_TYPE_ID: &str = "mcg.workflow_retried.v1";
 const WORKFLOW_TRANSITIONED_TYPE_ID: &str = "mcg.workflow_transitioned.v1";
 
@@ -25,6 +29,9 @@ pub struct WorkflowRecoveryReport {
     pub requeued_for_verification: u64,
     pub requeued_satisfied_dependencies: u64,
     pub requeued_elapsed_backoffs: u64,
+    pub settled_cancellations: u64,
+    pub cancellations_awaiting_reconciliation: u64,
+    pub quarantined_cancellations: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -606,7 +613,7 @@ impl SqliteEventStore {
     ///
     /// # Errors
     /// Returns a conflict for stale expectations, illegal transitions, or replay substitution.
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     pub fn transition_workflow_attempt(
         &mut self,
         attempt_id: AttemptId,
@@ -651,6 +658,45 @@ impl SqliteEventStore {
         }
 
         let previous_state = attempt.state;
+        let cancellation_effects = if next_state == WorkflowState::CancelRequested {
+            Some(fence_actions_for_workflow_cancellation(
+                &transaction,
+                attempt.attempt_id,
+                correlation_id,
+                now,
+            )?)
+        } else if previous_state == WorkflowState::CancelRequested {
+            let status = cancellation_effect_status(&transaction, attempt.attempt_id)?;
+            if next_state == WorkflowState::Cancelled && status.unresolved > 0 {
+                return Err(StorageError::Conflict(
+                    "workflow cancellation cannot settle while an action effect is unresolved"
+                        .into(),
+                ));
+            }
+            if next_state == WorkflowState::Waiting(WaitReason::Reconciliation)
+                && (status.reconciliation_required == 0 || status.quarantined > 0)
+            {
+                return Err(StorageError::Conflict(
+                    "workflow may wait for reconciliation only for unresolved reconcilable effects"
+                        .into(),
+                ));
+            }
+            Some(status)
+        } else if previous_state == WorkflowState::Waiting(WaitReason::Reconciliation)
+            && next_state == WorkflowState::Cancelled
+        {
+            let status = cancellation_effect_status(&transaction, attempt.attempt_id)?;
+            if !is_cancellation_reconciliation_wait(&transaction, &attempt)?
+                || status.unresolved > 0
+            {
+                return Err(StorageError::Conflict(
+                    "only a fully reconciled cancellation wait can settle as cancelled".into(),
+                ));
+            }
+            Some(status)
+        } else {
+            None
+        };
         attempt.state = next_state;
         attempt.revision = increment(attempt.revision, "workflow revision")?;
         if next_state == WorkflowState::CancelRequested {
@@ -682,6 +728,7 @@ impl SqliteEventStore {
                 "attempt_id": attempt.attempt_id,
                 "from": previous_state,
                 "to": next_state,
+                "cancellation_effects": cancellation_effects,
                 "attempt": attempt,
             }),
         )?;
@@ -798,6 +845,7 @@ impl SqliteEventStore {
     ///
     /// # Errors
     /// Returns a storage error for query, malformed stored data, or atomic update failures.
+    #[allow(clippy::too_many_lines)]
     pub fn recover_expired_workflow_leases(
         &mut self,
         correlation_id: CorrelationId,
@@ -813,6 +861,9 @@ impl SqliteEventStore {
             requeued_for_verification: 0,
             requeued_satisfied_dependencies: 0,
             requeued_elapsed_backoffs: 0,
+            settled_cancellations: 0,
+            cancellations_awaiting_reconciliation: 0,
+            quarantined_cancellations: 0,
         };
         for mut attempt in attempts {
             let expired = matches!(
@@ -825,20 +876,46 @@ impl SqliteEventStore {
             let elapsed_retry_backoff = attempt.state
                 == WorkflowState::Waiting(WaitReason::RetryBackoff)
                 && retry_backoff_elapsed(&attempt, now);
-            if !expired && !satisfied_dependency_wait && !elapsed_retry_backoff {
+            let is_cancellation_state = attempt.state == WorkflowState::CancelRequested
+                || (attempt.state == WorkflowState::Waiting(WaitReason::Reconciliation)
+                    && is_cancellation_reconciliation_wait(&self.connection, &attempt)?);
+            let cancellation_effects = if is_cancellation_state {
+                Some(cancellation_effect_status(
+                    &self.connection,
+                    attempt.attempt_id,
+                )?)
+            } else {
+                None
+            };
+            let recovered_cancellation_state = cancellation_effects.and_then(|status| {
+                if status.quarantined > 0 {
+                    Some(WorkflowState::Quarantined)
+                } else if status.reconciliation_required > 0 {
+                    Some(WorkflowState::Waiting(WaitReason::Reconciliation))
+                } else if status.unresolved == 0 {
+                    Some(WorkflowState::Cancelled)
+                } else {
+                    None
+                }
+            });
+            if !expired
+                && !satisfied_dependency_wait
+                && !elapsed_retry_backoff
+                && recovered_cancellation_state.is_none()
+            {
                 continue;
             }
             let expected_revision = attempt.revision;
             let expected_generation = attempt.lease_generation;
             let previous_state = attempt.state;
-            attempt.state = match previous_state {
+            attempt.state = recovered_cancellation_state.unwrap_or_else(|| match previous_state {
                 WorkflowState::Running => WorkflowState::Waiting(WaitReason::Reconciliation),
                 WorkflowState::Verifying => WorkflowState::Ready,
                 WorkflowState::Waiting(WaitReason::Dependency | WaitReason::RetryBackoff) => {
                     WorkflowState::Ready
                 }
                 _ => unreachable!("recovery filters restrict recoverable states"),
-            };
+            });
             attempt.revision = increment(attempt.revision, "workflow revision")?;
             if expired {
                 attempt.lease_generation = increment(attempt.lease_generation, "lease generation")?;
@@ -874,7 +951,7 @@ impl SqliteEventStore {
                     WORKFLOW_WAIT_SATISFIED_TYPE_ID,
                     "dependencies_satisfied",
                 )
-            } else {
+            } else if elapsed_retry_backoff {
                 (
                     format!(
                         "recover-backoff:{}:{expected_revision}:{expected_generation}",
@@ -882,6 +959,22 @@ impl SqliteEventStore {
                     ),
                     WORKFLOW_WAIT_SATISFIED_TYPE_ID,
                     "retry_backoff_elapsed",
+                )
+            } else {
+                (
+                    format!(
+                        "recover-cancellation:{}:{expected_revision}:{expected_generation}",
+                        attempt.attempt_id
+                    ),
+                    WORKFLOW_CANCELLATION_RECOVERED_TYPE_ID,
+                    match attempt.state {
+                        WorkflowState::Cancelled => "cancellation_settled",
+                        WorkflowState::Waiting(WaitReason::Reconciliation) => {
+                            "cancellation_requires_reconciliation"
+                        }
+                        WorkflowState::Quarantined => "cancellation_quarantined",
+                        _ => unreachable!("cancellation recovery target"),
+                    },
                 )
             };
             let event = workflow_event(
@@ -899,6 +992,7 @@ impl SqliteEventStore {
                     "fenced_generation": expected_generation,
                     "active_generation": attempt.lease_generation,
                     "recovery_reason": recovery_reason,
+                    "cancellation_effects": cancellation_effects,
                     "attempt": attempt,
                 }),
             )?;
@@ -908,6 +1002,11 @@ impl SqliteEventStore {
                 report.fenced_expired += 1;
             }
             match attempt.state {
+                WorkflowState::Waiting(WaitReason::Reconciliation)
+                    if previous_state == WorkflowState::CancelRequested =>
+                {
+                    report.cancellations_awaiting_reconciliation += 1;
+                }
                 WorkflowState::Waiting(WaitReason::Reconciliation) => {
                     report.awaiting_reconciliation += 1;
                 }
@@ -920,11 +1019,60 @@ impl SqliteEventStore {
                 WorkflowState::Ready if elapsed_retry_backoff => {
                     report.requeued_elapsed_backoffs += 1;
                 }
+                WorkflowState::Cancelled if previous_state == WorkflowState::CancelRequested => {
+                    report.settled_cancellations += 1;
+                }
+                WorkflowState::Quarantined if previous_state == WorkflowState::CancelRequested => {
+                    report.quarantined_cancellations += 1;
+                }
+                WorkflowState::Cancelled
+                    if previous_state == WorkflowState::Waiting(WaitReason::Reconciliation) =>
+                {
+                    report.settled_cancellations += 1;
+                }
+                WorkflowState::Quarantined
+                    if previous_state == WorkflowState::Waiting(WaitReason::Reconciliation) =>
+                {
+                    report.quarantined_cancellations += 1;
+                }
                 _ => {}
             }
         }
         Ok(report)
     }
+}
+
+fn is_cancellation_reconciliation_wait(
+    connection: &rusqlite::Connection,
+    attempt: &WorkflowAttempt,
+) -> Result<bool, StorageError> {
+    if attempt.state != WorkflowState::Waiting(WaitReason::Reconciliation) {
+        return Ok(false);
+    }
+    let event_json = connection
+        .query_row(
+            "SELECT event_json FROM workflow_events
+             WHERE workflow_id = ?1 ORDER BY sequence DESC LIMIT 1",
+            [attempt.workflow_id.to_string()],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    let Some(event_json) = event_json else {
+        return Ok(false);
+    };
+    let event: WorkflowEvent = serde_json::from_str(&event_json)?;
+    let payload = event_payload_value(&event)?;
+    Ok(
+        (event.type_id.as_str() == WORKFLOW_CANCELLATION_RECOVERED_TYPE_ID
+            && payload.get("recovery_reason")
+                == Some(&serde_json::json!("cancellation_requires_reconciliation")))
+            || (event.type_id.as_str() == WORKFLOW_TRANSITIONED_TYPE_ID
+                && payload.get("from") == Some(&serde_json::json!(WorkflowState::CancelRequested))
+                && payload.get("to")
+                    == Some(&serde_json::json!(WorkflowState::Waiting(
+                        WaitReason::Reconciliation
+                    )))),
+    )
 }
 
 fn retry_backoff_elapsed(attempt: &WorkflowAttempt, now: DateTime<Utc>) -> bool {
@@ -1724,7 +1872,7 @@ mod tests {
     }
 
     #[test]
-    fn cancellation_fences_worker_and_only_reconciliation_wait_is_legal() {
+    fn cancellation_without_unresolved_effects_fences_worker_and_settles_cancelled() {
         let mut store = SqliteEventStore::open_in_memory().unwrap();
         let (contract, attempt) = fixture();
         store
@@ -1767,21 +1915,31 @@ mod tests {
             now(),
         );
         assert!(matches!(invalid, Err(StorageError::Conflict(_))));
-        let waiting = store
+        let unsupported_reconciliation = store.transition_workflow_attempt(
+            attempt.attempt_id,
+            cancelling.revision,
+            cancelling.lease_generation,
+            WorkflowState::Waiting(WaitReason::Reconciliation),
+            CorrelationId::new(),
+            "reconcile-without-effect",
+            now(),
+        );
+        assert!(matches!(
+            unsupported_reconciliation,
+            Err(StorageError::Conflict(_))
+        ));
+        let cancelled = store
             .transition_workflow_attempt(
                 attempt.attempt_id,
                 cancelling.revision,
                 cancelling.lease_generation,
-                WorkflowState::Waiting(WaitReason::Reconciliation),
+                WorkflowState::Cancelled,
                 CorrelationId::new(),
-                "reconcile-wait",
+                "cancel-settled",
                 now(),
             )
             .unwrap();
-        assert_eq!(
-            waiting.state,
-            WorkflowState::Waiting(WaitReason::Reconciliation)
-        );
+        assert_eq!(cancelled.state, WorkflowState::Cancelled);
     }
 
     #[test]
@@ -2143,6 +2301,7 @@ mod tests {
             .unwrap();
         assert_eq!(early.requeued_satisfied_dependencies, 1);
         assert_eq!(early.requeued_elapsed_backoffs, 0);
+        assert_eq!(early.settled_cancellations, 1);
         assert_eq!(
             store
                 .workflow_attempt(dependency.attempt_id)
@@ -2184,13 +2343,12 @@ mod tests {
                 .state,
             WorkflowState::Waiting(WaitReason::Approval)
         );
-        assert_eq!(
-            store
-                .workflow_attempt(cancelling.attempt_id)
-                .unwrap()
-                .unwrap(),
-            cancelling
-        );
+        let settled = store
+            .workflow_attempt(cancelling.attempt_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(settled.state, WorkflowState::Cancelled);
+        assert_eq!(settled.revision, cancelling.revision + 1);
     }
 
     #[test]

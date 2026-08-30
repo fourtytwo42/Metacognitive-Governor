@@ -55,6 +55,7 @@ stable_uuid!(ConfigurationId);
 stable_uuid!(ActionId);
 stable_uuid!(ActionExecutionId);
 stable_uuid!(ActionReceiptId);
+stable_uuid!(ReconciliationJobId);
 stable_uuid!(ContextManifestId);
 stable_uuid!(InvocationId);
 stable_uuid!(CompletionCertificateId);
@@ -506,6 +507,7 @@ impl WorkflowState {
                     Self::Waiting(_),
                     Self::Ready | Self::Failed | Self::CancelRequested | Self::Quarantined
                 )
+                | (Self::Waiting(WaitReason::Reconciliation), Self::Cancelled)
                 | (
                     Self::Verifying,
                     Self::Succeeded
@@ -623,14 +625,115 @@ pub struct Event {
     pub payload: VersionedPayload,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EffectClass {
+    Observational,
+    Reversible,
+    Consequential,
+    Irreversible,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExpectedVersion {
+    pub resource: SourceRef,
+    pub expected_hash: ContentHash,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActionEnvelope {
     pub id: ActionId,
     pub workflow_id: WorkflowId,
     pub attempt_id: AttemptId,
+    pub task_contract: VersionedRef<TaskContractId>,
+    pub actor: RuntimeActorId,
+    pub authority: PolicyBinding,
+    pub expected_versions: Vec<ExpectedVersion>,
     pub operation: VersionedPayload,
     pub operation_hash: ContentHash,
+    pub effect_class: EffectClass,
+    pub preconditions: Vec<VersionedPayload>,
+    pub budget_reservation: PolicyBinding,
     pub idempotency_key: String,
+    pub compensation: Option<VersionedPayload>,
+    pub reconciler: Option<VersionedPayload>,
+    pub reconciliation_deadline: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+}
+
+impl ActionEnvelope {
+    pub const SCHEMA_VERSION: u32 = 1;
+    pub const TYPE_ID: &'static str = "mcg.action_envelope.v1";
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActionExecutionState {
+    Proposed,
+    Authorized,
+    Executing,
+    Observed,
+    NoEffectConfirmed,
+    EffectConfirmed,
+    OutcomeUnknown,
+    Reconciling,
+    Validated,
+    Committed,
+    Denied,
+    Quarantined,
+    Compensated,
+}
+
+impl ActionExecutionState {
+    #[must_use]
+    pub const fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::NoEffectConfirmed
+                | Self::Committed
+                | Self::Denied
+                | Self::Quarantined
+                | Self::Compensated
+        )
+    }
+
+    #[must_use]
+    pub const fn can_transition_to(self, next: Self) -> bool {
+        matches!(
+            (self, next),
+            (
+                Self::Proposed,
+                Self::Authorized | Self::Denied | Self::Quarantined
+            ) | (
+                Self::Authorized,
+                Self::Executing | Self::NoEffectConfirmed | Self::Quarantined
+            ) | (
+                Self::Executing,
+                Self::Observed | Self::OutcomeUnknown | Self::Quarantined
+            ) | (
+                Self::Observed,
+                Self::NoEffectConfirmed | Self::EffectConfirmed | Self::OutcomeUnknown
+            ) | (Self::EffectConfirmed, Self::Validated | Self::Quarantined)
+                | (Self::Validated, Self::Committed | Self::Quarantined)
+                | (Self::OutcomeUnknown, Self::Reconciling | Self::Quarantined)
+                | (
+                    Self::Reconciling,
+                    Self::NoEffectConfirmed
+                        | Self::EffectConfirmed
+                        | Self::OutcomeUnknown
+                        | Self::Quarantined
+                )
+                | (Self::Committed, Self::Compensated)
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum EffectOutcome {
+    NoEffectConfirmed,
+    EffectConfirmed { evidence: Vec<ArtifactRef> },
+    OutcomeUnknown { hint: VersionedPayload },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -638,16 +741,105 @@ pub struct ActionExecution {
     pub id: ActionExecutionId,
     pub action_id: ActionId,
     pub attempt_number: u32,
-    pub state: String,
+    pub state: ActionExecutionState,
+    pub revision: u64,
     pub lease_generation: u64,
+    pub executor: Option<RuntimeActorId>,
+    pub outcome: Option<EffectOutcome>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl ActionExecution {
+    pub const SCHEMA_VERSION: u32 = 1;
+    pub const TYPE_ID: &'static str = "mcg.action_execution.v1";
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActionReceipt {
     pub id: ActionReceiptId,
     pub action_id: ActionId,
+    pub execution_id: ActionExecutionId,
     pub observation: VersionedPayload,
     pub observed_at: DateTime<Utc>,
+}
+
+impl ActionReceipt {
+    pub const SCHEMA_VERSION: u32 = 1;
+    pub const TYPE_ID: &'static str = "mcg.action_receipt.v1";
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActionEvent {
+    pub id: EventId,
+    pub type_id: StableTypeId,
+    pub schema_version: u32,
+    pub sequence: u64,
+    pub action_id: ActionId,
+    pub execution_id: Option<ActionExecutionId>,
+    pub correlation_id: CorrelationId,
+    pub causation_id: Option<EventId>,
+    pub idempotency_key: String,
+    pub occurred_at: DateTime<Utc>,
+    pub payload: VersionedPayload,
+}
+
+impl ActionEvent {
+    pub const SCHEMA_VERSION: u32 = 1;
+    pub const TYPE_ID: &'static str = "mcg.action_event.v1";
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReconciliationJobState {
+    Pending,
+    Running,
+    Resolved,
+    UserActionRequired,
+    Quarantined,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReconciliationJob {
+    pub id: ReconciliationJobId,
+    pub action_id: ActionId,
+    pub execution_id: ActionExecutionId,
+    pub adapter: VersionedPayload,
+    pub state: ReconciliationJobState,
+    pub revision: u64,
+    pub lease_generation: u64,
+    pub lease_owner: Option<RuntimeActorId>,
+    pub lease_expires_at: Option<DateTime<Utc>>,
+    pub next_attempt_at: DateTime<Utc>,
+    pub attempts: u32,
+    pub deadline: DateTime<Utc>,
+    pub last_hint: Option<VersionedPayload>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl ReconciliationJob {
+    pub const SCHEMA_VERSION: u32 = 1;
+    pub const TYPE_ID: &'static str = "mcg.reconciliation_job.v1";
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "result", rename_all = "snake_case")]
+pub enum ReconciliationObservation {
+    ConfirmedNotOccurred,
+    ConfirmedOccurred {
+        receipt: ActionReceipt,
+        evidence: Vec<ArtifactRef>,
+    },
+    StillUnknown {
+        hint: VersionedPayload,
+        next_attempt_at: DateTime<Utc>,
+    },
+}
+
+impl ReconciliationObservation {
+    pub const SCHEMA_VERSION: u32 = 1;
+    pub const TYPE_ID: &'static str = "mcg.reconciliation_observation.v1";
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -945,6 +1137,10 @@ mod tests {
                                 | WorkflowState::Quarantined
                         )
                         | (
+                            WorkflowState::Waiting(WaitReason::Reconciliation),
+                            WorkflowState::Cancelled
+                        )
+                        | (
                             WorkflowState::Verifying,
                             WorkflowState::Succeeded
                                 | WorkflowState::Ready
@@ -969,6 +1165,60 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn action_execution_transition_table_separates_effect_observation_and_commit() {
+        let states = [
+            ActionExecutionState::Proposed,
+            ActionExecutionState::Authorized,
+            ActionExecutionState::Executing,
+            ActionExecutionState::Observed,
+            ActionExecutionState::NoEffectConfirmed,
+            ActionExecutionState::EffectConfirmed,
+            ActionExecutionState::OutcomeUnknown,
+            ActionExecutionState::Reconciling,
+            ActionExecutionState::Validated,
+            ActionExecutionState::Committed,
+            ActionExecutionState::Denied,
+            ActionExecutionState::Quarantined,
+            ActionExecutionState::Compensated,
+        ];
+        for from in states {
+            for to in states {
+                if from.is_terminal() && from != ActionExecutionState::Committed {
+                    assert!(!from.can_transition_to(to));
+                }
+            }
+        }
+        assert!(ActionExecutionState::Proposed.can_transition_to(ActionExecutionState::Authorized));
+        assert!(
+            ActionExecutionState::Executing.can_transition_to(ActionExecutionState::OutcomeUnknown)
+        );
+        assert!(
+            ActionExecutionState::Reconciling
+                .can_transition_to(ActionExecutionState::EffectConfirmed)
+        );
+        assert!(
+            ActionExecutionState::EffectConfirmed
+                .can_transition_to(ActionExecutionState::Validated)
+        );
+        assert!(ActionExecutionState::Validated.can_transition_to(ActionExecutionState::Committed));
+        assert!(
+            !ActionExecutionState::Executing.can_transition_to(ActionExecutionState::Committed)
+        );
+        assert!(
+            !ActionExecutionState::OutcomeUnknown
+                .can_transition_to(ActionExecutionState::Executing)
+        );
+        assert_eq!(ActionEnvelope::TYPE_ID, "mcg.action_envelope.v1");
+        assert_eq!(ActionExecution::TYPE_ID, "mcg.action_execution.v1");
+        assert_eq!(ActionReceipt::TYPE_ID, "mcg.action_receipt.v1");
+        assert_eq!(ReconciliationJob::TYPE_ID, "mcg.reconciliation_job.v1");
+        assert_eq!(
+            ReconciliationObservation::TYPE_ID,
+            "mcg.reconciliation_observation.v1"
+        );
     }
 
     #[test]
