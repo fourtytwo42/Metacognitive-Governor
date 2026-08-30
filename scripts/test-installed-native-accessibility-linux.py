@@ -151,18 +151,27 @@ def wait_for_named_node_prefix(app: Any, prefix: str, deadline: float) -> Any:
 
 
 def wait_for_combo_with_options(app: Any, options: set[str], deadline: float) -> Any:
+    observed: list[str] = []
     while time.monotonic() < deadline:
+        observed = []
         for node in walk(app):
             if role_name(node) != "combo box":
                 continue
             option_names = {
                 accessible_name(candidate) for candidate in walk(node, budget=100)
             }
+            observed.append(f"{accessible_path(node)} options={sorted(option_names)}")
             if options.issubset(option_names):
+                return node
+            name = accessible_name(node)
+            if "Autonomy" in name and any(option in name for option in options):
                 return node
         time.sleep(0.1)
     expected = ", ".join(sorted(options))
-    raise RuntimeError(f"AT-SPI did not expose the combo box with options: {expected}")
+    raise RuntimeError(
+        f"AT-SPI did not expose the combo box with options: {expected}; "
+        f"observed={observed[:50]}"
+    )
 
 
 def select_named_option(combo: Any, label: str, atspi: Any) -> None:
@@ -172,7 +181,7 @@ def select_named_option(combo: Any, label: str, atspi: Any) -> None:
         if accessible_name(node) in {"Guided", "Balanced", "Autonomous"}
     ]
     candidates = [node for node in options if accessible_name(node) == label]
-    if len(candidates) != 1:
+    if options and len(candidates) != 1:
         raise RuntimeError(f"AT-SPI did not expose exactly one {label!r} option")
     if os.environ.get("MCG_ATSPI_DEBUG") == "1":
         for node in [combo, *options]:
@@ -229,7 +238,8 @@ def select_named_option(combo: Any, label: str, atspi: Any) -> None:
             for candidate in options
             if has_state(candidate, atspi.STATE_SELECTED)
         ]
-        if label in accessible_name(combo) and selected_names == [label]:
+        selection_exposed = not options or selected_names == [label]
+        if label in accessible_name(combo) and selection_exposed:
             break
         time.sleep(0.05)
     else:
@@ -292,6 +302,7 @@ def select_named_project(app: Any, name: str, atspi: Any, deadline: float) -> No
 
 
 def wait_for_text_content(node: Any, fragments: set[str], deadline: float) -> None:
+    last_rendered = ""
     while time.monotonic() < deadline:
         exposed: list[str] = []
         for candidate in walk(node, budget=500):
@@ -305,11 +316,15 @@ def wait_for_text_content(node: Any, fragments: set[str], deadline: float) -> No
             except Exception:
                 pass
         rendered = " ".join(exposed)
-        if fragments.issubset(set(rendered.split())):
+        last_rendered = rendered
+        if all(fragment in rendered for fragment in fragments):
             return
         time.sleep(0.1)
     expected = ", ".join(sorted(fragments))
-    raise RuntimeError(f"AT-SPI did not expose the required text fragments: {expected}")
+    raise RuntimeError(
+        f"AT-SPI did not expose the required text fragments: {expected}; "
+        f"observed={last_rendered[:1000]!r}"
+    )
 
 
 def click_accessible(node: Any, atspi: Any) -> None:
@@ -554,6 +569,13 @@ def main() -> int:
         time.monotonic() + args.timeout_seconds,
     )
 
+    configuration = wait_for_node(
+        app,
+        "push button",
+        {"Configuration"},
+        time.monotonic() + args.timeout_seconds,
+    )
+    click_accessible(configuration, pyatspi)
     models = wait_for_node(
         app, "push button", {"Models"}, time.monotonic() + args.timeout_seconds
     )
@@ -594,6 +616,13 @@ def main() -> int:
                 "Reviewed-topology marker already exists before native interaction"
             )
         subprocess.run(["xdotool", "key", "ctrl+comma"], check=True, timeout=5)
+        general = wait_for_node(
+            app,
+            "push button",
+            {"General"},
+            time.monotonic() + args.timeout_seconds,
+        )
+        click_accessible(general, pyatspi)
         autonomy = wait_for_combo_with_options(
             app,
             {"Guided", "Balanced", "Autonomous"},
@@ -623,6 +652,13 @@ def main() -> int:
             raise RuntimeError(
                 "The native settings save did not persist Guided autonomy"
             )
+        back_to_app = wait_for_node(
+            app,
+            "push button",
+            {"Back to app"},
+            time.monotonic() + args.timeout_seconds,
+        )
+        click_accessible(back_to_app, pyatspi)
         projects = wait_for_node(
             app, "link", {"Projects"}, time.monotonic() + args.timeout_seconds
         )

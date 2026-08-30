@@ -150,14 +150,14 @@ This matrix is updated as implementation lands. `Implemented / cumulative UAT pe
 
 | Requirement | Stage | Automated evidence | E2E/UAT evidence | Status |
 |---|---:|---|---|---|
-| Simple, Advanced, and Developer use the same runtime | 1 onward | State/API comparison | Switch levels during active workflow | Implemented / cumulative UAT pending |
-| Interface selection changes presentation only | 1 | UI/state tests | Switch and return without state change | Implemented / cumulative UAT pending |
+| Simple, Advanced, and Developer use the same runtime | 1 onward | State/API comparison | Switch levels during active workflow | Implemented / Windows portable and Linux AppImage native UAT pass / cumulative pending |
+| Interface selection changes presentation only | 1 | UI/state tests | Switch and return without state change | Implemented / Windows portable and Linux AppImage native UAT pass / cumulative pending |
 | `advanced_mode=false` migrates to Simple | 1 | Settings migration test | Existing profile UAT | Automated pass / packaged UAT pending |
 | `advanced_mode=true` migrates to Advanced, never Developer | 1 | Settings migration test | Existing advanced profile UAT | Automated pass / packaged UAT pending |
-| Protected controls remain locked in Developer | 1 onward | API rejection tests | Client-side tamper UAT | Planned |
+| Protected controls remain locked in Developer | 1 onward | API rejection tests | Client-side tamper UAT | Stage 2 Root projection is read-only in Windows portable and Linux AppImage native UAT / later controls pending |
 | Simple avoids research ontology and raw protected data | 7 onward | UI visibility tests | Native Simple audit | Planned |
 | Advanced exposes practical workflows/evidence | 3 onward | UI tests | Native Advanced workflows | Planned |
-| Developer exposes manifests/diagnostics and authorized research summaries | 1 onward | UI contract tests | Native Developer workflows | Compatibility inspector implemented / expands by stage |
+| Developer exposes manifests/diagnostics and authorized research summaries | 1 onward | UI contract tests | Native Developer workflows | Root compatibility inspector passes Windows portable and Linux AppImage native UAT / expands by stage |
 | Existing CLI compatibility remains functional | Every stage | Parser/process regression | Real terminal UAT | Stage 1 parser regression passes / cumulative |
 | Existing conversations/projects/history remain accessible | 2 onward | Migration/integration tests | Packaged upgrade UAT | Planned |
 
@@ -183,8 +183,8 @@ This matrix is updated as implementation lands. `Implemented / cumulative UAT pe
 | Crash and process-boundary receipt | Every affected durable boundary | Planned |
 | Security/adversarial receipt | Every affected trust/capability boundary | Planned |
 | Desktop deterministic E2E receipt | Every visible workflow change | Planned |
-| Native Simple/Advanced/Developer UAT | Every meaningful interface stage | Planned |
-| Windows/macOS/Linux package receipt | Every process/package identity change and final candidate | Planned |
+| Native Simple/Advanced/Developer UAT | Every meaningful interface stage | Windows portable and Linux AppImage Stage 2 slices pass; current-source Windows installer and macOS remain open |
+| Windows/macOS/Linux package receipt | Every process/package identity change and final candidate | Linux clean manifest/scan and AppImage native UAT pass; Debian install/remove plus current-source Windows/macOS remain open |
 | Migration + backup/restore receipt | Every schema/ownership change | Planned |
 | Golden payload/hash compatibility receipt | Every codec/schema release | Planned |
 | Experiment artifact set | Every protected experiment | Planned |

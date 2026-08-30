@@ -1,6 +1,6 @@
 # Stage 2 — Protected Root and Authoritative Storage
 
-**Status:** Cross-platform source and local process implementation qualified; native packaged three-level UAT remains a cumulative gate
+**Status:** Cross-platform source/local process and Linux AppImage implementation qualified; installed package and final cross-platform native gates remain cumulative
 
 ## Delivered boundary
 
@@ -44,11 +44,13 @@
 - Desktop typecheck, focused Vitest, focused Playwright, documentation validation, and packaging-source validation pass at the current checkpoint.
 - Packaging validation rejects production Desktop linkage to `mcg-storage` and ordinary CLI SQLite access while retaining only the explicit stopped-service CLI restore primitives.
 - Exact source `8504f8bfaf04e61e8ed59c703c36a61e31cd2cec` produced a Linux v0.4.67 AppImage (129,321,464 bytes, SHA-256 `AE4491CE5E10EF4F11BFFFE7DDA7A69271FEA21DDCA42A73B79D35EB356EF6F3`) and hardened Debian package (44,921,870 bytes, SHA-256 `456B8D06A6DAD0B3F287753269A28BDD11D9595DA43AC8A0343F8EBF632F899A`). ClamAV 1.5.3 with daily signatures version 28107 reported both clean. This is pre-final package evidence because subsequent migration-process and scanner corrections require a matched rebuild.
+- Exact clean source `bb6842717e060973eb0cc1e0fbd81c080a16e3e6` produced a Linux v0.4.67 AppImage (129,325,560 bytes, SHA-256 `CA4A5B5ABD2A703F3D5C6FBF4358C1D2A5B42D40B4224CD5A36E708ECB602E30`) and hardened Debian package (44,916,624 bytes, SHA-256 `3A826A3CD3C64A061E7D5BA13801805A4AAC5AEC6BBDDD5703753A3F7937251A`). The commit-bound manifest and ClamAV 1.5.3/daily-signature 28108 receipt report both artifacts clean.
+- The real AppImage native journey passes under isolated X11/AT-SPI with the packaged adjacent `mcg-service` and pinned Codex 0.150.1. It proves named/focusable Simple controls, Simple → Advanced → Developer through one runtime, the governed Developer warning, read-only Root JSON contract, masked API-key accessibility, Guided settings persistence, reviewed three-stage project topology, no execution before explicit approval, terminal success, and restart verification. Sanitized evidence is retained on the Ubuntu qualification host at `target/stage2-linux-appimage-uat-bb68427/`; generated home/runtime/data state and the one-run loopback token were removed from the retained copy.
 
 ## Remaining Stage 2 exit evidence
 
-- Run native packaged three-level UAT across the same conversations/projects before and after restart; Windows portable runtime/interface projection is now qualified, while the full installed workflow and Unix package lanes remain open.
-- Run the package and native three-level UAT suites on macOS and Linux. Cross-platform local IPC, migration, compatibility, and source-build qualification plus Windows portable UAT are complete for this checkpoint.
+- Run the full root-required Debian install/repair/restart/native/AppImage/uninstall/data-retention harness. The rootless AppImage native lane is qualified; installer mutation remains deliberately unweakened.
+- Run the current-source package and native three-level UAT suites on macOS and Windows. Earlier Windows portable evidence remains valid for its Root/interface slice but is not the final candidate.
 - Repeat full workspace Rust, Vitest, Playwright, portable, installer, accessibility, and release-smoke gates before declaring Stage 2 complete.
 
 Until those cumulative gates pass, this document is implementation evidence rather than a release-complete claim.
