@@ -80,9 +80,11 @@ OS sandboxing, process-tree confinement, or the action ledger.
 - Runner unit and separate-process tests: 9 passed.
 - Storage action/recovery suite within 103 passing storage tests, including backward-compatible
   origin decoding, bounds validation, canonical inspection, and replay-substitution rejection.
-- Protected Root tests: 10 passed, including confirmed/lost/pre-launch classification,
+- Protected Root tests: 11 passed (10 unit and 1 real-process integration), including
+  confirmed/lost/pre-launch classification,
   occurred/not-occurred/ambiguous reconciliation, real-store reopen, and stranded dispatch
-  restart recovery, plus authenticated bounded action list/show IPC.
+  restart recovery, authenticated bounded action list/show IPC, and four real-child failures
+  durably reconciled after a full Root reopen without redispatch.
 - CLI tests: 68 unit and 10 integration passed, including bounded `action list/show` parsing
   and exact content-minimized human origin output.
 - Contracts and platform strict all-target Clippy: passed.
@@ -119,9 +121,9 @@ the native Linux and macOS lanes.
 
 Stage 4 is not complete until all of the following pass:
 
-1. Extend the passing real-child exit/lost-response/timeout/kill/reap matrix through Root
-   restart and packaged-process tests, including changed-target ambiguity, without blind
-   redispatch.
+1. Extend the passing real-child plus Root-restart exit/lost-response/timeout/kill/reap matrix
+   through packaged-process tests, including the existing changed-target ambiguity case,
+   without blind redispatch.
 2. Exact approval-to-source navigation reaches the originating conversation, agent,
    command, approval, and evidence, and compensation history/controls become owner-visible.
    Authenticated local IPC, CLI list/show, and progressive Desktop status/evidence are

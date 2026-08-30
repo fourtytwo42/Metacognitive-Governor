@@ -2,6 +2,15 @@
 
 Durable project context lives here. Update this file whenever information should survive chat context compression or future agent handoff.
 
+### 2026-08-30 - Root-integrated real-child recovery
+
+- Context: The runner client fault matrix proved process mechanics, while Root recovery was still proven with scripted gateways rather than the actual child-process client.
+- Decision: Use a distinct unpackaged Protected Root test executable and the unchanged fixed-name `ActionRunnerClient`. Drive pre-effect exit, post-effect exit, pre-effect timeout, and post-effect timeout through actual Root dispatch, persist conservative unknown outcomes, fully reopen Root, then switch the same child to the exact bound inspection operation. Never redispatch the original create.
+- Files: `crates/mcg-protected-root/{Cargo.toml,src/bin/action_fault_fixture.rs,tests/action_process_recovery.rs}`; Stage 4, traceability, status report, and `MEMORY.md`.
+- Commands/tests: Protected Root 11/11 all-target tests; whole-workspace all-target check; formatting, diff, and packaging checks passed. Strict Root-only all-target Clippy has three pre-existing findings; rerunning with only those exact lints allowed passes, with no new-path finding.
+- Result: Product checkpoint `bada68e` proves absent effects settle `NoEffectConfirmed` and present effects settle `EffectConfirmed` after real child failure plus full Root reopen, using inspection-only reconciliation and preserving the physical target exactly.
+- Follow-up: Run these fault paths against native packaged processes on Windows/Linux/macOS, then close semantic-path/resource/process-tree/sandbox adversarial gates and compensation/source-navigation UI.
+
 ### 2026-08-30 - Real-child action-runner fault matrix
 
 - Context: Stage 4 had simulated Root failure classification and normal separate-process coverage, but no deterministic child that could fail before/after an effect or cross the parent's deadline.
