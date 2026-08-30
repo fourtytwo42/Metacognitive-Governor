@@ -31,4 +31,3 @@ Storage tests prove legacy envelopes deserialize without an origin, valid origin
 canonical inspection, malformed origins fail before authorization, and replay substitution
 is rejected. Desktop component and browser E2E prove progressively disclosed source records
 remain read-only and unavailable conversation links do not navigate to an unrelated record.
-
