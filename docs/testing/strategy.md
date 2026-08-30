@@ -324,6 +324,11 @@ harnesses all invoke the same verifier and retain separate initial/restart repor
 OpenAI-compatible fixture and drives human, JSON, and NDJSON work through the actual
 installed CLI. Each task must complete, retain a passing independent evaluation,
 and record a successful `process.exec` completion for the discovered project test.
+The Chat/Coordinator handoff crosses only the executable-pinned, per-thread
+`mcg_agent` MCP bridge, whose Codex server-scoped tool approval is explicit; tests
+must prove this bridge works while the role thread remains read-only and must not
+substitute a broad approval bypass or manufacture a Root approval for that internal
+handoff.
 The fixture is disconnected before daemon restart; the second phase requires the
 same task, evaluator, audit, and deterministic side-effect-free replay evidence with
 no provider available. Windows, Linux, and macOS package harnesses share this gate,

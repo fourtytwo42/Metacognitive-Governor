@@ -809,6 +809,11 @@ fn role_thread_config(mcp_command: &str, bootstrap_file: &str, coder: bool) -> V
             "mcg_agent": {
                 "command": mcp_command,
                 "args": ["--bootstrap-file", bootstrap_file],
+                // This bridge is not an owner approval boundary: every invocation is pinned to
+                // MCG's executable, one role bootstrap, and a loopback authorization check. Let
+                // Codex call only that already-governed surface without weakening the thread's
+                // read-only filesystem sandbox or its ordinary approval policy.
+                "default_tools_approval_mode": "approve",
                 "startup_timeout_sec": 10,
                 "tool_timeout_sec": 60
             }
@@ -5227,6 +5232,10 @@ mod tests {
         assert_eq!(
             chat["mcp_servers"]["mcg_agent"]["args"],
             json!(["--bootstrap-file", "C:/MCG/bootstrap/one-use.json"])
+        );
+        assert_eq!(
+            chat["mcp_servers"]["mcg_agent"]["default_tools_approval_mode"],
+            "approve"
         );
 
         let coordinator = CodexThreadInstructions::isolated_coordinator_config(

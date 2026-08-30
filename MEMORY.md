@@ -2,6 +2,23 @@
 
 Durable project context lives here. Update this file whenever information should survive chat context compression or future agent handoff.
 
+### 2026-08-30 - Stage 2 internal role-bridge approval correction
+
+- Context: Exact Windows package UAT reached the installed provider-backed Chat Agent under the owner's authenticated Codex account, but Chat responded that Coordinator delegation required approval. No durable Root approval was created because Codex classified the private MCP call before MetaCog's Root approval path; Chat role threads intentionally use a read-only sandbox, which maps ordinary Codex approvals to `never`.
+- Decision: Keep the read-only role sandbox and all Root governance intact. Mark only the executable-pinned, per-thread, bootstrap-token-scoped `mcg_agent` MCP server with Codex's supported `default_tools_approval_mode = "approve"`. Its role-specific tool exposure and loopback authorization remain authoritative; do not add a broad approval bypass and do not make the installed-provider fixture auto-approve unrelated Root requests.
+- Files: `crates/mcg-codex-app-server/src/lib.rs`, `docs/NewPRD/STAGE_2_PROTECTED_ROOT.md`, and `docs/testing/strategy.md`.
+- Commands/tests: Official Codex configuration schema/source confirms server/per-tool `approve` support and MCP prompt auto-approval semantics. Pinned Codex 0.150.1 strict configuration accepted the field and advanced to transport initialization. The complete `mcg-codex-app-server` suite passes 29 active tests with six explicit installed qualifications ignored; formatting, packaging contracts, and diff hygiene pass.
+- Result: The earlier provider-test polling workaround was fully removed. The correction is locally proven at the config/contract level but still requires an exact clean Windows package rebuild and owner-authenticated installed provider UAT before release.
+- Follow-up: Commit/push this scoped correction, rebuild exact packages, rerun Windows owner package UAT, then repeat Linux/macOS package gates because the app-server sidecar changed.
+
+### 2026-08-30 - Exact corrected macOS package build checkpoint
+
+- Context: The clean macOS build was repeated after the owner-visible MetaCog bundle-name and isolated native-UAT credential-path corrections.
+- Files: Exact source `426f756a46edc5c5dfc2519e2913813875887a32`; `/Users/hendo42/mcg-stage2-package-cea1e07/target/release/bundle/dmg/MetaCog_0.4.67_x64.dmg`; manifest beside the release binaries.
+- Commands/tests: Tauri release build and `hdiutil verify` passed. The DMG is 53,974,057 bytes / SHA-256 `3D28E9C19D16BD11498BC753BCF385012BE10B2DEC801A6A4724B4E32D8820CF`; the 389-byte release manifest SHA-256 is `8A30FDD7EF05F84915CDF394AF2491C2327C2EF4C967B0925248C855447829E1`; source was exact clean detached `426f756`.
+- Result: Corrected macOS package creation is proven. The package is unsigned as explicitly permitted for owner pre-release qualification and is superseded as a final candidate by the subsequent role-bridge correction.
+- Follow-up: Rebuild from the role-bridge correction and run the non-destructive portion of macOS package/AX UAT without disturbing the preserved OAuth app/service on port 7777.
+
 ### 2026-08-30 - Stage 2 exact Linux checkpoint and macOS bundle-name correction
 
 - Context: Exact clean source `cea1e07da48c7083a6c319b0e65f88ad24f1a510` completed the repeat Linux package/AppImage lane, while a fresh exact-source macOS build reached Tauri app bundling and then exposed a repository-script assumption that the output was still named `MCG.app`; current Tauri metadata produces `MetaCog.app`.
