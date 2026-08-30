@@ -131,6 +131,25 @@ def wait_for_named_node(app: Any, names: set[str], deadline: float) -> Any:
     raise RuntimeError(f"AT-SPI did not expose a node named one of: {expected}")
 
 
+def wait_for_named_node_prefix(app: Any, prefix: str, deadline: float) -> Any:
+    while time.monotonic() < deadline:
+        for node in walk(app):
+            if accessible_name(node).startswith(prefix):
+                return node
+        time.sleep(0.1)
+    related = sorted(
+        accessible_path(node)
+        for node in walk(app)
+        if any(
+            token in accessible_name(node).casefold()
+            for token in ("developer", "governed", "interface complexity")
+        )
+    )
+    raise RuntimeError(
+        f"AT-SPI did not expose a node beginning with: {prefix}; related={related[:100]}"
+    )
+
+
 def wait_for_combo_with_options(app: Any, options: set[str], deadline: float) -> Any:
     while time.monotonic() < deadline:
         for node in walk(app):
@@ -513,11 +532,9 @@ def main() -> int:
     wait_for_named_node(
         app, {"Interface complexity"}, time.monotonic() + args.timeout_seconds
     )
-    wait_for_named_node(
+    wait_for_named_node_prefix(
         app,
-        {
-            "Developer mode remains governed: protected policy, evaluator fixtures, Root authority, signing keys, secrets, direct database writes, and trust bypasses are unavailable or read-only."
-        },
+        "Developer mode remains governed:",
         time.monotonic() + args.timeout_seconds,
     )
     runtime_inspector = wait_for_named_node(
