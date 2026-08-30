@@ -11098,6 +11098,11 @@ async fn run_root_action(
                 println!("  attempt: {}", inspection.envelope.attempt_id);
                 println!("  actor: {}", inspection.envelope.actor);
                 println!("  effect: {:?}", inspection.envelope.effect_class);
+                if let Some(origin) = &inspection.envelope.origin {
+                    for line in canonical_action_origin_lines(origin) {
+                        println!("{line}");
+                    }
+                }
                 println!(
                     "  operation: {} ({}:{})",
                     inspection.envelope.operation.type_id.as_str(),
@@ -11120,6 +11125,30 @@ async fn run_root_action(
         }
     }
     Ok(())
+}
+
+fn canonical_action_origin_lines(origin: &mcg_contracts::ActionOrigin) -> Vec<String> {
+    let named = [
+        ("conversation", origin.conversation.as_ref()),
+        ("invocation", origin.invocation.as_ref()),
+        ("command", origin.command.as_ref()),
+        ("approval", origin.approval.as_ref()),
+        ("agent", origin.agent.as_ref()),
+    ];
+    named
+        .into_iter()
+        .filter_map(|(label, source)| source.map(|source| (label, source)))
+        .chain(origin.evidence.iter().map(|source| ("evidence", source)))
+        .map(|(label, source)| {
+            format!(
+                "  source {label}: {} {} ({}:{})",
+                source.source_type.as_str(),
+                source.locator,
+                source.content_hash.domain,
+                source.content_hash.digest_hex
+            )
+        })
+        .collect()
 }
 
 async fn run_status(
@@ -16081,6 +16110,41 @@ mod tests {
                 }
             }
         ));
+    }
+
+    #[test]
+    fn human_action_origin_output_is_exact_and_content_minimized() {
+        let source = |source_type: &str, locator: &str, digest: char| mcg_contracts::SourceRef {
+            source_type: mcg_contracts::StableTypeId::parse(source_type).unwrap(),
+            locator: locator.into(),
+            content_hash: mcg_contracts::ContentHash {
+                algorithm: mcg_contracts::HashAlgorithm::Blake3_256,
+                domain: "MetaCog.ActionSource".into(),
+                digest_hex: std::iter::repeat_n(digest, 64).collect(),
+            },
+        };
+        let origin = mcg_contracts::ActionOrigin {
+            conversation: Some(source(
+                "mcg.conversation.v1",
+                "00000000-0000-4000-8000-000000000503",
+                'a',
+            )),
+            invocation: None,
+            command: None,
+            approval: Some(source(
+                "mcg.approval_request.v1",
+                "00000000-0000-4000-8000-000000000504",
+                'b',
+            )),
+            agent: None,
+            evidence: Vec::new(),
+        };
+        let lines = canonical_action_origin_lines(&origin);
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].contains("source conversation: mcg.conversation.v1"));
+        assert!(lines[0].contains("00000000-0000-4000-8000-000000000503"));
+        assert!(lines[1].contains("source approval: mcg.approval_request.v1"));
+        assert!(!lines.join("\n").contains("authority"));
     }
 
     #[test]
