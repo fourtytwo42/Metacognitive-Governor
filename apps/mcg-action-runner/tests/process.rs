@@ -3,7 +3,7 @@
 use std::io::Write as _;
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use mcg_action_runner::{
@@ -39,6 +39,57 @@ fn invoke(request: &[u8]) -> (std::process::ExitStatus, ActionRunnerResponse) {
     assert!(output.stderr.is_empty());
     let response = serde_json::from_slice(&output.stdout).unwrap();
     (output.status, response)
+}
+
+fn fault_client(root: &Path, timeout: Duration) -> ActionRunnerClient {
+    let runner = root.join(if cfg!(windows) {
+        "mcg-action-runner.exe"
+    } else {
+        "mcg-action-runner"
+    });
+    std::fs::copy(
+        env!("CARGO_BIN_EXE_mcg-action-runner-fault-fixture"),
+        &runner,
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mut permissions = std::fs::metadata(&runner).unwrap().permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&runner, permissions).unwrap();
+    }
+    ActionRunnerClient::with_executable(runner, timeout).unwrap()
+}
+
+fn fixture_request(root: &Path) -> ActionRunnerRequest {
+    request(
+        root,
+        &GovernedFilesystemOperation::InspectFile {
+            relative_path: "probe.txt".into(),
+            max_bytes: 100,
+        },
+    )
+}
+
+fn process_exists(pid: u32) -> bool {
+    #[cfg(windows)]
+    {
+        let filter = format!("PID eq {pid}");
+        let output = Command::new("tasklist")
+            .args(["/FI", &filter, "/FO", "CSV", "/NH"])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&output.stdout).contains(&format!("\"{pid}\""))
+    }
+    #[cfg(unix)]
+    {
+        let output = Command::new("ps")
+            .args(["-p", &pid.to_string(), "-o", "pid="])
+            .output()
+            .unwrap();
+        output.status.success() && !output.stdout.is_empty()
+    }
 }
 
 #[test]
@@ -133,4 +184,89 @@ async fn bounded_parent_client_validates_the_exact_child_response() {
 
     assert!(!ActionRunnerClientError::Launch.effect_may_have_occurred());
     assert!(ActionRunnerClientError::Timeout.effect_may_have_occurred());
+}
+
+#[tokio::test]
+async fn child_exit_before_effect_is_unknown_but_leaves_no_effect() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("fault-mode.txt"), "exit-before-effect").unwrap();
+    let client = fault_client(root.path(), Duration::from_secs(2));
+
+    let error = client
+        .invoke(&fixture_request(root.path()))
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, ActionRunnerClientError::InvalidResponse));
+    assert!(error.effect_may_have_occurred());
+    assert!(!root.path().join("effect.txt").exists());
+}
+
+#[tokio::test]
+async fn lost_response_after_effect_preserves_unknown_outcome_evidence() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("fault-mode.txt"), "effect-then-exit").unwrap();
+    let client = fault_client(root.path(), Duration::from_secs(2));
+
+    let error = client
+        .invoke(&fixture_request(root.path()))
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, ActionRunnerClientError::InvalidResponse));
+    assert!(error.effect_may_have_occurred());
+    assert_eq!(
+        std::fs::read(root.path().join("effect.txt")).unwrap(),
+        b"effect occurred"
+    );
+}
+
+#[tokio::test]
+async fn timeout_kills_reaps_and_rejects_late_effects() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("fault-mode.txt"), "timeout-before-effect").unwrap();
+    let client = fault_client(root.path(), Duration::from_millis(100));
+    let started = Instant::now();
+
+    let error = client
+        .invoke(&fixture_request(root.path()))
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, ActionRunnerClientError::Timeout));
+    assert!(started.elapsed() < Duration::from_secs(1));
+    let pid = std::fs::read_to_string(root.path().join("fixture-pid.txt"))
+        .unwrap()
+        .parse::<u32>()
+        .unwrap();
+    assert!(!process_exists(pid), "timed-out child must be reaped");
+    std::thread::sleep(Duration::from_millis(150));
+    assert!(!root.path().join("effect.txt").exists());
+    assert!(!root.path().join("late-effect.txt").exists());
+}
+
+#[tokio::test]
+async fn timeout_after_effect_is_unknown_and_still_stops_late_work() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("fault-mode.txt"), "effect-then-timeout").unwrap();
+    let client = fault_client(root.path(), Duration::from_millis(100));
+
+    let error = client
+        .invoke(&fixture_request(root.path()))
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, ActionRunnerClientError::Timeout));
+    assert!(error.effect_may_have_occurred());
+    assert_eq!(
+        std::fs::read(root.path().join("effect.txt")).unwrap(),
+        b"effect occurred"
+    );
+    let pid = std::fs::read_to_string(root.path().join("fixture-pid.txt"))
+        .unwrap()
+        .parse::<u32>()
+        .unwrap();
+    assert!(!process_exists(pid), "timed-out child must be reaped");
+    std::thread::sleep(Duration::from_millis(150));
+    assert!(!root.path().join("late-effect.txt").exists());
 }
