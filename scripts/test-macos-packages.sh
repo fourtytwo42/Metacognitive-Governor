@@ -426,7 +426,7 @@ pixel_height="$(sips -g pixelHeight "$uat_root/desktop.png" | awk '/pixelHeight:
   exit 1
 }
 xcrun swift "$native_accessibility_verifier" "$desktop_pid" "$uat_root/desktop-native-accessibility.json" \
-  "http://127.0.0.1:$gui_port" "$gui_data_root/local-auth-token"
+  "http://127.0.0.1:$gui_port" "$gui_data/local-auth-token"
 stop_process "$desktop_pid"
 stop_process "$desktop_service_pid"
 background_pids=()

@@ -354,6 +354,10 @@ const macosPackageUat = await read("scripts/test-macos-packages.sh");
 for (const invariant of ["tauri.conf.json", "version", 'MetaCog_${version}_${bundle_arch}.dmg']) {
   requireText(macosPackageUat, invariant, "macOS package UAT artifact discovery");
 }
+requireText(macosPackageUat, '"$gui_data/local-auth-token"', "macOS isolated native-UAT credential path");
+if (macosPackageUat.includes("gui_data_root")) {
+  throw new Error("macOS package UAT must not reference the obsolete undefined gui_data_root variable.");
+}
 for (const invariant of ["MCG_BIND_ADDRESS", "mcg-plugin-runner", "mcg-shadow-runner", "mcg-updater", "Wasmtime-Apache-2.0-WITH-LLVM-exception.txt", "module_digest_mismatch", "PLUGIN_RUNNERS_QUALIFIED", "macos-package-uat-retained.txt", "Repair installation removed external MCG data", "Uninstall removed external MCG data", "test-installed-experiments.py", "experiments-restart.json", "test-installed-provider-success.py", "provider-success-restart.json", "test-installed-memory-transfer.py", "memory-transfer-restart.json", "test-installed-interface-success.py", "interface-success-restart.json", "test-installed-reviewed-topology.py", "REVIEWED_TOPOLOGY_RESTART_REPORT", "test-installed-real-project.py", "REAL_PROJECT_RESTART_REPORT", "test-installed-real-api-project.py", "REAL_API_PROJECT_RESTART_REPORT", "test-installed-real-fullstack-project.py", "REAL_FULLSTACK_PROJECT_RESTART_REPORT", "test-installed-native-accessibility-macos.swift", "NATIVE_ACCESSIBILITY_REPORT", "xcrun swift", "npm", "hdiutil verify", "codesign --verify", "MCG_MACOS_UAT_ALLOW_ADHOC", "MCG_MACOS_UAT_REQUIRE_NOTARIZED", "MCG_MACOS_UAT_EXTERNAL_CAPTURE_REQUEST", "MCG_MACOS_UAT_EXTERNAL_CAPTURE_TIMEOUT_SECONDS", "Refusing to replace external capture request", "pwd -P", "protocolVersion", "screencapture", "remove_installed_app"]) {
   requireText(macosPackageUat, invariant, "macOS package UAT");
 }
