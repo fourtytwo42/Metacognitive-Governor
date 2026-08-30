@@ -343,6 +343,16 @@ host-global newline preferences cannot alter accepted evidence.
 At the byte-stability checkpoint, the complete runtime suite passes 108 active
 tests with two explicit Windows Sandbox qualifications ignored, and the complete
 Root-owned compatibility API suite passes 102/102 before exact package rebuild.
+Exact Windows installed qualification must pin the native Codex 0.150.1 executable
+before installation and reject a PATH-selected incompatible build. The installed
+human journey must prove owner Review/Apply preserves exact LF-only accepted bytes.
+Current `run --json` and `run --stream-json` assertions validate conversation and
+governance receipts; deterministic provider/evaluator project fixtures use explicit
+`project add`, `task create`, and `task launch` calls. Native UI Automation must
+select full-window Settings panes explicitly, return through the visible Back-to-app
+control, scope project selection to the named accessible project card, and validate
+the labeled topology subtree rather than depending on Chromium exposing individual
+HTML text fragments as separate controls.
 The Chat/Coordinator handoff crosses only the executable-pinned, per-thread
 `mcg_agent` MCP bridge, whose Codex server-scoped tool approval is explicit; tests
 must prove this bridge works while the role thread remains read-only and must not

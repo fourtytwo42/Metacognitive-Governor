@@ -9,6 +9,12 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+trap {
+    $nativeFailure = "Native accessibility failure at line {0}: {1} ({2})" -f `
+        $_.InvocationInfo.ScriptLineNumber, $_.InvocationInfo.Line.Trim(), $_.Exception.Message
+    [Console]::Error.WriteLine($nativeFailure)
+    throw
+}
 $Canary = "MCG_NATIVE_SECRET_CANARY"
 $assemblyPath = "C:\Windows\Microsoft.NET\Framework64\v4.0.30319\WPF\UIAutomationClient.dll"
 if (-not (Test-Path -LiteralPath $assemblyPath -PathType Leaf)) {
@@ -252,6 +258,48 @@ function Find-ElementPrefix(
     throw "UI Automation did not expose a control beginning with '$Prefix' as $($Types -join ' or ')."
 }
 
+function Find-ElementContaining(
+    [System.Windows.Automation.AutomationElement]$Root,
+    [string]$Text,
+    [string[]]$Types,
+    [DateTime]$Deadline
+) {
+    do {
+        foreach ($item in Get-Snapshots $Root) {
+            if ($item.Name.IndexOf($Text, [StringComparison]::Ordinal) -ge 0 `
+                -and ($Types.Count -eq 0 -or $item.Type -in $Types)) {
+                return $item
+            }
+        }
+        Start-Sleep -Milliseconds 100
+    } while ([DateTime]::UtcNow -lt $Deadline)
+    throw "UI Automation did not expose a control containing '$Text' as $($Types -join ' or ')."
+}
+
+function Find-ProjectSelectionButton(
+    [System.Windows.Automation.AutomationElement]$Root,
+    [string]$ProjectName,
+    [DateTime]$Deadline
+) {
+    do {
+        $projectLabels = @(Get-Snapshots $Root | Where-Object Name -eq $ProjectName)
+        foreach ($label in $projectLabels) {
+            $ancestor = $label.Element
+            $depth = 0
+            while ($depth -lt 4 -and $null -ne $ancestor) {
+                $button = @(Get-Snapshots $ancestor | Where-Object {
+                    $_.Type -eq "Button" -and $_.Name -in @("Use project", "Selected")
+                } | Select-Object -First 1)
+                if ($button.Count -eq 1) { return $button[0] }
+                $ancestor = [System.Windows.Automation.TreeWalker]::ControlViewWalker.GetParent($ancestor)
+                $depth++
+            }
+        }
+        Start-Sleep -Milliseconds 100
+    } while ([DateTime]::UtcNow -lt $Deadline)
+    throw "UI Automation did not expose the selection button for project '$ProjectName'."
+}
+
 function Wait-Focused(
     [System.Windows.Automation.AutomationElement]$Root,
     [string]$Name
@@ -397,6 +445,8 @@ function Open-GeneralSettings([System.Windows.Automation.AutomationElement]$Root
         [int]($settingsRectangle.Top + ($settingsRectangle.Height / 2))
     )
     [McgNativeWindow]::ClickLeft()
+    $general = Find-Element $Root @("General") @("Button") (Get-Deadline)
+    Invoke-Accessible $general.Element
 }
 
 $process = Get-Process -Id $ProcessId -ErrorAction Stop
@@ -521,6 +571,8 @@ if ($contractProjection -notmatch 'protected-root' -or $contractProjection -notm
 $valueWasBlocked = $true
 $value = $null
 if (-not $Stage2RuntimeOnly) {
+    $configuration = Find-Element $root @("Configuration") @("Button") (Get-Deadline)
+    Invoke-Accessible $configuration.Element
     $models = Find-Element $root @("Models") @("Button") (Get-Deadline)
     Invoke-Accessible $models.Element
     $addProvider = Find-Element $root @("Add API or local provider") @("Button") (Get-Deadline)
@@ -587,13 +639,21 @@ if (-not [string]::IsNullOrWhiteSpace($ReviewedTopologyMarker)) {
     if ($savedSettings.revision -le $settingsBefore.revision -or $savedSettings.autonomy -ne "guided") {
         throw "The native settings save did not persist Guided autonomy."
     }
+    $backToApp = Find-ElementContaining $root "Back to app" @("Button") (Get-Deadline)
+    Invoke-Accessible $backToApp.Element
     $projects = Find-Element $root @("Projects") @("Hyperlink") (Get-Deadline)
     Invoke-Accessible $projects.Element
     $null = Find-Element $root @("native-reviewed-topology-project") @() (Get-Deadline)
-    $projectSelection = Find-Element $root @("Use project", "Selected") @("Button") (Get-Deadline)
+    $projectSelection = Find-ProjectSelectionButton $root "native-reviewed-topology-project" (Get-Deadline)
     if ($projectSelection.Name -eq "Use project") { Invoke-Accessible $projectSelection.Element }
+    $topology = Find-Element $root @("Project topology plan") @() (Get-Deadline)
+    $topologyText = @(Get-ElementSnapshot $topology.Element)
+    $topologyText += @(Get-Snapshots $topology.Element)
+    $topologyProjection = ($topologyText | ForEach-Object Name | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) -join "`n"
     foreach ($name in @("Stage 1", "database", "Stage 2", "api", "Stage 3", "web")) {
-        $null = Find-Element $root @($name) @() (Get-Deadline)
+        if ($topologyProjection.IndexOf($name, [StringComparison]::Ordinal) -lt 0) {
+            throw "The accessible project topology plan omitted '$name'."
+        }
     }
     $reason = Find-Element $root @("Reviewed topology reason") @("Edit") (Get-Deadline)
     Set-AccessibleValue $reason.Element "Run the installed native reviewed project tests"
@@ -609,8 +669,8 @@ if (-not [string]::IsNullOrWhiteSpace($ReviewedTopologyMarker)) {
     $null = Find-Element $root @("succeeded") @() (Get-Deadline)
     $deadline = Get-Deadline
     do {
-        if (Test-Path -LiteralPath $resolvedMarker -PathType Leaf `
-            -and (Get-Content -LiteralPath $resolvedMarker -Raw) -ceq "x") {
+        if ((Test-Path -LiteralPath $resolvedMarker -PathType Leaf) `
+            -and ((Get-Content -LiteralPath $resolvedMarker -Raw) -ceq "x")) {
             $reviewedTopologyQualified = $true
             break
         }

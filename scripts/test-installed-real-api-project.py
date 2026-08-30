@@ -216,7 +216,9 @@ class ProviderHandler(BaseHTTPRequestHandler):
             call_number = self.server.call_count
         inputs = request.get("input") or []
         tools = request.get("tools") or []
-        has_tool_result = any(item.get("type") == "function_call_output" for item in inputs)
+        has_tool_result = any(
+            item.get("type") == "function_call_output" for item in inputs
+        )
         has_write_tool = any(
             (tool.get("name") or (tool.get("function") or {}).get("name")) == "fs.write"
             for tool in tools
@@ -280,12 +282,17 @@ class ProviderHandler(BaseHTTPRequestHandler):
         )
 
 
-def api_json(host: str, token: str, method: str, path: str, body: object | None = None) -> Any:
+def api_json(
+    host: str, token: str, method: str, path: str, body: object | None = None
+) -> Any:
     data = None if body is None else json.dumps(body).encode()
     request = urllib.request.Request(
         f"{host.rstrip('/')}{path}",
         data=data,
-        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        },
         method=method,
     )
     try:
@@ -293,7 +300,9 @@ def api_json(host: str, token: str, method: str, path: str, body: object | None 
             payload = response.read()
     except urllib.error.HTTPError as error:
         detail = error.read(4096).decode(errors="replace")
-        raise AssertionError(f"{method} {path} failed with HTTP {error.code}: {detail}") from error
+        raise AssertionError(
+            f"{method} {path} failed with HTTP {error.code}: {detail}"
+        ) from error
     return None if not payload else json.loads(payload)
 
 
@@ -332,22 +341,34 @@ def decode_json(result: subprocess.CompletedProcess[bytes], label: str) -> Any:
     try:
         return json.loads(result.stdout)
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise AssertionError(f"{label} did not return JSON: {result.stdout[:4096]!r}") from error
+        raise AssertionError(
+            f"{label} did not return JSON: {result.stdout[:4096]!r}"
+        ) from error
 
 
 def npm_command() -> str:
-    executable = shutil.which("npm.cmd" if os.name == "nt" else "npm") or shutil.which("npm")
-    require(executable is not None, "npm is required for the representative API project")
+    executable = shutil.which("npm.cmd" if os.name == "nt" else "npm") or shutil.which(
+        "npm"
+    )
+    require(
+        executable is not None, "npm is required for the representative API project"
+    )
     return executable
 
 
 def node_command() -> str:
-    executable = shutil.which("node.exe" if os.name == "nt" else "node") or shutil.which("node")
-    require(executable is not None, "Node.js is required for the representative API project")
+    executable = shutil.which(
+        "node.exe" if os.name == "nt" else "node"
+    ) or shutil.which("node")
+    require(
+        executable is not None, "Node.js is required for the representative API project"
+    )
     return executable
 
 
-def run_project_test(project: pathlib.Path, evidence_root: pathlib.Path, label: str) -> int:
+def run_project_test(
+    project: pathlib.Path, evidence_root: pathlib.Path, label: str
+) -> int:
     result = subprocess.run(
         [npm_command(), "test"],
         cwd=project,
@@ -391,8 +412,13 @@ def expected_digests() -> dict[str, str]:
 
 
 def verify_files(project: pathlib.Path) -> dict[str, str]:
-    actual = {name: sha256((project / name).read_bytes()) for name in expected_digests()}
-    require(actual == expected_digests(), "generated API bytes do not match the reviewed fixture")
+    actual = {
+        name: sha256((project / name).read_bytes()) for name in expected_digests()
+    }
+    require(
+        actual == expected_digests(),
+        "generated API bytes do not match the reviewed fixture",
+    )
     return actual
 
 
@@ -426,11 +452,16 @@ def runtime_request(
     except urllib.error.HTTPError as error:
         status = error.code
         payload = error.read()
-    require(status == expected_status, f"{method} {path} returned {status}, expected {expected_status}")
+    require(
+        status == expected_status,
+        f"{method} {path} returned {status}, expected {expected_status}",
+    )
     return json.loads(payload)
 
 
-def verify_runtime(project: pathlib.Path, evidence_root: pathlib.Path, label: str) -> dict[str, Any]:
+def verify_runtime(
+    project: pathlib.Path, evidence_root: pathlib.Path, label: str
+) -> dict[str, Any]:
     port = reserve_loopback_port()
     endpoint = f"http://127.0.0.1:{port}"
     environment = os.environ.copy()
@@ -447,7 +478,10 @@ def verify_runtime(project: pathlib.Path, evidence_root: pathlib.Path, label: st
     try:
         deadline = time.monotonic() + 15
         while True:
-            require(process.poll() is None, "representative API exited before becoming healthy")
+            require(
+                process.poll() is None,
+                "representative API exited before becoming healthy",
+            )
             try:
                 transcript["health"] = runtime_request(endpoint, "GET", "/health", 200)
                 break
@@ -485,17 +519,38 @@ def verify_runtime(project: pathlib.Path, evidence_root: pathlib.Path, label: st
             b'{"note":"' + (b"x" * (33 * 1024)) + b'"}',
         )
         transcript["missing"] = runtime_request(endpoint, "GET", "/missing", 404)
-        require(transcript["health"] == {"status": "ok"}, "runtime health response changed")
-        require(transcript["first"]["entry"]["id"] == 1, "first runtime entry identity changed")
-        require(transcript["second"]["entry"]["id"] == 2, "second runtime entry identity changed")
+        require(
+            transcript["health"] == {"status": "ok"}, "runtime health response changed"
+        )
+        require(
+            transcript["first"]["entry"]["id"] == 1,
+            "first runtime entry identity changed",
+        )
+        require(
+            transcript["second"]["entry"]["id"] == 2,
+            "second runtime entry identity changed",
+        )
         require(
             transcript["summary"]
-            == {"count": 2, "totalCents": 2000, "byCategory": {"supplies": 1250, "travel": 750}},
+            == {
+                "count": 2,
+                "totalCents": 2000,
+                "byCategory": {"supplies": 1250, "travel": 750},
+            },
             "runtime summary changed",
         )
-        require(transcript["invalid"] == {"error": "invalid_entry"}, "invalid entry did not fail closed")
-        require(transcript["oversized"] == {"error": "body_too_large"}, "oversized body did not fail closed")
-        require(transcript["missing"] == {"error": "not_found"}, "unknown route did not fail closed")
+        require(
+            transcript["invalid"] == {"error": "invalid_entry"},
+            "invalid entry did not fail closed",
+        )
+        require(
+            transcript["oversized"] == {"error": "body_too_large"},
+            "oversized body did not fail closed",
+        )
+        require(
+            transcript["missing"] == {"error": "not_found"},
+            "unknown route did not fail closed",
+        )
         report = {
             "schema_version": SCHEMA_VERSION,
             "loopback_only": True,
@@ -505,7 +560,9 @@ def verify_runtime(project: pathlib.Path, evidence_root: pathlib.Path, label: st
             "invalid_input_failed_closed": True,
             "oversized_body_failed_closed": True,
             "unknown_route_failed_closed": True,
-            "transcript_sha256": sha256(json.dumps(transcript, sort_keys=True).encode()),
+            "transcript_sha256": sha256(
+                json.dumps(transcript, sort_keys=True).encode()
+            ),
         }
         evidence_root.joinpath(f"{label}.json").write_text(
             json.dumps(report, sort_keys=True),
@@ -521,7 +578,10 @@ def verify_runtime(project: pathlib.Path, evidence_root: pathlib.Path, label: st
             stdout, stderr = process.communicate(timeout=10)
         evidence_root.joinpath(f"{label}.stdout").write_bytes(stdout)
         evidence_root.joinpath(f"{label}.stderr").write_bytes(stderr)
-        require(process.returncode is not None, "representative API process did not terminate")
+        require(
+            process.returncode is not None,
+            "representative API process did not terminate",
+        )
         try:
             runtime_request(endpoint, "GET", "/health", 200)
         except urllib.error.URLError:
@@ -539,7 +599,9 @@ def task_audit(
     task_id: str,
     label: str,
 ) -> list[dict[str, Any]]:
-    result = invoke_cli(cli, host, token_file, project, evidence_root, label, ["task", "audit", task_id])
+    result = invoke_cli(
+        cli, host, token_file, project, evidence_root, label, ["task", "audit", task_id]
+    )
     require(result.returncode == 0, f"{label} failed: {result.stderr[:4096]!r}")
     records = decode_json(result, label)["records"]
     completions = [
@@ -547,8 +609,14 @@ def task_audit(
         for record in records
         if record.get("phase") == "completion" and record.get("result") == "succeeded"
     ]
-    require(sum(record.get("tool") == "fs.write" for record in completions) == 3, "API lacks three governed writes")
-    require(any(record.get("tool") == "process.exec" for record in completions), "API test was not governed")
+    require(
+        sum(record.get("tool") == "fs.write" for record in completions) == 3,
+        "API lacks three governed writes",
+    )
+    require(
+        any(record.get("tool") == "process.exec" for record in completions),
+        "API test was not governed",
+    )
     return records
 
 
@@ -561,7 +629,10 @@ def exercise(args: argparse.Namespace) -> None:
     evidence_root = output_path.parent
     evidence_root.mkdir(parents=True, exist_ok=True)
     prepare_project(project)
-    require(run_project_test(project, evidence_root, "real-api-before") != 0, "seeded API test unexpectedly passed")
+    require(
+        run_project_test(project, evidence_root, "real-api-before") != 0,
+        "seeded API test unexpectedly passed",
+    )
     token = token_file.read_text(encoding="utf-8").strip()
     require(bool(token), "installed token is empty")
 
@@ -591,7 +662,47 @@ def exercise(args: argparse.Namespace) -> None:
             },
         )
         configured = True
-        require(mutation["catalog"]["models"][0]["id"] == MODEL, "fixture model was not discovered")
+        require(
+            mutation["catalog"]["models"][0]["id"] == MODEL,
+            "fixture model was not discovered",
+        )
+        project_result = invoke_cli(
+            cli,
+            args.host,
+            token_file,
+            project,
+            evidence_root,
+            "real-api-register",
+            ["project", "add", str(project), "--json"],
+        )
+        require(
+            project_result.returncode == 0,
+            f"real API registration failed: {project_result.stderr[:4096]!r}",
+        )
+        project_id = decode_json(project_result, "real-api-register")["project"][
+            "project_id"
+        ]
+        task_result = invoke_cli(
+            cli,
+            args.host,
+            token_file,
+            project,
+            evidence_root,
+            "real-api-task",
+            [
+                "task",
+                "create",
+                "Build and verify the Pocket Ledger local JSON API",
+                "--project-id",
+                project_id,
+                "--json",
+            ],
+        )
+        require(
+            task_result.returncode == 0,
+            f"real API task creation failed: {task_result.stderr[:4096]!r}",
+        )
+        task_id = decode_json(task_result, "real-api-task")["task"]["id"]
         result = invoke_cli(
             cli,
             args.host,
@@ -599,20 +710,44 @@ def exercise(args: argparse.Namespace) -> None:
             project,
             evidence_root,
             "real-api-run",
-            ["run", "--json", "Build", "and", "verify", "the", "Pocket", "Ledger", "local", "JSON", "API"],
+            ["task", "launch", task_id, "--json"],
         )
-        require(result.returncode == 0, f"real API project failed: {result.stderr[:4096]!r}")
+        require(
+            result.returncode == 0, f"real API project failed: {result.stderr[:4096]!r}"
+        )
         value = decode_json(result, "real-api-run")
         require(value["task"]["state"] == "completed", "real API task did not complete")
-        require(value["run"]["run"]["state"] == "completed", "real API run did not complete")
-        require(value["run"]["evaluations"][0]["outcome"] == "passed", "independent evaluation did not pass")
-        require(len(value["run"]["results"]) == 2, "worker and evaluator results were not retained")
-        require(provider.call_count == 3, f"expected three provider calls, observed {provider.call_count}")
-        require(run_project_test(project, evidence_root, "real-api-after") == 0, "generated API regression test failed")
+        require(
+            value["run"]["run"]["state"] == "completed", "real API run did not complete"
+        )
+        require(
+            value["run"]["evaluations"][0]["outcome"] == "passed",
+            "independent evaluation did not pass",
+        )
+        require(
+            len(value["run"]["results"]) == 2,
+            "worker and evaluator results were not retained",
+        )
+        require(
+            provider.call_count == 3,
+            f"expected three provider calls, observed {provider.call_count}",
+        )
+        require(
+            run_project_test(project, evidence_root, "real-api-after") == 0,
+            "generated API regression test failed",
+        )
         digests = verify_files(project)
-        task_id = value["task"]["id"]
+        require(value["task"]["id"] == task_id, "real API launch changed task identity")
         run_id = value["run"]["run"]["id"]
-        audit = task_audit(cli, args.host, token_file, project, evidence_root, task_id, "real-api-audit")
+        audit = task_audit(
+            cli,
+            args.host,
+            token_file,
+            project,
+            evidence_root,
+            task_id,
+            "real-api-audit",
+        )
         runtime = verify_runtime(project, evidence_root, "real-api-runtime")
         replay = invoke_cli(
             cli,
@@ -623,12 +758,23 @@ def exercise(args: argparse.Namespace) -> None:
             "real-api-replay",
             ["run", "replay", run_id, "--json"],
         )
-        require(replay.returncode == 0, f"real API replay failed: {replay.stderr[:4096]!r}")
+        require(
+            replay.returncode == 0, f"real API replay failed: {replay.stderr[:4096]!r}"
+        )
         replay_value = decode_json(replay, "real-api-replay")
-        require(replay_value["side_effect_free"] is True, "real API replay was not side effect free")
-        require(all(item["passed"] for item in replay_value["invariants"]), "real API replay invariant failed")
+        require(
+            replay_value["side_effect_free"] is True,
+            "real API replay was not side effect free",
+        )
+        require(
+            all(item["passed"] for item in replay_value["invariants"]),
+            "real API replay invariant failed",
+        )
         require(provider.call_count == 3, "real API replay contacted the provider")
-        require(token.encode() not in result.stdout and token.encode() not in result.stderr, "CLI exposed its token")
+        require(
+            token.encode() not in result.stdout and token.encode() not in result.stderr,
+            "CLI exposed its token",
+        )
         state_path.write_text(
             json.dumps(
                 {
@@ -683,9 +829,17 @@ def verify(args: argparse.Namespace) -> None:
     evidence_root = output_path.parent
     state = json.loads(state_path.read_text(encoding="utf-8"))
     require(state["schema_version"] == SCHEMA_VERSION, "real API state schema changed")
-    require(state["project_path_sha256"] == sha256(str(project).encode()), "real API project path changed")
-    require(verify_files(project) == state["files"], "real API files changed across restart")
-    require(run_project_test(project, evidence_root, "real-api-restart-test") == 0, "real API restart regression failed")
+    require(
+        state["project_path_sha256"] == sha256(str(project).encode()),
+        "real API project path changed",
+    )
+    require(
+        verify_files(project) == state["files"], "real API files changed across restart"
+    )
+    require(
+        run_project_test(project, evidence_root, "real-api-restart-test") == 0,
+        "real API restart regression failed",
+    )
     task = invoke_cli(
         cli,
         args.host,
@@ -696,10 +850,19 @@ def verify(args: argparse.Namespace) -> None:
         ["task", "get", state["task_id"], "--json"],
     )
     require(
-        task.returncode == 0 and decode_json(task, "real-api-restart-task")["state"] == "completed",
+        task.returncode == 0
+        and decode_json(task, "real-api-restart-task")["state"] == "completed",
         "real API task did not survive restart",
     )
-    audit = task_audit(cli, args.host, token_file, project, evidence_root, state["task_id"], "real-api-restart-audit")
+    audit = task_audit(
+        cli,
+        args.host,
+        token_file,
+        project,
+        evidence_root,
+        state["task_id"],
+        "real-api-restart-audit",
+    )
     require(len(audit) == state["audit_count"], "real API audit changed across restart")
     replay = invoke_cli(
         cli,
@@ -710,14 +873,29 @@ def verify(args: argparse.Namespace) -> None:
         "real-api-restart-replay",
         ["run", "replay", state["run_id"], "--json"],
     )
-    require(replay.returncode == 0, f"real API restart replay failed: {replay.stderr[:4096]!r}")
+    require(
+        replay.returncode == 0,
+        f"real API restart replay failed: {replay.stderr[:4096]!r}",
+    )
     replay_value = decode_json(replay, "real-api-restart-replay")
-    require(replay_value["side_effect_free"] is True, "real API restart replay was not side effect free")
-    require(all(item["passed"] for item in replay_value["invariants"]), "real API restart replay invariant failed")
+    require(
+        replay_value["side_effect_free"] is True,
+        "real API restart replay was not side effect free",
+    )
+    require(
+        all(item["passed"] for item in replay_value["invariants"]),
+        "real API restart replay invariant failed",
+    )
     runtime = verify_runtime(project, evidence_root, "real-api-restart-runtime")
-    require(runtime["transcript_sha256"] == state["runtime_transcript_sha256"], "runtime behavior changed across restart")
+    require(
+        runtime["transcript_sha256"] == state["runtime_transcript_sha256"],
+        "runtime behavior changed across restart",
+    )
     token = token_file.read_text(encoding="utf-8").strip().encode()
-    require(token not in task.stdout and token not in task.stderr, "restart output exposed its token")
+    require(
+        token not in task.stdout and token not in task.stderr,
+        "restart output exposed its token",
+    )
     output_path.write_text(
         json.dumps(
             {

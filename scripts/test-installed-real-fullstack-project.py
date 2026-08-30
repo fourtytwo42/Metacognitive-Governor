@@ -696,6 +696,43 @@ def exercise(args: argparse.Namespace) -> None:
             mutation["catalog"]["models"][0]["id"] == MODEL,
             "fixture model was not discovered",
         )
+        project_result = invoke_cli(
+            cli,
+            args.host,
+            token_file,
+            project,
+            evidence,
+            "real-fullstack-register",
+            ["project", "add", str(project), "--json"],
+        )
+        require(
+            project_result.returncode == 0,
+            f"HomeBase registration failed: {project_result.stderr[:4096]!r}",
+        )
+        project_id = decode_json(project_result, "real-fullstack-register")["project"][
+            "project_id"
+        ]
+        task_result = invoke_cli(
+            cli,
+            args.host,
+            token_file,
+            project,
+            evidence,
+            "real-fullstack-task",
+            [
+                "task",
+                "create",
+                "Build and verify the HomeBase inventory application",
+                "--project-id",
+                project_id,
+                "--json",
+            ],
+        )
+        require(
+            task_result.returncode == 0,
+            f"HomeBase task creation failed: {task_result.stderr[:4096]!r}",
+        )
+        task_id = decode_json(task_result, "real-fullstack-task")["task"]["id"]
         result = invoke_cli(
             cli,
             args.host,
@@ -703,17 +740,7 @@ def exercise(args: argparse.Namespace) -> None:
             project,
             evidence,
             "real-fullstack-run",
-            [
-                "run",
-                "--json",
-                "Build",
-                "and",
-                "verify",
-                "the",
-                "HomeBase",
-                "inventory",
-                "application",
-            ],
+            ["task", "launch", task_id, "--json"],
         )
         require(
             result.returncode == 0, f"HomeBase project failed: {result.stderr[:4096]!r}"
@@ -738,7 +765,7 @@ def exercise(args: argparse.Namespace) -> None:
             "generated HomeBase regression failed",
         )
         digests = verify_files(project)
-        task_id = value["task"]["id"]
+        require(value["task"]["id"] == task_id, "HomeBase launch changed task identity")
         run_id = value["run"]["run"]["id"]
         audit = task_audit(
             cli,

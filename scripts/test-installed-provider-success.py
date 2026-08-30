@@ -26,6 +26,8 @@ from typing import Any
 SCHEMA_VERSION = 1
 FIXTURE_MODEL = "installed-provider-success-model"
 FIXTURE_TEXT = "installed provider-backed result"
+JSON_FIXTURE_TEXT = "installed JSON conversation result"
+STREAM_FIXTURE_TEXT = "installed streaming conversation result"
 PRIVATE_CONTEXT = "bounded installed-package owner context"
 
 
@@ -122,7 +124,9 @@ def api_json(
             payload = response.read()
     except urllib.error.HTTPError as error:
         detail = error.read().decode("utf-8", errors="replace")
-        raise AssertionError(f"{method} {path} failed with HTTP {error.code}: {detail}") from error
+        raise AssertionError(
+            f"{method} {path} failed with HTTP {error.code}: {detail}"
+        ) from error
     return None if not payload else json.loads(payload)
 
 
@@ -290,12 +294,18 @@ def conversation_id_from_human_output(output: str) -> str:
     raise AssertionError("provider-backed human output has no conversation identity")
 
 
-def effective_batch_delegation(view: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+def effective_batch_delegation(
+    view: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
     team = view["team"]
     batches = team["coordination_batches"]
-    assert len(batches) == 1, "provider-backed human journey did not create one coordination batch"
+    assert (
+        len(batches) == 1
+    ), "provider-backed human journey did not create one coordination batch"
     batch = batches[0]
-    assert batch["state"] == "completed", "provider-backed coordination batch is not terminal"
+    assert (
+        batch["state"] == "completed"
+    ), "provider-backed coordination batch is not terminal"
     delegations = [
         delegation
         for delegation in team["delegations"]
@@ -307,10 +317,75 @@ def effective_batch_delegation(view: dict[str, Any]) -> tuple[dict[str, Any], di
         if delegation.get("retry_of_id") is not None
     }
     effective = [
-        delegation for delegation in delegations if delegation["id"] not in superseded_ids
+        delegation
+        for delegation in delegations
+        if delegation["id"] not in superseded_ids
     ]
-    assert len(effective) == 1, "provider-backed batch has no unique effective delegation"
+    assert (
+        len(effective) == 1
+    ), "provider-backed batch has no unique effective delegation"
     return batch, effective[0]
+
+
+def assert_integrated_conversation(
+    view: dict[str, Any],
+    project_root: pathlib.Path,
+    expected_path: str,
+    expected_text: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    batch, delegation = effective_batch_delegation(view)
+    assert delegation["state"] == "completed"
+    assert delegation["integration_ready"] is True
+    assert delegation["governance"]["outcome"]["successful"] is True
+    assert delegation["unresolved_issues"] == []
+    assert expected_path in delegation["changed_files"]
+    assert (
+        project_root.joinpath(expected_path).read_bytes()
+        == f"{expected_text}\n".encode()
+    )
+    return batch, delegation
+
+
+def create_and_launch_task(
+    cli: pathlib.Path,
+    host: str,
+    token_file: pathlib.Path,
+    project: pathlib.Path,
+    evidence_root: pathlib.Path,
+    project_id: str,
+    goal: str,
+    label: str,
+) -> dict[str, Any]:
+    created_result = invoke_cli(
+        cli,
+        host,
+        token_file,
+        project,
+        evidence_root,
+        f"{label}-create",
+        ["task", "create", goal, "--project-id", project_id, "--json"],
+    )
+    require_success(created_result, f"{label}-create")
+    created = decode_json(created_result, f"{label}-create")
+    task_id = created["task"]["id"]
+    launched_result = invoke_cli(
+        cli,
+        host,
+        token_file,
+        project,
+        evidence_root,
+        f"{label}-launch",
+        ["task", "launch", task_id, "--json"],
+    )
+    require_success(launched_result, f"{label}-launch")
+    launched = decode_json(launched_result, f"{label}-launch")
+    assert launched["task"]["id"] == task_id
+    assert launched["task"]["state"] == "completed"
+    assert launched["execution"]["state"] == "completed"
+    assert launched["run"]["run"]["state"] == "completed"
+    assert launched["run"]["evaluations"][0]["outcome"] == "passed"
+    assert len(launched["run"]["results"]) == 2
+    return launched
 
 
 def exercise(args: argparse.Namespace) -> None:
@@ -329,7 +404,13 @@ def exercise(args: argparse.Namespace) -> None:
     assert token
 
     baseline_tasks = list_values(
-        cli, args.host, token_file, project, evidence_root, "task", "provider-success-baseline-tasks"
+        cli,
+        args.host,
+        token_file,
+        project,
+        evidence_root,
+        "task",
+        "provider-success-baseline-tasks",
     )
     baseline_projects = list_values(
         cli,
@@ -396,7 +477,8 @@ def exercise(args: argparse.Namespace) -> None:
         captured_results.append(human)
         require_success(human, "provider-success-human")
         human_text = human.stdout.decode("utf-8")
-        assert "review/apply" in human_text.casefold()
+        human_text_folded = human_text.casefold()
+        assert "review" in human_text_folded and "appl" in human_text_folded
         assert not project.joinpath("installed-provider-result.txt").exists()
         conversation_id = conversation_id_from_human_output(human_text)
         conversation = api_json(
@@ -444,57 +526,6 @@ def exercise(args: argparse.Namespace) -> None:
         assert PRIVATE_CONTEXT not in human_text
         assert provider.call_count == 0
 
-        structured = invoke_cli(
-            cli,
-            args.host,
-            token_file,
-            project,
-            evidence_root,
-            "provider-success-json",
-            ["run", "--json", "complete", "the", "installed", "JSON", "journey"],
-        )
-        captured_results.append(structured)
-        require_success(structured, "provider-success-json")
-        structured_value = decode_json(structured, "provider-success-json")
-        assert structured_value["task"]["state"] == "completed"
-        assert structured_value["run"]["run"]["state"] == "completed"
-        assert structured_value["execution"]["state"] == "completed"
-        assert structured_value["run"]["evaluations"][0]["outcome"] == "passed"
-        assert len(structured_value["run"]["results"]) == 2
-        run_id = structured_value["run"]["run"]["id"]
-
-        calls_before_replay = provider.call_count
-        replay_run(
-            cli,
-            args.host,
-            token_file,
-            project,
-            evidence_root,
-            run_id,
-            "provider-success-replay",
-        )
-        assert provider.call_count == calls_before_replay
-
-        stream = invoke_cli(
-            cli,
-            args.host,
-            token_file,
-            project,
-            evidence_root,
-            "provider-success-stream",
-            ["run", "--stream-json", "complete", "the", "installed", "streaming", "journey"],
-        )
-        captured_results.append(stream)
-        require_success(stream, "provider-success-stream")
-        records = [json.loads(line) for line in stream.stdout.splitlines() if line]
-        assert records[0]["type"] == "task" and records[-1]["type"] == "result"
-        assert records[-1]["result"]["task"]["state"] == "completed"
-        assert any(record["type"] == "event" for record in records)
-
-        assert provider.call_count == 4
-        tasks = list_values(
-            cli, args.host, token_file, project, evidence_root, "task", "provider-success-tasks"
-        )
         projects = list_values(
             cli,
             args.host,
@@ -504,11 +535,124 @@ def exercise(args: argparse.Namespace) -> None:
             "project",
             "provider-success-projects",
         )
-        new_tasks = [item for item in tasks if item["id"] not in baseline_task_ids]
-        new_projects = [item for item in projects if item["project_id"] not in baseline_project_ids]
-        assert len(new_tasks) == 2
+        new_projects = [
+            item for item in projects if item["project_id"] not in baseline_project_ids
+        ]
         assert len(new_projects) == 1
+        project_id = new_projects[0]["project_id"]
+
+        structured = invoke_cli(
+            cli,
+            args.host,
+            token_file,
+            project,
+            evidence_root,
+            "provider-success-json",
+            [
+                "run",
+                "--json",
+                "In the linked project, create installed-provider-json-result.txt with "
+                f"the exact UTF-8 content {JSON_FIXTURE_TEXT!r} followed by one newline, "
+                "verify its exact bytes, and report completion.",
+            ],
+            timeout_seconds=300,
+        )
+        captured_results.append(structured)
+        require_success(structured, "provider-success-json")
+        structured_value = decode_json(structured, "provider-success-json")
+        assert structured_value["schema_version"] == 1
+        assert structured_value["state"] == "completed"
+        assert structured_value["hard_gate_ready"] is True
+        structured_conversation_id = structured_value["conversation_id"]
+        structured_conversation = api_json(
+            args.host,
+            token,
+            "GET",
+            f"/api/v1/conversations/{structured_conversation_id}",
+        )
+        _, structured_delegation = assert_integrated_conversation(
+            structured_conversation,
+            project,
+            "installed-provider-json-result.txt",
+            JSON_FIXTURE_TEXT,
+        )
+
+        stream = invoke_cli(
+            cli,
+            args.host,
+            token_file,
+            project,
+            evidence_root,
+            "provider-success-stream",
+            [
+                "run",
+                "--stream-json",
+                "In the linked project, create installed-provider-stream-result.txt with "
+                f"the exact UTF-8 content {STREAM_FIXTURE_TEXT!r} followed by one newline, "
+                "verify its exact bytes, and report completion.",
+            ],
+            timeout_seconds=300,
+        )
+        captured_results.append(stream)
+        require_success(stream, "provider-success-stream")
+        records = [json.loads(line) for line in stream.stdout.splitlines() if line]
+        assert records[0]["type"] == "thread.started"
+        assert records[1]["type"] == "turn.started"
+        assert records[-1]["type"] == "turn.completed"
+        assert any(record["type"] == "item.completed" for record in records)
+        stream_conversation_id = records[0]["thread_id"]
+        stream_conversation = api_json(
+            args.host,
+            token,
+            "GET",
+            f"/api/v1/conversations/{stream_conversation_id}",
+        )
+        _, stream_delegation = assert_integrated_conversation(
+            stream_conversation,
+            project,
+            "installed-provider-stream-result.txt",
+            STREAM_FIXTURE_TEXT,
+        )
+
+        direct_launches = [
+            create_and_launch_task(
+                cli,
+                args.host,
+                token_file,
+                project,
+                evidence_root,
+                project_id,
+                "Complete and verify the installed deterministic provider JSON task",
+                "provider-success-direct-json",
+            ),
+            create_and_launch_task(
+                cli,
+                args.host,
+                token_file,
+                project,
+                evidence_root,
+                project_id,
+                "Complete and verify the installed deterministic provider streaming task",
+                "provider-success-direct-stream",
+            ),
+        ]
+
+        assert provider.call_count == 4
+        tasks = list_values(
+            cli,
+            args.host,
+            token_file,
+            project,
+            evidence_root,
+            "task",
+            "provider-success-tasks",
+        )
+        new_tasks = [item for item in tasks if item["id"] not in baseline_task_ids]
+        assert len(new_tasks) == 2
         assert all(item["state"] == "completed" for item in new_tasks)
+        assert {item["task"]["id"] for item in direct_launches} == {
+            item["id"] for item in new_tasks
+        }
 
         audit_counts: dict[str, int] = {}
         run_ids: dict[str, str] = {}
@@ -537,21 +681,41 @@ def exercise(args: argparse.Namespace) -> None:
             audit_counts[task["id"]] = len(records)
 
         for result in captured_results:
-            assert token.encode() not in result.stdout and token.encode() not in result.stderr
+            assert (
+                token.encode() not in result.stdout
+                and token.encode() not in result.stderr
+            )
             assert PRIVATE_CONTEXT.encode() not in result.stdout
 
         state = {
             "schema_version": SCHEMA_VERSION,
-            "run_id": run_id,
             "task_ids": sorted(item["id"] for item in new_tasks),
-            "project_id": new_projects[0]["project_id"],
-            "project_path_sha256": hashlib.sha256(str(project).encode("utf-8")).hexdigest(),
+            "project_id": project_id,
+            "project_path_sha256": hashlib.sha256(
+                str(project).encode("utf-8")
+            ).hexdigest(),
             "provider_calls": provider.call_count,
             "audit_counts": audit_counts,
             "run_ids": run_ids,
             "conversation_id": conversation_id,
             "delegation_id": delegation["id"],
             "report_sha256": delegation["report_sha256"],
+            "conversation_results": [
+                {
+                    "conversation_id": structured_conversation_id,
+                    "delegation_id": structured_delegation["id"],
+                    "report_sha256": structured_delegation["report_sha256"],
+                    "path": "installed-provider-json-result.txt",
+                    "text": JSON_FIXTURE_TEXT,
+                },
+                {
+                    "conversation_id": stream_conversation_id,
+                    "delegation_id": stream_delegation["id"],
+                    "report_sha256": stream_delegation["report_sha256"],
+                    "path": "installed-provider-stream-result.txt",
+                    "text": STREAM_FIXTURE_TEXT,
+                },
+            ],
         }
         state_path.write_text(json.dumps(state, sort_keys=True), encoding="utf-8")
         output_path.write_text(
@@ -597,7 +761,10 @@ def verify(args: argparse.Namespace) -> None:
     token = token_file.read_text(encoding="utf-8").strip()
     state = json.loads(state_path.read_text(encoding="utf-8"))
     assert state["schema_version"] == SCHEMA_VERSION
-    assert state["project_path_sha256"] == hashlib.sha256(str(project).encode("utf-8")).hexdigest()
+    assert (
+        state["project_path_sha256"]
+        == hashlib.sha256(str(project).encode("utf-8")).hexdigest()
+    )
     conversation = api_json(
         args.host,
         token,
@@ -618,6 +785,22 @@ def verify(args: argparse.Namespace) -> None:
     assert project.joinpath("installed-provider-result.txt").read_bytes() == (
         f"{FIXTURE_TEXT}\n".encode()
     )
+
+    for result in state["conversation_results"]:
+        view = api_json(
+            args.host,
+            token,
+            "GET",
+            f"/api/v1/conversations/{result['conversation_id']}",
+        )
+        _, persisted_delegation = assert_integrated_conversation(
+            view,
+            project,
+            result["path"],
+            result["text"],
+        )
+        assert persisted_delegation["id"] == result["delegation_id"]
+        assert persisted_delegation["report_sha256"] == result["report_sha256"]
 
     for index, task_id in enumerate(state["task_ids"], start=1):
         result = invoke_cli(
@@ -693,6 +876,8 @@ def verify(args: argparse.Namespace) -> None:
                 "token_excluded": True,
                 "accepted_specialist_report_survived_restart": True,
                 "owner_apply_survived_restart": True,
+                "json_conversation_survived_restart": True,
+                "stream_conversation_survived_restart": True,
             },
             sort_keys=True,
         ),

@@ -19,6 +19,19 @@ if ($NodeBinPath) {
     throw "Windows package UAT requires npm on PATH or an explicit -NodeBinPath."
 }
 
+if ([string]::IsNullOrWhiteSpace($env:MCG_CODEX_APP_SERVER_EXECUTABLE)) {
+    throw "Windows package UAT requires MCG_CODEX_APP_SERVER_EXECUTABLE to pin the native Codex 0.150.1 executable."
+}
+$resolvedCodexExecutable = [IO.Path]::GetFullPath($env:MCG_CODEX_APP_SERVER_EXECUTABLE)
+if (-not (Test-Path -LiteralPath $resolvedCodexExecutable -PathType Leaf)) {
+    throw "MCG_CODEX_APP_SERVER_EXECUTABLE does not exist: $resolvedCodexExecutable"
+}
+$codexVersion = & $resolvedCodexExecutable --version 2>&1
+if ($LASTEXITCODE -ne 0 -or ($codexVersion -join "").Trim() -ne "codex-cli 0.150.1") {
+    throw "Windows package UAT requires the native codex-cli 0.150.1 executable."
+}
+$env:MCG_CODEX_APP_SERVER_EXECUTABLE = $resolvedCodexExecutable
+
 function Stop-UatProcess([Diagnostics.Process]$Process) {
     if ($null -ne $Process) {
         $Process.Refresh()
@@ -139,31 +152,64 @@ function Test-ConsumerCli(
 
     $bare = Invoke-ConsumerCliProcess $Executable ($base + @("review", "this", "diff")) ("diff --git a/file.txt b/file.txt`n+private fixture content`n") $EvidenceRoot "consumer-bare"
     $results.Add($bare)
-    if ($bare.ExitCode -eq 0 -or $bare.Stdout -notmatch "Status: blocked" -or $bare.Stderr -notmatch "requires attention" -or $bare.Stdout -match "private fixture content") {
-        throw "Installed consumer CLI bare/piped-context contract failed."
+    if ($bare.ExitCode -eq 0 -or $bare.Stderr -notmatch "not inside a Git repository" `
+        -or $bare.Stdout -match "private fixture content" -or $bare.Stderr -match "private fixture content") {
+        throw "Installed consumer CLI non-Git safety contract failed."
     }
 
-    $structured = Invoke-ConsumerCliProcess $Executable ($base + @("run", "--json", "fix", "the", "tests")) $null $EvidenceRoot "consumer-json"
-    $results.Add($structured)
-    $structuredValue = $structured.Stdout | ConvertFrom-Json
-    if ($structured.ExitCode -eq 0 -or $structuredValue.task.goal -ne "fix the tests" -or $structuredValue.task.state -ne "blocked") {
-        throw "Installed consumer CLI JSON contract failed."
+    $registered = Invoke-ConsumerCliProcess $Executable ($base + @("project", "add", $Project, "--initialize-git", "--json")) $null $EvidenceRoot "consumer-project-add"
+    $results.Add($registered)
+    if ($registered.ExitCode -ne 0) {
+        throw "Installed consumer CLI could not explicitly initialize and register its project."
+    }
+    $registeredValue = $registered.Stdout | ConvertFrom-Json
+    $projectId = [string]$registeredValue.project.project_id
+    if ([string]::IsNullOrWhiteSpace($projectId) -or -not (Test-Path -LiteralPath (Join-Path $Project ".git") -PathType Container)) {
+        throw "Installed consumer CLI project initialization returned invalid state."
     }
 
-    $stream = Invoke-ConsumerCliProcess $Executable ($base + @("run", "--stream-json", "inspect", "the", "project")) $null $EvidenceRoot "consumer-stream"
-    $results.Add($stream)
-    $streamValues = @($stream.Stdout -split "`r?`n" | Where-Object { $_ } | ForEach-Object { $_ | ConvertFrom-Json })
-    if ($stream.ExitCode -eq 0 -or $streamValues[0].type -ne "task" -or $streamValues[-1].type -ne "result" -or -not ($streamValues.type -contains "event")) {
-        throw "Installed consumer CLI NDJSON contract failed."
+    $blockedGoals = @(
+        "review this diff",
+        "fix the tests",
+        "inspect the project",
+        "summarize this project"
+    )
+    $taskIds = [Collections.Generic.List[string]]::new()
+    for ($index = 0; $index -lt $blockedGoals.Count; $index++) {
+        $number = $index + 1
+        $created = Invoke-ConsumerCliProcess $Executable ($base + @("task", "create", $blockedGoals[$index], "--project-id", $projectId, "--json")) $null $EvidenceRoot "consumer-task-$number-create"
+        $results.Add($created)
+        if ($created.ExitCode -ne 0) {
+            throw "Installed consumer CLI could not create durable task $number."
+        }
+        $createdValue = $created.Stdout | ConvertFrom-Json
+        if ($createdValue.task.goal -ne $blockedGoals[$index] -or $createdValue.task.project_id -ne $projectId) {
+            throw "Installed consumer CLI durable task $number did not preserve its goal and project."
+        }
+        $taskId = [string]$createdValue.task.id
+        [void]$taskIds.Add($taskId)
+
+        $launched = Invoke-ConsumerCliProcess $Executable ($base + @("task", "launch", $taskId, "--json")) $null $EvidenceRoot "consumer-task-$number-launch"
+        $results.Add($launched)
+        if ($launched.ExitCode -ne 0) {
+            throw "Installed consumer CLI could not launch durable task $number."
+        }
+        $launchedValue = $launched.Stdout | ConvertFrom-Json
+        if ($launchedValue.task.id -ne $taskId -or $launchedValue.task.state -ne "blocked" `
+            -or $launchedValue.execution.state -ne "blocked" `
+            -or $launchedValue.execution.detail -notmatch "no discovered provider models") {
+            throw "Installed consumer CLI no-provider task $number did not block deterministically."
+        }
     }
 
-    $piped = Invoke-ConsumerCliProcess $Executable $base ("summarize this project" + [Environment]::NewLine) $EvidenceRoot "consumer-piped"
-    $results.Add($piped)
-    if ($piped.ExitCode -eq 0 -or $piped.Stdout -notmatch "Status: blocked") {
-        throw "Installed consumer CLI piped-goal contract failed."
+    $events = Invoke-ConsumerCliProcess $Executable ($base + @("task", "events", $taskIds[0])) $null $EvidenceRoot "consumer-task-events"
+    $results.Add($events)
+    $eventValues = @(($events.Stdout | ConvertFrom-Json).events)
+    if ($events.ExitCode -ne 0 -or $eventValues.Count -lt 2) {
+        throw "Installed consumer CLI durable task event-history contract failed."
     }
 
-    $oversized = Invoke-ConsumerCliProcess $Executable ($base + @("review", "oversized", "input")) ("x" * 1048577) $EvidenceRoot "consumer-oversized"
+    $oversized = Invoke-ConsumerCliProcess $Executable $base ("x" * 1048577) $EvidenceRoot "consumer-oversized"
     $results.Add($oversized)
     if ($oversized.ExitCode -eq 0 -or $oversized.Stderr -notmatch "1048576-byte limit") {
         throw "Installed consumer CLI input limit failed."
@@ -190,10 +236,11 @@ function Test-ConsumerCli(
 
     $report = [ordered]@{
         schema_version = 1
-        bare_blocked = $true
-        json_blocked = $true
-        stream_ndjson = $true
-        piped_context_private = $true
+        non_git_refused = $true
+        explicit_git_initialization = $true
+        durable_tasks_blocked_without_provider = $true
+        durable_task_events = $true
+        current_human_json_stream_contracts = "provider-success.json"
         oversized_rejected = $true
         task_count = $taskValues.Count
         project_count = $projectValues.Count
