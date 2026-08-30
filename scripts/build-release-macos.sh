@@ -60,8 +60,12 @@ if [[ "$dmg_directory" != "$repository_root/target/release/bundle/dmg" || "$dmg_
 fi
 rm -rf -- "$dmg_directory"
 mkdir -p "$dmg_directory"
-dmg="$dmg_directory/MCG_${version}_${bundle_arch}.dmg"
+source_app="$repository_root/target/release/bundle/macos/MetaCog.app"
+if [[ ! -d "$source_app" && -d "$repository_root/target/release/bundle/macos/MCG.app" ]]; then
+  source_app="$repository_root/target/release/bundle/macos/MCG.app"
+fi
+dmg="$dmg_directory/MetaCog_${version}_${bundle_arch}.dmg"
 "$repository_root/scripts/create-macos-dmg.sh" \
-  "$repository_root/target/release/bundle/macos/MCG.app" \
+  "$source_app" \
   "$dmg"
 node scripts/write-release-manifest.mjs target/release/bundle/dmg

@@ -9,7 +9,10 @@ fi
 repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 native_accessibility_verifier="$repository_root/scripts/test-installed-native-accessibility-macos.swift"
 window_capture_verifier="$repository_root/scripts/capture-installed-macos-window.swift"
-source_app="${1:-$repository_root/target/release/bundle/macos/MCG.app}"
+source_app="${1:-$repository_root/target/release/bundle/macos/MetaCog.app}"
+if [[ ! -d "$source_app" && "$source_app" == */MetaCog.app && -d "${source_app%/MetaCog.app}/MCG.app" ]]; then
+  source_app="${source_app%/MetaCog.app}/MCG.app"
+fi
 external_capture_request="${MCG_MACOS_UAT_EXTERNAL_CAPTURE_REQUEST:-}"
 external_capture_timeout_seconds="${MCG_MACOS_UAT_EXTERNAL_CAPTURE_TIMEOUT_SECONDS:-600}"
 [[ "$external_capture_timeout_seconds" =~ ^[0-9]+$ \
@@ -23,7 +26,7 @@ case "$(uname -m)" in
   arm64|aarch64) bundle_arch=aarch64 ;;
   *) echo "Unsupported macOS architecture: $(uname -m)" >&2; exit 1 ;;
 esac
-dmg="${2:-$repository_root/target/release/bundle/dmg/MCG_0.1.0_${bundle_arch}.dmg}"
+dmg="${2:-$repository_root/target/release/bundle/dmg/MetaCog_0.1.0_${bundle_arch}.dmg}"
 
 [[ -d "$source_app" ]] || { echo "Missing app bundle: $source_app" >&2; exit 1; }
 [[ -f "$dmg" ]] || { echo "Missing disk image: $dmg" >&2; exit 1; }
@@ -40,7 +43,12 @@ install_root="$uat_root/Applications"
 uat_home="$uat_root/home"
 service_data="$uat_root/service-data"
 gui_data="$uat_root/gui-data"
-installed_app="$install_root/MCG.app"
+app_name="$(basename "$source_app")"
+[[ "$app_name" == "MetaCog.app" || "$app_name" == "MCG.app" ]] || {
+  echo "The source app must use the current MetaCog.app or compatibility MCG.app name." >&2
+  exit 1
+}
+installed_app="$install_root/$app_name"
 mkdir -p "$mount_point" "$install_root" "$uat_home" "$service_data" "$gui_data"
 
 mounted=false
@@ -70,7 +78,7 @@ trap cleanup EXIT
 remove_installed_app() {
   local parent
   parent="$(cd "$(dirname "$installed_app")" && pwd -P)"
-  if [[ "$parent" != "$uat_root/Applications" || "$(basename "$installed_app")" != "MCG.app" || "$uat_root" == "/" ]]; then
+  if [[ "$parent" != "$uat_root/Applications" || "$(basename "$installed_app")" != "$app_name" || "$uat_root" == "/" ]]; then
     echo "Refusing to remove an app outside the exact UAT installation root." >&2
     exit 1
   fi
@@ -189,8 +197,12 @@ NODE
 hdiutil verify "$dmg" >"$uat_root/dmg-verify.txt"
 hdiutil attach -readonly -nobrowse -mountpoint "$mount_point" "$dmg" >"$uat_root/dmg-attach.txt"
 mounted=true
-mounted_app="$(find "$mount_point" -maxdepth 2 -type d -name 'MCG.app' -print -quit)"
-[[ -n "$mounted_app" ]] || { echo "Disk image does not contain MCG.app." >&2; exit 1; }
+mounted_app="$(find "$mount_point" -maxdepth 2 -type d \( -name 'MetaCog.app' -o -name 'MCG.app' \) -print -quit)"
+[[ -n "$mounted_app" ]] || { echo "Disk image does not contain MetaCog.app or MCG.app." >&2; exit 1; }
+[[ "$(basename "$mounted_app")" == "$app_name" ]] || {
+  echo "Disk-image app name does not match the source app name." >&2
+  exit 1
+}
 
 source_signature="$(verify_signature "$source_app" source)"
 mounted_signature="$(verify_signature "$mounted_app" mounted)"

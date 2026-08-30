@@ -184,7 +184,7 @@ This matrix is updated as implementation lands. `Implemented / cumulative UAT pe
 | Security/adversarial receipt | Every affected trust/capability boundary | Planned |
 | Desktop deterministic E2E receipt | Every visible workflow change | Planned |
 | Native Simple/Advanced/Developer UAT | Every meaningful interface stage | Windows portable and Linux AppImage Stage 2 slices pass; current-source Windows installer and macOS remain open |
-| Windows/macOS/Linux package receipt | Every process/package identity change and final candidate | Linux clean manifest/scan and AppImage native UAT pass; Debian install/remove plus current-source Windows/macOS remain open |
+| Windows/macOS/Linux package receipt | Every process/package identity change and final candidate | Exact `cea1e07` Linux clean manifest/scan and AppImage native UAT pass; Debian install/remove plus current-source Windows/macOS remain open |
 | Migration + backup/restore receipt | Every schema/ownership change | Planned |
 | Golden payload/hash compatibility receipt | Every codec/schema release | Planned |
 | Experiment artifact set | Every protected experiment | Planned |

@@ -9,6 +9,11 @@ fi
 source_app="${1:-}"
 output_dmg="${2:-}"
 [[ -d "$source_app" && "$source_app" == *.app ]] || { echo "Missing source app bundle: $source_app" >&2; exit 1; }
+app_name="$(basename "$source_app")"
+[[ "$app_name" == "MetaCog.app" || "$app_name" == "MCG.app" ]] || {
+  echo "Source app bundle must use the current MetaCog.app or compatibility MCG.app name." >&2
+  exit 1
+}
 [[ "$output_dmg" == *.dmg ]] || { echo "Output path must end in .dmg." >&2; exit 1; }
 [[ ! -e "$output_dmg" ]] || { echo "Refusing to replace existing disk image: $output_dmg" >&2; exit 1; }
 for command in ditto hdiutil; do
@@ -30,10 +35,10 @@ cleanup() {
 trap cleanup EXIT
 
 mkdir -p "$staging" "$(dirname "$output_dmg")"
-ditto "$source_app" "$staging/MCG.app"
+ditto "$source_app" "$staging/$app_name"
 ln -s /Applications "$staging/Applications"
 hdiutil create -quiet -fs HFS+ -format UDZO -imagekey zlib-level=9 \
-  -volname MCG -srcfolder "$staging" "$output_dmg"
+  -volname MetaCog -srcfolder "$staging" "$output_dmg"
 hdiutil verify "$output_dmg"
 [[ -s "$output_dmg" ]] || { echo "Disk image was not created: $output_dmg" >&2; exit 1; }
 printf 'Created %s\n' "$output_dmg"

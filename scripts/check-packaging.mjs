@@ -275,7 +275,7 @@ for (const [source, label] of [[windowsBuilder, "Windows release builder"], [lin
   requireText(source, "release-security-scan.json", label);
   requireText(source, "Refusing to replace existing release security-scan evidence", label);
 }
-for (const invariant of ["hdiutil create", "hdiutil verify", "staging/MCG.app", "staging/Applications", "Refusing to replace existing disk image", "macOS disk images must be created on macOS"]) {
+for (const invariant of ["hdiutil create", "hdiutil verify", '"$staging/$app_name"', "staging/Applications", "-volname MetaCog", "Refusing to replace existing disk image", "macOS disk images must be created on macOS"]) {
   requireText(macosDmgBuilder, invariant, "macOS disk-image builder");
 }
 requireText(windowsBuilder, "tauri.release.conf.json", "Windows release builder");
