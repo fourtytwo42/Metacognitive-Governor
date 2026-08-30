@@ -1,6 +1,8 @@
 #[cfg(feature = "executor")]
 use std::io::{Read as _, Write as _};
-use std::path::{Component, Path, PathBuf};
+#[cfg(feature = "executor")]
+use std::path::Component;
+use std::path::{Path, PathBuf};
 use std::{process::Stdio, time::Duration};
 
 use base64::Engine as _;
@@ -28,6 +30,7 @@ use tokio::{
     process::Command,
     time::Instant,
 };
+use unicode_normalization::UnicodeNormalization as _;
 use uuid::Uuid;
 
 pub const ACTION_RUNNER_PROTOCOL_VERSION: u32 = 1;
@@ -691,12 +694,47 @@ fn validate_operation_plan(
 }
 
 fn normalized_relative_path(value: &str) -> bool {
-    let path = Path::new(value);
-    !value.trim().is_empty()
-        && !path.is_absolute()
-        && path
-            .components()
-            .all(|component| matches!(component, Component::Normal(_)))
+    const MAX_PATH_BYTES: usize = 4_096;
+    const MAX_COMPONENT_BYTES: usize = 255;
+
+    if value.is_empty()
+        || value.len() > MAX_PATH_BYTES
+        || value.starts_with('/')
+        || value.ends_with('/')
+        || value.contains('\\')
+        || value.nfc().ne(value.chars())
+    {
+        return false;
+    }
+    value.split('/').all(|component| {
+        !component.is_empty()
+            && component != "."
+            && component != ".."
+            && component.len() <= MAX_COMPONENT_BYTES
+            && !component.ends_with(['.', ' '])
+            && !component.chars().any(|character| {
+                character.is_ascii_control()
+                    || matches!(character, '<' | '>' | ':' | '"' | '|' | '?' | '*')
+            })
+            && !windows_reserved_component(component)
+    })
+}
+
+fn windows_reserved_component(component: &str) -> bool {
+    let stem = component.split('.').next().unwrap_or(component);
+    let upper = stem.to_ascii_uppercase();
+    matches!(
+        upper.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+    ) || upper
+        .strip_prefix("COM")
+        .or_else(|| upper.strip_prefix("LPT"))
+        .is_some_and(|suffix| {
+            matches!(
+                suffix,
+                "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"
+            )
+        })
 }
 
 fn valid_sha256(value: &str) -> bool {
@@ -1140,7 +1178,7 @@ impl CapabilityRoot {
 
     fn relative(&self, value: &str) -> Result<PathBuf, RunnerFailure> {
         let path = Path::new(value);
-        if value.trim().is_empty()
+        if !normalized_relative_path(value)
             || path.is_absolute()
             || path
                 .components()
@@ -1697,7 +1735,16 @@ mod tests {
     #[test]
     fn traversal_absolute_paths_hash_substitution_and_changed_compensation_are_denied() {
         let root = tempfile::tempdir().unwrap();
-        for relative_path in ["../escape.txt", ".", "nested/../escape.txt"] {
+        for relative_path in [
+            "../escape.txt",
+            ".",
+            "nested/../escape.txt",
+            "nested\\escape.txt",
+            "C:drive-relative.txt",
+            "file.txt:stream",
+            "CON.txt",
+            "COM¹.log",
+        ] {
             let response = run(&request(
                 root.path(),
                 GovernedFilesystemOperation::InspectFile {
@@ -1705,7 +1752,11 @@ mod tests {
                     max_bytes: 100,
                 },
             ));
-            assert_eq!(response.outcome, RunnerEffectOutcome::Denied);
+            assert_eq!(
+                response.outcome,
+                RunnerEffectOutcome::Denied,
+                "semantic path must be denied: {relative_path:?}"
+            );
         }
         let mut substituted = request(
             root.path(),
@@ -1747,6 +1798,49 @@ mod tests {
             std::fs::read_to_string(root.path().join("changed.txt")).unwrap(),
             "new owner content"
         );
+    }
+
+    #[test]
+    fn semantic_paths_are_portable_bounded_and_unicode_canonical() {
+        for valid in ["result.txt", "nested/result.txt", "café/receipt.json"] {
+            assert!(normalized_relative_path(valid), "valid path {valid:?}");
+        }
+        for invalid in [
+            "",
+            ".",
+            "..",
+            "/absolute.txt",
+            "nested/",
+            "nested//file.txt",
+            "nested\\file.txt",
+            "C:drive-relative.txt",
+            "file.txt:stream",
+            "question?.txt",
+            "control\u{001f}.txt",
+            "trailing.",
+            "trailing ",
+            "CON",
+            "con.txt",
+            "NUL.json",
+            "COM1.log",
+            "COM¹.log",
+            "LPT9",
+            "cafe\u{301}.txt",
+        ] {
+            assert!(
+                !normalized_relative_path(invalid),
+                "invalid path {invalid:?}"
+            );
+        }
+        assert!(!normalized_relative_path(&format!(
+            "{}.txt",
+            "a".repeat(256)
+        )));
+        assert!(!normalized_relative_path(&format!(
+            "{}/{}",
+            "a".repeat(255),
+            "b".repeat(4_000)
+        )));
     }
 
     #[test]
