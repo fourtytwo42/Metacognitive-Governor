@@ -39,6 +39,12 @@ ambiguity. Startup recovery converts stranded effectful `Executing`/`Observed` w
 reconciliation without redispatch and safely settles stranded observational work as
 no-effect.
 
+Authenticated Root IPC now provides bounded action list/show queries. List responses use
+content-minimized summaries; show returns the immutable envelope, bounded executions,
+receipts and reconciliation jobs, plus the newest bounded event window in canonical order.
+`mcg action list` presents safe state metadata, while human `mcg action show` omits raw
+authority payloads and the explicit `--json` path exposes the full Developer contract.
+
 ## Authority boundary
 
 The runner is an effect executor, not an authorization service. Its request identifiers
@@ -55,10 +61,12 @@ OS sandboxing, process-tree confinement, or the action ledger.
 ## Verification completed
 
 - Runner unit and separate-process tests: 9 passed.
-- Storage action/recovery suite within 101 passing storage tests.
-- Protected Root tests: 9 passed, including confirmed/lost/pre-launch classification,
+- Storage action/recovery suite within 102 passing storage tests.
+- Protected Root tests: 10 passed, including confirmed/lost/pre-launch classification,
   occurred/not-occurred/ambiguous reconciliation, real-store reopen, and stranded dispatch
-  restart recovery.
+  restart recovery, plus authenticated bounded action list/show IPC.
+- CLI tests: 67 unit and 10 integration passed, including bounded `action list/show` parsing.
+- Contracts and platform strict all-target Clippy: passed.
 - Runtime tests: 108 passed with two explicit native Windows Sandbox package gates ignored.
 - Protected Root migration-process test: passed.
 - Strict runner all-target Clippy: passed with `-D warnings`.
@@ -83,8 +91,9 @@ Stage 4 is not complete until all of the following pass:
 
 1. Lost response, crash-before-effect, crash-after-effect, timeout, late response, and
    killed-process cases pass real process injection without blind redispatch.
-2. Root API/IPC, CLI, and Simple/Advanced/Developer projections expose safe action status,
-   source navigation, evidence, reconciliation, and compensation.
+2. Root HTTP/API and Simple/Advanced/Developer Desktop projections expose safe action
+   status, source navigation, evidence, reconciliation, and compensation. Authenticated
+   local IPC and CLI list/show are implemented.
 3. Semantic path policy, resource budgets, process-tree confinement, and platform sandbox
    capability reporting pass adversarial Windows, Linux, and macOS tests.
 4. Fresh Windows installer/portable, Linux Debian/AppImage, and macOS app/DMG builds pass

@@ -4,7 +4,7 @@
 
 **Branch:** `codex/v34-updater-version-binding`
 
-**Implementation checkpoint:** `abce753` (`Reconcile governed filesystem effects through Root`)
+**Implementation checkpoint:** `28de9fb` (`Expose canonical actions through Root IPC and CLI`)
 
 **Audit boundary:** schema-55 validation/commit/compensation, the governed-filesystem runner and cross-platform package contracts, and the Root client/dispatch/reconciliation/restart-recovery checkpoint. The concurrent untracked `STAGE_3_DURABLE_WORKFLOW.md` is excluded from this audit's changes and commits.
 
@@ -12,7 +12,7 @@
 
 ## Executive assessment
 
-The new PRD is **not production-complete**. MetaCog has completed the architectural foundation, stable contracts, Protected Root implementation, and a substantial canonical durable-workflow slice. The governed-action ledger, governed-filesystem runner, bounded Root client, durable dispatch/outcome classification, exact-evidence reconciliation worker, startup recovery, and cross-platform sidecar/package contracts are implemented and focused-test green. They are not yet exposed through product inspection, broadly crash/adversarial tested, rebuilt into current release packages, or native cross-platform qualified. The separate runtime-worker, Root-permitted provider/tool pipeline, Protected Evaluator, persistent cognition, bounded improvement, culture, and longitudinal research layers remain to be built.
+The new PRD is **not production-complete**. MetaCog has completed the architectural foundation, stable contracts, Protected Root implementation, and a substantial canonical durable-workflow slice. The governed-action ledger, governed-filesystem runner, bounded Root client, durable dispatch/outcome classification, exact-evidence reconciliation worker, startup recovery, authenticated bounded action IPC, CLI inspection, and cross-platform sidecar/package contracts are implemented and focused-test green. Desktop action inspection, broad crash/adversarial tests, current release packages, and native cross-platform qualification remain open. The separate runtime-worker, Root-permitted provider/tool pipeline, Protected Evaluator, persistent cognition, bounded improvement, culture, and longitudinal research layers remain to be built.
 
 The current state is best summarized as:
 
@@ -20,7 +20,7 @@ The current state is best summarized as:
 - **Stage 1:** implementation complete; cumulative packaged compatibility/UAT remains.
 - **Stage 2:** implementation complete; two owner-bound native package lanes and the final cumulative release gate remain.
 - **Stage 3:** canonical kernel, Root IPC/CLI, Desktop projection, and objectively provable dependency/backoff recovery are pushed. The complete recovery/event/process/package gate remains open.
-- **Stage 4:** the schema-55 ledger, post-effect validation/commit, causal compensation, elevated irreversible authority, filesystem runner, bounded Root client, exact authority-derived dispatch, exact-evidence reconciliation, stranded-action startup recovery, and Windows/Linux/macOS package contracts are implemented and focused-test green. Product inspection, full real-process crash/adversarial coverage, fresh package builds, and native release qualification remain open.
+- **Stage 4:** the schema-55 ledger, post-effect validation/commit, causal compensation, elevated irreversible authority, filesystem runner, bounded Root client, exact dispatch/reconciliation/recovery, bounded authenticated action list/show IPC, CLI inspection, and package contracts are implemented and focused-test green. Desktop projection, full real-process crash/adversarial coverage, fresh packages, and native qualification remain open.
 - **Stages 5–13:** not implemented as the new canonical cognitive-runtime architecture. Existing MetaCog capabilities provide useful compatibility foundations, but they do not satisfy these stages' new authority, persistence, reconstruction, evaluation, or experimental requirements.
 
 The traceability ledger is useful as a requirements inventory but is not a completion percentage. This report classifies evidence directly from current source, pushed history, and freshly run tests.
@@ -33,7 +33,7 @@ The traceability ledger is useful as a requirements inventory but is not a compl
 | 1 — Stable contracts and canonical encoding | **Implementation complete** | `mcg-contracts`; stable IDs/discriminators; canonical CBOR/normalization; domain-separated hashes; golden fixtures; upcasters; shared error/redaction contracts; dependency boundary; Simple/Advanced/Developer setting and legacy migration. | Final cross-version/package replay and final packaged migration/UAT on all supported platforms. |
 | 2 — Protected Root and authoritative storage | **Code complete; release gate open** | Real `mcg-protected-rootd`; exclusive authoritative-store ownership; migration backup/restore; Root identity; bounded authenticated local IPC; Windows named pipes; Unix sockets; capability/session/replay/version checks; Root-owned compatibility adapter; `mcg runtime status/inspect`; GUI Root inspection. | Exact Debian install/repair/restart/native/uninstall UAT with owner-entered sudo; macOS owner-authenticated provider/restart/native UAT; final cumulative workspace, Desktop, package, migration, and release-smoke rerun. Trusted production signing/notarization remains external. |
 | 3 — Durable workflows, leases, and recovery | **Substantially implemented; release gate open** | Schema 53; immutable TaskContract versions/heads/dependencies; head revision CAS; WorkflowAttempts and ordered events; legal transitions; terminal monotonicity; generation-fenced claim/heartbeat/cancel/retry; dependency gating; exact idempotent replay; Root startup recovery for expired Running/Verifying work and objectively satisfied dependency/retry-backoff waits; authenticated Root workflow list/show/cancel IPC; `mcg workflow list/show/cancel`; deterministic Simple/Advanced/Developer Desktop projection and E2E. The current worktree additionally fences action executions during cancellation and settles effect-free cancellations on restart. | Machine-readable event streaming; compatibility projection/reattachment for existing conversations/tasks/runs; child propagation; external/approval/protected-component wake triggers; reconciliation completion before cancellation settlement; kill/restart matrix for every nonterminal state; delayed-worker/forced-kill tests; three-platform packaged UAT. |
-| 4 — Governed actions and reconciliation | **Root lifecycle implemented; product/release gate open** | Schema 55 immutable ledger and generation-fenced execution/reconciliation; exact binding; explicit outcomes; validation-bound commit; causal compensation; elevated irreversible authority; action-aware cancellation; bounded adjacent runner client; authority-derived create/read/inspect/compensate requests; durable Root dispatch and outcome mapping; exact occurred/not-occurred/ambiguous reconciliation; due worker; startup conversion of stranded effectful executions to reconciliation without redispatch; observational restart settlement; package sidecar contracts. | Expose action inspection through authenticated Root API/IPC/CLI/Desktop; rebuild and run native package UAT; complete forced child-process crash/timeout/late-response matrix; cross-platform semantic path/resource/process/sandbox policy; exact approval-source navigation; security/adversarial and E2E qualification. |
+| 4 — Governed actions and reconciliation | **Root lifecycle and IPC/CLI inspection implemented; Desktop/release gate open** | Schema 55 immutable ledger and generation-fenced execution/reconciliation; exact binding; explicit outcomes; validation-bound commit; causal compensation; elevated irreversible authority; action-aware cancellation; bounded adjacent runner client; authority-derived create/read/inspect/compensate; durable dispatch/outcome mapping; exact reconciliation; due worker; stranded-action recovery without redispatch; bounded content-minimized action summaries and full bounded evidence inspection through authenticated Root IPC; human and JSON `mcg action list/show`; package sidecar contracts. | Add Root HTTP/API if required by product consumers and Simple/Advanced/Developer Desktop action projection; rebuild/run native package UAT; forced child crash/timeout/late-response matrix; cross-platform path/resource/process/sandbox policy; exact approval-source navigation; adversarial E2E. |
 | 5 — Runtime worker and reconstructable cognition | **Not built** | Existing agent/runtime code and role terminology offer compatibility inputs. | Separate `runtime-worker`; authenticated Root-to-Runtime protocol; deterministic fake Work/Verify path; complete ContextManifest/InvocationManifest/CompletionCertificate persistence; invocation reconstruction; canonical global workflow/invocation browser; process-death and late/duplicate-response gates. |
 | 6 — Governed providers, tools, hooks, and plugins | **Not built as a Root-permit pipeline** | Existing hook trust is complete, including exact-hash trust and invocation-only `--dangerously-bypass-hook-trust`; MetaCog already has providers, tools, plugins, MCP, browser/computer, and Codex compatibility surfaces. | Route these capabilities through exact Root-bound egress/tool permits and opaque secret handles; enforce manifests, scopes, sandbox requirements, redaction, escalation resistance, and end-to-end CompletionCertificate production. Existing capability is not evidence that the new trust path exists. |
 | 7 — Protected Evaluator and Phase 0 gate | **Not built** | Contracts and accepted ADRs only. | Separate protected evaluator process/store/artifacts; EvaluationSeed equivalence; immutable experiments; fixtures/TCB/exposure; signed disclosures; invalidation; bounded search; Root-only promotion; full Phase 0 integrity/adversarial gate. |
@@ -98,17 +98,21 @@ Checkpoint `abce753` additionally adds:
 - a bounded due-job worker in the Root process and startup recovery that never redispatches stranded effects;
 - focused real-store reopen coverage showing confirmed effects, lost-after-effect, lost-without-effect, ambiguous changed-file, launch-failure, and stranded-dispatch behavior.
 
+Checkpoint `28de9fb` adds bounded canonical `ActionSummary`/`ActionInspection` contracts, storage projections derived from authoritative rows, authenticated and correlated Root action list/show IPC, content-minimized human CLI presentation, and explicit full-evidence JSON output.
+
 Fresh audit verification on 2026-08-30:
 
 - `cargo test -p mcg-contracts` — 12/12 passed;
-- `cargo test -p mcg-storage` — 101/101 passed;
-- `cargo test -p mcg-protected-root` — 9/9 passed;
+- `cargo test -p mcg-storage` — 102/102 passed;
+- `cargo test -p mcg-protected-root` — 10/10 passed;
 - `cargo test -p mcg-runtime` — 108 passed, with two explicit Windows Sandbox package qualifications ignored;
 - `cargo test -p mcg-protected-rootd --test migration_process` — 1/1 passed.
 - `cargo test -p mcg-action-runner` — current working tree 9/9 passed (5 unit and 4 separate-process tests).
 - `cargo clippy -p mcg-action-runner --all-targets -- -D warnings` — passed.
 - `cargo clippy -p mcg-action-runner --no-default-features --all-targets -- -D warnings` — passed for the client-only dependency shape.
 - `cargo check -p mcg-protected-root --all-targets` — passed with the current local integration.
+- `cargo test -p mcg-platform` — 2/2 passed; strict contracts/platform all-target Clippy passed.
+- `cargo test -p mcg-cli` — 67 unit and 10 integration passed.
 - `cargo test -p mcg-desktop` — 20/20 passed.
 - `cargo check --workspace --all-targets` — passed.
 - Windows debug sidecar preparation and copied-sidecar filesystem qualification — passed.
@@ -117,7 +121,7 @@ The checkpoint establishes the authoritative action storage kernel, real-filesys
 
 ## Highest-priority remaining build sequence
 
-1. Expose canonical actions through authenticated Root IPC, CLI, and Simple/Advanced/Developer Desktop views, including exact approval-source navigation.
+1. Expose canonical actions through Simple/Advanced/Developer Desktop views and connect exact approval-source navigation; authenticated Root IPC and CLI inspection are implemented.
 2. Complete Stage 3 compatibility projection, child cancellation, event streaming, external/approval/protected-component wake triggers, and the complete nonterminal restart matrix.
 3. Add real child-process fault injection for pre-effect/post-effect exit, response loss, timeout, late response, kill, Root restart, and changed-target ambiguity.
 4. Run deterministic process, CLI, Desktop, migration, real-effect crash-injection, and adversarial E2E for Stages 3–4.
