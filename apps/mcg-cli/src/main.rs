@@ -69,7 +69,7 @@ use mcg_codex_app_server::{
     CodexResumeCwd, CodexStableDiscovery,
 };
 use mcg_config::{AppConfig, AutonomyPreset, CliTuiPreferences, InterfaceComplexity, UserSettings};
-use mcg_contracts::{WorkflowCancelRequest, WorkflowId, WorkflowState};
+use mcg_contracts::{ActionId, WorkflowCancelRequest, WorkflowId, WorkflowState};
 use mcg_domain::{
     AgentWakeState, ApprovalMode, CloudDiffApply, CodexConfigOverride, ComposerMentionInput,
     ComputerUseCapability, ComputerUseRegion, ComputerUseTarget, Conversation,
@@ -306,6 +306,11 @@ enum Command {
     Workflow {
         #[command(subcommand)]
         command: WorkflowCommand,
+    },
+    /// Inspect canonical Protected Root actions and their evidence.
+    Action {
+        #[command(subcommand)]
+        command: ActionCommand,
     },
     /// Inspect or change restart-safe owner settings.
     Settings {
@@ -1314,6 +1319,25 @@ enum WorkflowCommand {
         /// Stable key to reuse when retrying an uncertain cancellation request.
         #[arg(long)]
         idempotency_key: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ActionCommand {
+    /// List a bounded newest-first projection of canonical actions.
+    List {
+        #[arg(long, default_value_t = 100)]
+        limit: usize,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show immutable intent, executions, receipts, reconciliation, and ordered events.
+    Show {
+        id: String,
+        #[arg(long, default_value_t = 500)]
+        event_limit: usize,
         #[arg(long)]
         json: bool,
     },
@@ -2843,6 +2867,10 @@ async fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
         run_root_workflow(&config.data_directory, command).await?;
         return Ok(());
     }
+    if let Some(Command::Action { command }) = &cli.command {
+        run_root_action(&config.data_directory, command).await?;
+        return Ok(());
+    }
     if let Some(Command::Backup { command }) = &cli.command {
         match command {
             BackupCommand::Verify { bundle, json } => {
@@ -2955,6 +2983,9 @@ async fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
         }
         Some(Command::Workflow { .. }) => {
             unreachable!("workflow commands handled before bearer-token loading")
+        }
+        Some(Command::Action { .. }) => {
+            unreachable!("action commands handled before bearer-token loading")
         }
         Some(Command::Settings { command }) => {
             run_settings(&client, host, token.trim(), command).await?;
@@ -11025,6 +11056,72 @@ async fn run_root_workflow(
     Ok(())
 }
 
+async fn run_root_action(
+    data_directory: &Path,
+    command: &ActionCommand,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match command {
+        ActionCommand::List { limit, json } => {
+            let actions = mcg_platform::query_root_actions(data_directory, *limit).await?;
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&actions)?);
+            } else if actions.is_empty() {
+                println!("No canonical actions.");
+            } else {
+                for action in actions {
+                    println!(
+                        "{}  {:?}  {:?}  revision {}  generation {}",
+                        action.action_id,
+                        action.effect_class,
+                        action.state,
+                        action.revision,
+                        action.lease_generation
+                    );
+                }
+            }
+        }
+        ActionCommand::Show {
+            id,
+            event_limit,
+            json,
+        } => {
+            let action_id = ActionId(uuid::Uuid::parse_str(id)?);
+            let inspection =
+                mcg_platform::query_root_action(data_directory, action_id, *event_limit)
+                    .await?
+                    .ok_or_else(|| format!("canonical action {action_id} was not found"))?;
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&inspection)?);
+            } else {
+                println!("Action {}", inspection.envelope.id);
+                println!("  workflow: {}", inspection.envelope.workflow_id);
+                println!("  attempt: {}", inspection.envelope.attempt_id);
+                println!("  actor: {}", inspection.envelope.actor);
+                println!("  effect: {:?}", inspection.envelope.effect_class);
+                println!(
+                    "  operation: {} ({}:{})",
+                    inspection.envelope.operation.type_id.as_str(),
+                    inspection.envelope.operation_hash.domain,
+                    inspection.envelope.operation_hash.digest_hex
+                );
+                if let Some(execution) = inspection.executions.last() {
+                    println!("  state: {:?}", execution.state);
+                    println!("  revision: {}", execution.revision);
+                    println!("  generation: {}", execution.lease_generation);
+                }
+                println!("  executions: {}", inspection.executions.len());
+                println!("  receipts: {}", inspection.receipts.len());
+                println!(
+                    "  reconciliation jobs: {}",
+                    inspection.reconciliation_jobs.len()
+                );
+                println!("  events returned: {}", inspection.events.len());
+            }
+        }
+    }
+    Ok(())
+}
+
 async fn run_status(
     client: &reqwest::Client,
     host: &str,
@@ -15955,6 +16052,34 @@ mod tests {
                     ..
                 }
             } if key == "owner-cancel-1"
+        ));
+    }
+
+    #[test]
+    fn action_commands_expose_bounded_canonical_root_evidence() {
+        let id = "00000000-0000-4000-8000-000000000502";
+        let list = Cli::try_parse_from(["mcg", "action", "list", "--limit", "25", "--json"])
+            .expect("action list command");
+        assert!(matches!(
+            list.command.expect("command"),
+            Command::Action {
+                command: ActionCommand::List {
+                    limit: 25,
+                    json: true
+                }
+            }
+        ));
+        let show = Cli::try_parse_from(["mcg", "action", "show", id, "--event-limit", "75"])
+            .expect("action show command");
+        assert!(matches!(
+            show.command.expect("command"),
+            Command::Action {
+                command: ActionCommand::Show {
+                    event_limit: 75,
+                    json: false,
+                    ..
+                }
+            }
         ));
     }
 

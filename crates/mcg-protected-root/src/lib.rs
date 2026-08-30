@@ -21,18 +21,20 @@ use mcg_action_runner::{
 };
 use mcg_config::AppConfig;
 use mcg_contracts::{
-    ActionExecution, ActionExecutionId, ActionReceipt, ActionReceiptId, AuthenticatedRpcRequest,
-    ContentHash, ContractError, CorrelationId, EffectClass, EffectOutcome, HashAlgorithm,
-    PROTOCOL_V1, ReconciliationJob, ReconciliationJobId, ReconciliationObservation, RequestId,
-    RootStatus, RpcEnvelope, RuntimeActorId, RuntimeIdentity, RuntimeInstanceId, StableTypeId,
-    VersionedPayload, WorkflowCancelRequest, WorkflowId, decode_canonical_cbor_v1,
+    ActionExecution, ActionExecutionId, ActionId, ActionReceipt, ActionReceiptId,
+    AuthenticatedRpcRequest, ContentHash, ContractError, CorrelationId, EffectClass, EffectOutcome,
+    HashAlgorithm, PROTOCOL_V1, ReconciliationJob, ReconciliationJobId, ReconciliationObservation,
+    RequestId, RootStatus, RpcEnvelope, RuntimeActorId, RuntimeIdentity, RuntimeInstanceId,
+    StableTypeId, VersionedPayload, WorkflowCancelRequest, WorkflowId, decode_canonical_cbor_v1,
 };
 use mcg_platform::{
-    PlatformError, ROOT_STATUS_REQUEST_TYPE, ROOT_STATUS_RESPONSE_TYPE,
-    ROOT_WORKFLOW_CANCEL_REQUEST_TYPE, ROOT_WORKFLOW_CANCEL_RESPONSE_TYPE,
-    ROOT_WORKFLOW_LIST_REQUEST_TYPE, ROOT_WORKFLOW_LIST_RESPONSE_TYPE,
-    ROOT_WORKFLOW_SHOW_REQUEST_TYPE, ROOT_WORKFLOW_SHOW_RESPONSE_TYPE, RootIpcSession,
-    create_root_ipc_session, read_canonical_frame, remove_root_ipc_session, write_canonical_frame,
+    PlatformError, ROOT_ACTION_LIST_REQUEST_TYPE, ROOT_ACTION_LIST_RESPONSE_TYPE,
+    ROOT_ACTION_SHOW_REQUEST_TYPE, ROOT_ACTION_SHOW_RESPONSE_TYPE, ROOT_STATUS_REQUEST_TYPE,
+    ROOT_STATUS_RESPONSE_TYPE, ROOT_WORKFLOW_CANCEL_REQUEST_TYPE,
+    ROOT_WORKFLOW_CANCEL_RESPONSE_TYPE, ROOT_WORKFLOW_LIST_REQUEST_TYPE,
+    ROOT_WORKFLOW_LIST_RESPONSE_TYPE, ROOT_WORKFLOW_SHOW_REQUEST_TYPE,
+    ROOT_WORKFLOW_SHOW_RESPONSE_TYPE, RootIpcSession, create_root_ipc_session,
+    read_canonical_frame, remove_root_ipc_session, write_canonical_frame,
 };
 use mcg_runtime::{AppRuntime, RuntimeError};
 use mcg_storage::{
@@ -866,6 +868,17 @@ struct WorkflowShowRequest {
     workflow_id: WorkflowId,
 }
 
+#[derive(serde::Deserialize)]
+struct ActionListRequest {
+    limit: usize,
+}
+
+#[derive(serde::Deserialize)]
+struct ActionShowRequest {
+    action_id: ActionId,
+    event_limit: usize,
+}
+
 impl ReplayWindow {
     fn insert(&mut self, request_id: RequestId) -> bool {
         if !self.seen.insert(request_id) {
@@ -989,6 +1002,8 @@ where
             | ROOT_WORKFLOW_LIST_REQUEST_TYPE
             | ROOT_WORKFLOW_SHOW_REQUEST_TYPE
             | ROOT_WORKFLOW_CANCEL_REQUEST_TYPE
+            | ROOT_ACTION_LIST_REQUEST_TYPE
+            | ROOT_ACTION_SHOW_REQUEST_TYPE
     );
     if !session.verifies(&request.session_capability)
         || request.envelope.session_id != session.session_id
@@ -1044,6 +1059,20 @@ where
             (
                 ROOT_WORKFLOW_CANCEL_RESPONSE_TYPE,
                 serde_json::to_value(runtime.cancel_canonical_workflow(&cancel)?)?,
+            )
+        }
+        ROOT_ACTION_LIST_REQUEST_TYPE => {
+            let list: ActionListRequest = serde_json::from_value(request_value)?;
+            (
+                ROOT_ACTION_LIST_RESPONSE_TYPE,
+                serde_json::to_value(runtime.canonical_actions(list.limit)?)?,
+            )
+        }
+        ROOT_ACTION_SHOW_REQUEST_TYPE => {
+            let show: ActionShowRequest = serde_json::from_value(request_value)?;
+            (
+                ROOT_ACTION_SHOW_RESPONSE_TYPE,
+                serde_json::to_value(runtime.canonical_action(show.action_id, show.event_limit)?)?,
             )
         }
         _ => return Err(PlatformError::InvalidSession.into()),
@@ -1177,8 +1206,8 @@ mod tests {
         WaitReason, WorkflowAttempt, WorkflowId, WorkflowState,
     };
     use mcg_platform::{
-        cancel_root_workflow, exchange_root_rpc, query_root_status, query_root_workflow,
-        query_root_workflows, root_ipc_session_path,
+        cancel_root_workflow, exchange_root_rpc, query_root_action, query_root_actions,
+        query_root_status, query_root_workflow, query_root_workflows, root_ipc_session_path,
     };
     use mcg_storage::{SqliteEventStore, task_contract_content_hash, verify_backup_bundle};
 
@@ -2040,5 +2069,32 @@ mod tests {
                 .expect("changed content remains"),
             b"changed owner content"
         );
+    }
+
+    #[tokio::test]
+    async fn authenticated_local_ipc_lists_and_shows_bounded_canonical_action_evidence() {
+        let (temporary, _config, runtime, execution, _actor, _now) =
+            authorized_filesystem_fixture();
+        let session = create_root_ipc_session(temporary.path()).expect("IPC session");
+        let server = start_root_ipc(runtime, session.clone()).expect("IPC server");
+
+        let actions = query_root_actions(temporary.path(), 10)
+            .await
+            .expect("action list");
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].action_id, execution.action_id);
+        assert_eq!(actions[0].state, ActionExecutionState::Authorized);
+        let inspection = query_root_action(temporary.path(), execution.action_id, 10)
+            .await
+            .expect("action show")
+            .expect("action inspection");
+        assert_eq!(inspection.envelope.id, execution.action_id);
+        assert_eq!(inspection.executions, vec![execution]);
+        assert!(inspection.receipts.is_empty());
+        assert!(inspection.reconciliation_jobs.is_empty());
+        assert_eq!(inspection.events.len(), 1);
+
+        server.abort();
+        remove_root_ipc_session(temporary.path(), session.session_id);
     }
 }

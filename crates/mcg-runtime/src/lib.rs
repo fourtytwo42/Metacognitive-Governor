@@ -58,10 +58,10 @@ use mcg_config::{
     UserSettingsRevision,
 };
 use mcg_contracts::{
-    ActionEnvelope, ActionExecution, ActionExecutionId, ActionReceipt, CorrelationId,
-    EffectOutcome, ReconciliationJob, ReconciliationJobId, ReconciliationObservation,
-    RuntimeActorId, RuntimeIdentity, WorkflowAttempt, WorkflowCancelRequest, WorkflowId,
-    WorkflowInspection, WorkflowState,
+    ActionEnvelope, ActionExecution, ActionExecutionId, ActionId, ActionInspection, ActionReceipt,
+    ActionSummary, CorrelationId, EffectOutcome, ReconciliationJob, ReconciliationJobId,
+    ReconciliationObservation, RuntimeActorId, RuntimeIdentity, WorkflowAttempt,
+    WorkflowCancelRequest, WorkflowId, WorkflowInspection, WorkflowState,
 };
 use mcg_domain::{
     AgentContextCheckpoint, AgentContextCheckpointCause, AgentContextCheckpointId,
@@ -3667,6 +3667,26 @@ impl AppRuntime {
             idempotency_key,
             now,
         )?)
+    }
+
+    /// Returns a bounded newest-first projection of canonical actions.
+    ///
+    /// # Errors
+    /// Returns a runtime error for invalid bounds or unreadable authoritative state.
+    pub fn canonical_actions(&self, limit: usize) -> Result<Vec<ActionSummary>, RuntimeError> {
+        Ok(self.store()?.action_summaries(limit)?)
+    }
+
+    /// Loads one canonical action and bounded ordered evidence.
+    ///
+    /// # Errors
+    /// Returns a runtime error for invalid bounds or unreadable authoritative state.
+    pub fn canonical_action(
+        &self,
+        action_id: ActionId,
+        event_limit: usize,
+    ) -> Result<Option<ActionInspection>, RuntimeError> {
+        Ok(self.store()?.action_inspection(action_id, event_limit)?)
     }
 
     /// Lists the latest authoritative attempt for every canonical workflow.

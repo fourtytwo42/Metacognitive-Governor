@@ -11,10 +11,10 @@ use std::fmt::Write as _;
 
 use chrono::{DateTime, Duration, Utc};
 use mcg_contracts::{
-    AuthenticatedRpcRequest, ContractError, CorrelationId, PROTOCOL_V1, RequestId, RootStatus,
-    RpcEnvelope, RuntimeInstanceId, SessionId, StableTypeId, VersionedPayload, WorkflowAttempt,
-    WorkflowCancelRequest, WorkflowId, WorkflowInspection, canonical_cbor_v1,
-    decode_canonical_cbor_v1,
+    ActionId, ActionInspection, ActionSummary, AuthenticatedRpcRequest, ContractError,
+    CorrelationId, PROTOCOL_V1, RequestId, RootStatus, RpcEnvelope, RuntimeInstanceId, SessionId,
+    StableTypeId, VersionedPayload, WorkflowAttempt, WorkflowCancelRequest, WorkflowId,
+    WorkflowInspection, canonical_cbor_v1, decode_canonical_cbor_v1,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 #[cfg(windows)]
@@ -35,6 +35,10 @@ pub const ROOT_WORKFLOW_SHOW_REQUEST_TYPE: &str = "metacog.root.workflow_show.re
 pub const ROOT_WORKFLOW_SHOW_RESPONSE_TYPE: &str = "metacog.root.workflow_show.response.v1";
 pub const ROOT_WORKFLOW_CANCEL_REQUEST_TYPE: &str = "metacog.root.workflow_cancel.request.v1";
 pub const ROOT_WORKFLOW_CANCEL_RESPONSE_TYPE: &str = "metacog.root.workflow_cancel.response.v1";
+pub const ROOT_ACTION_LIST_REQUEST_TYPE: &str = "metacog.root.action_list.request.v1";
+pub const ROOT_ACTION_LIST_RESPONSE_TYPE: &str = "metacog.root.action_list.response.v1";
+pub const ROOT_ACTION_SHOW_REQUEST_TYPE: &str = "metacog.root.action_show.request.v1";
+pub const ROOT_ACTION_SHOW_RESPONSE_TYPE: &str = "metacog.root.action_show.response.v1";
 const ROOT_SESSION_FILE: &str = "root-ipc-session.json";
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -280,6 +284,41 @@ pub async fn cancel_root_workflow(
         ROOT_WORKFLOW_CANCEL_REQUEST_TYPE,
         ROOT_WORKFLOW_CANCEL_RESPONSE_TYPE,
         request,
+    )
+    .await
+}
+
+/// Lists a bounded newest-first projection of canonical actions over authenticated local IPC.
+///
+/// # Errors
+/// Returns an error for unavailable transport, invalid bounds, or correlated protocol failure.
+pub async fn query_root_actions(
+    data_directory: &Path,
+    limit: usize,
+) -> Result<Vec<ActionSummary>, PlatformError> {
+    query_root(
+        data_directory,
+        ROOT_ACTION_LIST_REQUEST_TYPE,
+        ROOT_ACTION_LIST_RESPONSE_TYPE,
+        &serde_json::json!({"limit": limit}),
+    )
+    .await
+}
+
+/// Loads one canonical action and bounded ordered evidence over authenticated local IPC.
+///
+/// # Errors
+/// Returns an error for unavailable transport, invalid bounds, or correlated protocol failure.
+pub async fn query_root_action(
+    data_directory: &Path,
+    action_id: ActionId,
+    event_limit: usize,
+) -> Result<Option<ActionInspection>, PlatformError> {
+    query_root(
+        data_directory,
+        ROOT_ACTION_SHOW_REQUEST_TYPE,
+        ROOT_ACTION_SHOW_RESPONSE_TYPE,
+        &serde_json::json!({"action_id": action_id, "event_limit": event_limit}),
     )
     .await
 }

@@ -1,10 +1,10 @@
 use chrono::{DateTime, Utc};
 use mcg_contracts::{
     ActionEnvelope, ActionEvent, ActionExecution, ActionExecutionId, ActionExecutionState,
-    ActionReceipt, ActionValidation, CorrelationId, EffectClass, EffectOutcome, EventId,
-    ReconciliationJob, ReconciliationJobId, ReconciliationJobState, ReconciliationObservation,
-    RuntimeActorId, StableTypeId, VersionedPayload, WorkflowAttempt, WorkflowState,
-    decode_canonical_cbor_v1,
+    ActionInspection, ActionReceipt, ActionSummary, ActionValidation, CorrelationId, EffectClass,
+    EffectOutcome, EventId, ReconciliationJob, ReconciliationJobId, ReconciliationJobState,
+    ReconciliationObservation, RuntimeActorId, StableTypeId, VersionedPayload, WorkflowAttempt,
+    WorkflowState, decode_canonical_cbor_v1,
 };
 use rusqlite::{OptionalExtension, Transaction, params};
 
@@ -230,6 +230,114 @@ impl SqliteEventStore {
             serde_json::from_str(&json).map_err(StorageError::from)
         })
         .collect()
+    }
+
+    /// Returns a bounded newest-first projection of canonical action executions.
+    ///
+    /// # Errors
+    /// Returns a storage error for an invalid limit, query failure, or malformed stored state.
+    pub fn action_summaries(&self, limit: usize) -> Result<Vec<ActionSummary>, StorageError> {
+        if limit == 0 || limit > 1_000 {
+            return Err(StorageError::InvalidData(
+                "action summary limit must be between 1 and 1000".into(),
+            ));
+        }
+        let mut statement = self.connection.prepare(
+            "SELECT envelope.envelope_json, execution.execution_json
+             FROM action_executions AS execution
+             JOIN action_envelopes AS envelope ON envelope.action_id = execution.action_id
+             ORDER BY execution.updated_at DESC, execution.action_id, execution.attempt_number DESC
+             LIMIT ?1",
+        )?;
+        let rows = statement.query_map(
+            [i64::try_from(limit).map_err(|_| {
+                StorageError::InvalidData("action summary limit exceeds SQLite range".into())
+            })?],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )?;
+        rows.map(|row| {
+            let (envelope, execution) = row?;
+            let envelope: ActionEnvelope = serde_json::from_str(&envelope)?;
+            let execution: ActionExecution = serde_json::from_str(&execution)?;
+            Ok(ActionSummary {
+                action_id: envelope.id,
+                execution_id: execution.id,
+                workflow_id: envelope.workflow_id,
+                attempt_id: envelope.attempt_id,
+                actor: envelope.actor,
+                effect_class: envelope.effect_class,
+                state: execution.state,
+                outcome: execution.outcome,
+                revision: execution.revision,
+                lease_generation: execution.lease_generation,
+                updated_at: execution.updated_at,
+            })
+        })
+        .collect()
+    }
+
+    /// Loads one bounded canonical action inspection with ordered immutable evidence.
+    ///
+    /// The newest `event_limit` events are returned in ascending sequence order. Execution,
+    /// receipt, and reconciliation collections are independently capped at 1,000 entries.
+    ///
+    /// # Errors
+    /// Returns a storage error for invalid bounds, query failures, or malformed stored state.
+    pub fn action_inspection(
+        &self,
+        action_id: mcg_contracts::ActionId,
+        event_limit: usize,
+    ) -> Result<Option<ActionInspection>, StorageError> {
+        if event_limit == 0 || event_limit > 1_000 {
+            return Err(StorageError::InvalidData(
+                "action event limit must be between 1 and 1000".into(),
+            ));
+        }
+        let Some(envelope) = self.action_envelope(action_id)? else {
+            return Ok(None);
+        };
+        let executions = query_action_collection::<ActionExecution>(
+            &self.connection,
+            "SELECT execution_json FROM action_executions WHERE action_id = ?1
+             ORDER BY attempt_number, execution_id LIMIT 1001",
+            action_id,
+            "action executions",
+        )?;
+        let receipts = query_action_collection::<ActionReceipt>(
+            &self.connection,
+            "SELECT receipt_json FROM action_receipts WHERE action_id = ?1
+             ORDER BY observed_at, receipt_id LIMIT 1001",
+            action_id,
+            "action receipts",
+        )?;
+        let reconciliation_jobs = query_action_collection::<ReconciliationJob>(
+            &self.connection,
+            "SELECT job_json FROM reconciliation_jobs WHERE action_id = ?1
+             ORDER BY created_at, reconciliation_job_id LIMIT 1001",
+            action_id,
+            "action reconciliation jobs",
+        )?;
+        let event_limit = i64::try_from(event_limit).map_err(|_| {
+            StorageError::InvalidData("action event limit exceeds SQLite range".into())
+        })?;
+        let mut statement = self.connection.prepare(
+            "SELECT event_json FROM action_events WHERE action_id = ?1
+             ORDER BY sequence DESC LIMIT ?2",
+        )?;
+        let rows = statement.query_map(params![action_id.to_string(), event_limit], |row| {
+            row.get::<_, String>(0)
+        })?;
+        let mut events = rows
+            .map(|row| serde_json::from_str::<ActionEvent>(&row?).map_err(StorageError::from))
+            .collect::<Result<Vec<_>, _>>()?;
+        events.reverse();
+        Ok(Some(ActionInspection {
+            envelope,
+            executions,
+            receipts,
+            reconciliation_jobs,
+            events,
+        }))
     }
 
     /// Dispatches an authorized physical execution under a new generation fence.
@@ -2251,6 +2359,25 @@ const fn reconciliation_state_label(state: ReconciliationJobState) -> &'static s
     }
 }
 
+fn query_action_collection<T: serde::de::DeserializeOwned>(
+    connection: &rusqlite::Connection,
+    sql: &str,
+    action_id: mcg_contracts::ActionId,
+    label: &str,
+) -> Result<Vec<T>, StorageError> {
+    let mut statement = connection.prepare(sql)?;
+    let rows = statement.query_map([action_id.to_string()], |row| row.get::<_, String>(0))?;
+    let values = rows
+        .map(|row| serde_json::from_str::<T>(&row?).map_err(StorageError::from))
+        .collect::<Result<Vec<_>, _>>()?;
+    if values.len() > 1_000 {
+        return Err(StorageError::InvalidData(format!(
+            "{label} exceed the bounded inspection limit"
+        )));
+    }
+    Ok(values)
+}
+
 fn sql_u64(value: u64, label: &str) -> Result<i64, StorageError> {
     i64::try_from(value)
         .map_err(|_| StorageError::InvalidData(format!("{label} exceeds SQLite integer range")))
@@ -2598,6 +2725,40 @@ mod tests {
                 .recover_stranded_action_executions(CorrelationId::new(), recovered_at)
                 .unwrap(),
             ActionExecutionRecoveryReport::default()
+        );
+    }
+
+    #[test]
+    fn action_inspection_is_bounded_ordered_and_derived_from_canonical_records() {
+        let mut store = SqliteEventStore::open_in_memory().unwrap();
+        let (_contract, workflow, actor) = running_workflow(&mut store);
+        let (envelope, execution) = action_fixture(&workflow, actor, EffectClass::Reversible);
+        store
+            .authorize_action(
+                &envelope,
+                &execution,
+                workflow.revision,
+                workflow.lease_generation,
+                CorrelationId::new(),
+                now(),
+            )
+            .unwrap();
+        let summaries = store.action_summaries(10).unwrap();
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].action_id, envelope.id);
+        assert_eq!(summaries[0].state, ActionExecutionState::Authorized);
+        let inspection = store.action_inspection(envelope.id, 10).unwrap().unwrap();
+        assert_eq!(inspection.envelope, envelope);
+        assert_eq!(inspection.executions, vec![execution]);
+        assert_eq!(inspection.events.len(), 1);
+        assert_eq!(inspection.events[0].sequence, 1);
+        assert!(store.action_summaries(0).is_err());
+        assert!(store.action_inspection(envelope.id, 1_001).is_err());
+        assert!(
+            store
+                .action_inspection(ActionId::new(), 10)
+                .unwrap()
+                .is_none()
         );
     }
 

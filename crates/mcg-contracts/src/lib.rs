@@ -808,6 +808,32 @@ impl ActionEvent {
     pub const TYPE_ID: &'static str = "mcg.action_event.v1";
 }
 
+/// Bounded owner-facing projection of one current canonical action execution.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActionSummary {
+    pub action_id: ActionId,
+    pub execution_id: ActionExecutionId,
+    pub workflow_id: WorkflowId,
+    pub attempt_id: AttemptId,
+    pub actor: RuntimeActorId,
+    pub effect_class: EffectClass,
+    pub state: ActionExecutionState,
+    pub outcome: Option<EffectOutcome>,
+    pub revision: u64,
+    pub lease_generation: u64,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Canonical Root inspection of immutable action intent, observations, and ordered history.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActionInspection {
+    pub envelope: ActionEnvelope,
+    pub executions: Vec<ActionExecution>,
+    pub receipts: Vec<ActionReceipt>,
+    pub reconciliation_jobs: Vec<ReconciliationJob>,
+    pub events: Vec<ActionEvent>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReconciliationJobState {
