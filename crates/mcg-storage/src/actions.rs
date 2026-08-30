@@ -3863,9 +3863,15 @@ mod tests {
         rusqlite::Connection::open(&database)
             .unwrap()
             .execute_batch(
-                "DROP INDEX action_envelopes_one_compensation;
+                "DROP TABLE completion_certificate_invocations;
+                 DROP TABLE completion_certificates;
+                 DROP TABLE model_run_heads;
+                 DROP TABLE model_run_versions;
+                 DROP TABLE invocation_manifests;
+                 DROP TABLE context_manifests;
+                 DROP INDEX action_envelopes_one_compensation;
                  ALTER TABLE action_envelopes DROP COLUMN compensates_action_id;
-                 DELETE FROM mcg_schema WHERE version = 55;",
+                 DELETE FROM mcg_schema WHERE version IN (55, 56);",
             )
             .unwrap();
 
@@ -3877,7 +3883,7 @@ mod tests {
                     row.get::<_, i64>(0)
                 })
                 .unwrap(),
-            55
+            crate::STORAGE_SCHEMA_VERSION
         );
         let envelope = store.action_envelope(action_id).unwrap().unwrap();
         assert!(envelope.compensates_action.is_none());

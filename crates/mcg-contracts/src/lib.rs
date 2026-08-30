@@ -4,7 +4,10 @@
 //! policy, or evaluator implementations. Stable identifiers and canonical bytes
 //! are protocol—not Rust layout or Serde implementation details.
 
-use std::{collections::BTreeMap, fmt};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -15,6 +18,11 @@ use uuid::Uuid;
 
 pub const PROTOCOL_V1: u16 = 1;
 pub const MAX_CANONICAL_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
+pub const MAX_MANIFEST_ITEMS: usize = 4_096;
+pub const MAX_CONTEXT_TRANSFORMATIONS: usize = 64;
+pub const MAX_CONTEXT_EXPANSION_STEPS: usize = 256;
+pub const MAX_REFERENCE_LOCATOR_BYTES: usize = 4_096;
+pub const MAX_MANIFEST_TEXT_BYTES: usize = 4_096;
 
 macro_rules! stable_uuid {
     ($name:ident) => {
@@ -59,6 +67,8 @@ stable_uuid!(ReconciliationJobId);
 stable_uuid!(ContextManifestId);
 stable_uuid!(InvocationId);
 stable_uuid!(CompletionCertificateId);
+stable_uuid!(ModelRunId);
+stable_uuid!(RecordId);
 stable_uuid!(EvaluationSeedId);
 stable_uuid!(ExperimentSpecId);
 stable_uuid!(RequestId);
@@ -108,7 +118,7 @@ pub enum CanonicalNormalizationVersion {
     AcarNormalizationV1,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum HashAlgorithm {
     Blake3_256,
@@ -217,6 +227,21 @@ impl VersionedPayload {
             domain: semantic_domain.to_owned(),
             digest_hex: hasher.finalize().to_hex().to_string(),
         })
+    }
+
+    /// Validates a payload received across a trust boundary without interpreting its semantics.
+    ///
+    /// # Errors
+    /// Returns a contract error for an invalid discriminator, version, or canonical payload.
+    pub fn validate(&self) -> Result<(), ContractError> {
+        validate_stable_type_id(&self.type_id)?;
+        if self.schema_version == 0 {
+            return Err(ContractError::InvalidContract(
+                "payload schema version is zero",
+            ));
+        }
+        decode_canonical_cbor_v1(&self.bytes)?;
+        Ok(())
     }
 }
 
@@ -380,6 +405,48 @@ fn validate_domain(domain: &str) -> Result<(), ContractError> {
     valid.then_some(()).ok_or(ContractError::InvalidHashDomain)
 }
 
+fn validate_stable_type_id(type_id: &StableTypeId) -> Result<(), ContractError> {
+    let reparsed = StableTypeId::parse(type_id.as_str())?;
+    (reparsed == *type_id)
+        .then_some(())
+        .ok_or(ContractError::InvalidTypeId)
+}
+
+fn validate_text(
+    value: &str,
+    maximum_bytes: usize,
+    error: &'static str,
+) -> Result<(), ContractError> {
+    (!value.is_empty() && value.len() <= maximum_bytes && !value.chars().any(char::is_control))
+        .then_some(())
+        .ok_or(ContractError::InvalidContract(error))
+}
+
+fn validate_item_count(length: usize, error: &'static str) -> Result<(), ContractError> {
+    (length <= MAX_MANIFEST_ITEMS)
+        .then_some(())
+        .ok_or(ContractError::InvalidContract(error))
+}
+
+fn validate_hashes(
+    hashes: &[ContentHash],
+    duplicate_error: &'static str,
+) -> Result<(), ContractError> {
+    validate_item_count(hashes.len(), "manifest hash collection exceeds its bound")?;
+    let mut unique = BTreeSet::new();
+    for hash in hashes {
+        hash.validate()?;
+        if !unique.insert((
+            hash.algorithm,
+            hash.domain.as_str(),
+            hash.digest_hex.as_str(),
+        )) {
+            return Err(ContractError::InvalidContract(duplicate_error));
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeIdentity {
     pub instance_id: RuntimeInstanceId,
@@ -401,6 +468,43 @@ pub struct SourceRef {
     pub source_type: StableTypeId,
     pub locator: String,
     pub content_hash: ContentHash,
+}
+
+impl ContentHash {
+    /// Validates the algorithm, semantic domain, and lowercase fixed-width digest.
+    ///
+    /// # Errors
+    /// Returns a contract error when this value is not a canonical 256-bit content hash.
+    pub fn validate(&self) -> Result<(), ContractError> {
+        validate_domain(&self.domain)?;
+        if self.digest_hex.len() != 64
+            || !self
+                .digest_hex
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+        {
+            return Err(ContractError::InvalidContract(
+                "content hash digest is not lowercase 256-bit hexadecimal",
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl SourceRef {
+    /// Validates a content-minimized immutable source reference.
+    ///
+    /// # Errors
+    /// Returns a contract error for an invalid type, locator, or content hash.
+    pub fn validate(&self) -> Result<(), ContractError> {
+        validate_stable_type_id(&self.source_type)?;
+        validate_text(
+            &self.locator,
+            MAX_REFERENCE_LOCATOR_BYTES,
+            "source locator is empty, oversized, or contains control characters",
+        )?;
+        self.content_hash.validate()
+    }
 }
 
 /// A stable, source-backed statement in a task contract.
@@ -907,31 +1011,514 @@ impl ReconciliationObservation {
     pub const TYPE_ID: &'static str = "mcg.reconciliation_observation.v1";
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InvocationRole {
+    Work,
+    Verify,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ContextManifest {
-    pub id: ContextManifestId,
-    pub selected_sources: Vec<ContentHash>,
-    pub selection_policy: VersionedPayload,
+pub struct ContextSelection {
+    pub source: SourceRef,
+    pub perspective: Option<SourceRef>,
+    pub influence: VersionedPayload,
+    pub transformations: Vec<SourceRef>,
+    pub placement: u32,
     pub approximate_tokens: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextExpansionStep {
+    pub sequence: u32,
+    pub reason: StableTypeId,
+    pub added_sources: Vec<SourceRef>,
+}
+
+/// Content-minimized evidence of exactly what information reached one material invocation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextManifest {
+    pub id: ContextManifestId,
+    pub attempt_id: AttemptId,
+    pub selected_sources: Vec<ContextSelection>,
+    pub selection_policy: VersionedPayload,
+    pub expansion_steps: Vec<ContextExpansionStep>,
+    pub approximate_tokens: u64,
+}
+
+impl ContextManifest {
+    pub const SCHEMA_VERSION: u32 = 1;
+    pub const TYPE_ID: &'static str = "mcg.context_manifest.v1";
+
+    /// Validates ordering, bounds, exact token accounting, and every referenced payload.
+    ///
+    /// # Errors
+    /// Returns a contract error when this manifest cannot safely reconstruct supplied context.
+    pub fn validate(&self) -> Result<(), ContractError> {
+        validate_item_count(
+            self.selected_sources.len(),
+            "context manifest contains too many selected sources",
+        )?;
+        if self.expansion_steps.len() > MAX_CONTEXT_EXPANSION_STEPS {
+            return Err(ContractError::InvalidContract(
+                "context manifest contains too many expansion steps",
+            ));
+        }
+        self.selection_policy.validate()?;
+
+        let mut total_tokens = 0_u64;
+        for (index, selection) in self.selected_sources.iter().enumerate() {
+            let expected = u32::try_from(index).map_err(|_| {
+                ContractError::InvalidContract("context placement exceeds its wire range")
+            })?;
+            if selection.placement != expected {
+                return Err(ContractError::InvalidContract(
+                    "context placements are not contiguous and ordered",
+                ));
+            }
+            selection.source.validate()?;
+            if let Some(perspective) = &selection.perspective {
+                perspective.validate()?;
+            }
+            selection.influence.validate()?;
+            if selection.transformations.len() > MAX_CONTEXT_TRANSFORMATIONS {
+                return Err(ContractError::InvalidContract(
+                    "context selection contains too many transformations",
+                ));
+            }
+            for transformation in &selection.transformations {
+                transformation.validate()?;
+            }
+            total_tokens = total_tokens
+                .checked_add(selection.approximate_tokens)
+                .ok_or(ContractError::InvalidContract(
+                    "context approximate token total overflows",
+                ))?;
+        }
+        if total_tokens != self.approximate_tokens {
+            return Err(ContractError::InvalidContract(
+                "context approximate token total does not match its selections",
+            ));
+        }
+
+        for (index, step) in self.expansion_steps.iter().enumerate() {
+            let expected = u32::try_from(index).map_err(|_| {
+                ContractError::InvalidContract("context expansion sequence exceeds its wire range")
+            })?;
+            if step.sequence != expected || step.added_sources.is_empty() {
+                return Err(ContractError::InvalidContract(
+                    "context expansion steps must be ordered and nonempty",
+                ));
+            }
+            validate_stable_type_id(&step.reason)?;
+            validate_item_count(
+                step.added_sources.len(),
+                "context expansion step contains too many sources",
+            )?;
+            for source in &step.added_sources {
+                source.validate()?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Immutable reconstruction evidence for one material model invocation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InvocationManifest {
     pub id: InvocationId,
+    pub role: InvocationRole,
     pub attempt_id: AttemptId,
+    pub task_contract: VersionedRef<TaskContractId>,
     pub runtime_identity: RuntimeIdentity,
+    pub cognitive_configuration: ContentHash,
+    pub role_manifest: ContentHash,
+    pub prompt_bundle: ContentHash,
     pub context_manifest: ContentHash,
+    pub model_route: VersionedPayload,
+    pub resolved_provider: SourceRef,
+    pub resolved_model: SourceRef,
+    pub observed_model_fingerprint: Option<String>,
+    pub sampling: VersionedPayload,
+    pub reasoning: Option<VersionedPayload>,
+    pub available_tool_manifests: Vec<ContentHash>,
+    pub selected_skill_manifests: Vec<ContentHash>,
+    pub authority_envelope: SourceRef,
+    pub egress_permit: Option<SourceRef>,
+    pub repository_revision: Option<ContentHash>,
+    pub environment: SourceRef,
+    pub runtime_build: ContentHash,
     pub request_hash: ContentHash,
     pub response_hash: Option<ContentHash>,
 }
 
+impl InvocationManifest {
+    pub const SCHEMA_VERSION: u32 = 1;
+    pub const TYPE_ID: &'static str = "mcg.invocation_manifest.v1";
+
+    /// Validates every immutable condition required to reconstruct a material invocation.
+    ///
+    /// # Errors
+    /// Returns a contract error for missing, malformed, duplicate, or unbounded bindings.
+    pub fn validate(&self) -> Result<(), ContractError> {
+        if self.task_contract.version == 0 {
+            return Err(ContractError::InvalidContract(
+                "invocation task contract version is zero",
+            ));
+        }
+        self.task_contract.content_hash.validate()?;
+        negotiate_protocol(&[self.runtime_identity.protocol_version])?;
+        self.runtime_identity.build_hash.validate()?;
+        for hash in [
+            &self.cognitive_configuration,
+            &self.role_manifest,
+            &self.prompt_bundle,
+            &self.context_manifest,
+            &self.runtime_build,
+            &self.request_hash,
+        ] {
+            hash.validate()?;
+        }
+        self.model_route.validate()?;
+        self.resolved_provider.validate()?;
+        self.resolved_model.validate()?;
+        if let Some(fingerprint) = &self.observed_model_fingerprint {
+            validate_text(
+                fingerprint,
+                MAX_MANIFEST_TEXT_BYTES,
+                "observed model fingerprint is empty, oversized, or contains controls",
+            )?;
+        }
+        self.sampling.validate()?;
+        if let Some(reasoning) = &self.reasoning {
+            reasoning.validate()?;
+        }
+        validate_hashes(
+            &self.available_tool_manifests,
+            "available tool manifest is duplicated",
+        )?;
+        validate_hashes(
+            &self.selected_skill_manifests,
+            "selected skill manifest is duplicated",
+        )?;
+        self.authority_envelope.validate()?;
+        if let Some(permit) = &self.egress_permit {
+            permit.validate()?;
+        }
+        if let Some(revision) = &self.repository_revision {
+            revision.validate()?;
+        }
+        self.environment.validate()?;
+        if let Some(response_hash) = &self.response_hash {
+            response_hash.validate()?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelRunState {
+    Planned,
+    Dispatched,
+    Completed,
+    Failed,
+    Cancelled,
+    OutcomeUnknown,
+}
+
+impl ModelRunState {
+    #[must_use]
+    pub const fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::Completed | Self::Failed | Self::Cancelled | Self::OutcomeUnknown
+        )
+    }
+
+    #[must_use]
+    pub const fn can_transition_to(self, next: Self) -> bool {
+        matches!(
+            (self, next),
+            (Self::Planned, Self::Dispatched | Self::Cancelled)
+                | (
+                    Self::Dispatched,
+                    Self::Completed | Self::Failed | Self::Cancelled | Self::OutcomeUnknown
+                )
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cached_input_tokens: u64,
+    pub reasoning_tokens: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelRun {
+    pub id: ModelRunId,
+    pub invocation_id: InvocationId,
+    pub role: InvocationRole,
+    pub state: ModelRunState,
+    pub provider_request_id: Option<String>,
+    pub response_artifact: Option<ArtifactRef>,
+    pub usage: Option<ModelUsage>,
+    pub started_at: DateTime<Utc>,
+    pub finished_at: Option<DateTime<Utc>>,
+}
+
+impl ModelRun {
+    pub const SCHEMA_VERSION: u32 = 1;
+    pub const TYPE_ID: &'static str = "mcg.model_run.v1";
+
+    /// Validates bounded provider metadata and the run-state timestamp invariant.
+    ///
+    /// # Errors
+    /// Returns a contract error for malformed metadata or an inconsistent run state.
+    pub fn validate(&self) -> Result<(), ContractError> {
+        if let Some(provider_request_id) = &self.provider_request_id {
+            validate_text(
+                provider_request_id,
+                MAX_MANIFEST_TEXT_BYTES,
+                "provider request id is empty, oversized, or contains controls",
+            )?;
+        }
+        if let Some(artifact) = &self.response_artifact {
+            artifact.content_hash.validate()?;
+            validate_text(
+                &artifact.media_type,
+                255,
+                "artifact media type is empty, oversized, or contains controls",
+            )?;
+        }
+        if self.state == ModelRunState::Planned
+            && (self.provider_request_id.is_some()
+                || self.response_artifact.is_some()
+                || self.usage.is_some())
+            || self.state == ModelRunState::Dispatched
+                && (self.response_artifact.is_some() || self.usage.is_some())
+        {
+            return Err(ContractError::InvalidContract(
+                "model run metadata appears before its lifecycle state permits it",
+            ));
+        }
+        let terminal = matches!(
+            self.state,
+            ModelRunState::Completed
+                | ModelRunState::Failed
+                | ModelRunState::Cancelled
+                | ModelRunState::OutcomeUnknown
+        );
+        if terminal != self.finished_at.is_some()
+            || self
+                .finished_at
+                .is_some_and(|finished_at| finished_at < self.started_at)
+        {
+            return Err(ContractError::InvalidContract(
+                "model run state and timestamps are inconsistent",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CriterionResult {
+    pub clause_id: String,
+    pub passed: bool,
+    pub evidence_refs: Vec<SourceRef>,
+    pub detail_hash: ContentHash,
+}
+
+/// A test execution is retained through its governed immutable source reference.
+pub type TestRunRef = SourceRef;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompletionVerdict {
+    Satisfied,
+    NotSatisfied,
+    Inconclusive,
+    Cancelled,
+}
+
+/// Root-owned closure evidence produced only after an independent Verify invocation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CompletionCertificate {
     pub id: CompletionCertificateId,
     pub workflow_id: WorkflowId,
     pub attempt_id: AttemptId,
-    pub verification_evidence: Vec<ContentHash>,
+    pub task_contract: VersionedRef<TaskContractId>,
+    pub work_invocations: Vec<InvocationId>,
+    pub verify_invocations: Vec<InvocationId>,
+    pub criterion_results: Vec<CriterionResult>,
+    pub evidence_refs: Vec<SourceRef>,
+    pub tests_run: Vec<TestRunRef>,
+    pub artifacts: Vec<ArtifactRef>,
+    pub known_untested_paths: Vec<String>,
+    pub unresolved_assumptions: Vec<RecordId>,
+    pub remaining_risks: Vec<RecordId>,
+    pub verdict: CompletionVerdict,
     pub issued_at: DateTime<Utc>,
+}
+
+impl CompletionCertificate {
+    pub const SCHEMA_VERSION: u32 = 1;
+    pub const TYPE_ID: &'static str = "mcg.completion_certificate.v1";
+
+    /// Validates independent Work/Verify lineage and bounded completion evidence.
+    ///
+    /// # Errors
+    /// Returns a contract error for missing verification, duplicate lineage, malformed evidence,
+    /// or a satisfied verdict that contradicts a failed criterion.
+    pub fn validate(&self) -> Result<(), ContractError> {
+        if self.task_contract.version == 0 {
+            return Err(ContractError::InvalidContract(
+                "completion task contract version is zero",
+            ));
+        }
+        self.task_contract.content_hash.validate()?;
+        self.validate_invocation_lineage()?;
+        self.validate_criteria()?;
+        self.validate_evidence()?;
+        self.validate_open_items()
+    }
+
+    fn validate_invocation_lineage(&self) -> Result<(), ContractError> {
+        if self.work_invocations.is_empty() || self.verify_invocations.is_empty() {
+            return Err(ContractError::InvalidContract(
+                "completion requires both Work and independent Verify invocations",
+            ));
+        }
+        validate_item_count(
+            self.work_invocations.len(),
+            "completion contains too many Work invocations",
+        )?;
+        validate_item_count(
+            self.verify_invocations.len(),
+            "completion contains too many Verify invocations",
+        )?;
+        let mut invocations = BTreeSet::new();
+        for invocation in self.work_invocations.iter().chain(&self.verify_invocations) {
+            if !invocations.insert(*invocation) {
+                return Err(ContractError::InvalidContract(
+                    "completion invocation lineage is duplicated or not independent",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_criteria(&self) -> Result<(), ContractError> {
+        validate_item_count(
+            self.criterion_results.len(),
+            "completion contains too many criterion results",
+        )?;
+        let mut clauses = BTreeSet::new();
+        for criterion in &self.criterion_results {
+            validate_text(
+                &criterion.clause_id,
+                MAX_MANIFEST_TEXT_BYTES,
+                "criterion id is empty, oversized, or contains controls",
+            )?;
+            if !clauses.insert(criterion.clause_id.as_str()) {
+                return Err(ContractError::InvalidContract(
+                    "completion criterion result is duplicated",
+                ));
+            }
+            validate_item_count(
+                criterion.evidence_refs.len(),
+                "criterion contains too many evidence references",
+            )?;
+            for source in &criterion.evidence_refs {
+                source.validate()?;
+            }
+            criterion.detail_hash.validate()?;
+        }
+        if self.verdict == CompletionVerdict::Satisfied
+            && self
+                .criterion_results
+                .iter()
+                .any(|criterion| !criterion.passed)
+        {
+            return Err(ContractError::InvalidContract(
+                "satisfied completion contains a failed criterion",
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_evidence(&self) -> Result<(), ContractError> {
+        validate_item_count(
+            self.evidence_refs.len(),
+            "completion contains too many evidence references",
+        )?;
+        validate_item_count(
+            self.tests_run.len(),
+            "completion contains too many test runs",
+        )?;
+        validate_item_count(
+            self.artifacts.len(),
+            "completion contains too many artifacts",
+        )?;
+        for source in self.evidence_refs.iter().chain(&self.tests_run) {
+            source.validate()?;
+        }
+        for artifact in &self.artifacts {
+            artifact.content_hash.validate()?;
+            validate_text(
+                &artifact.media_type,
+                255,
+                "artifact media type is empty, oversized, or contains controls",
+            )?;
+        }
+        Ok(())
+    }
+
+    fn validate_open_items(&self) -> Result<(), ContractError> {
+        validate_item_count(
+            self.known_untested_paths.len(),
+            "completion contains too many untested paths",
+        )?;
+        let mut untested_paths = BTreeSet::new();
+        for path in &self.known_untested_paths {
+            validate_text(
+                path,
+                MAX_MANIFEST_TEXT_BYTES,
+                "untested path is empty, oversized, or contains controls",
+            )?;
+            if !untested_paths.insert(path.as_str()) {
+                return Err(ContractError::InvalidContract(
+                    "completion untested path is duplicated",
+                ));
+            }
+        }
+        validate_item_count(
+            self.unresolved_assumptions.len(),
+            "completion contains too many unresolved assumptions",
+        )?;
+        validate_item_count(
+            self.remaining_risks.len(),
+            "completion contains too many remaining risks",
+        )?;
+        if self
+            .unresolved_assumptions
+            .iter()
+            .collect::<BTreeSet<_>>()
+            .len()
+            != self.unresolved_assumptions.len()
+            || self.remaining_risks.iter().collect::<BTreeSet<_>>().len()
+                != self.remaining_risks.len()
+        {
+            return Err(ContractError::InvalidContract(
+                "completion assumption or risk record is duplicated",
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1055,6 +1642,8 @@ pub enum ContractError {
     UnsupportedCanonicalVersion,
     #[error("payload discriminator or schema version is unsupported")]
     UnsupportedPayloadVersion,
+    #[error("contract invariant failed: {0}")]
+    InvalidContract(&'static str),
 }
 
 #[cfg(test)]
@@ -1370,6 +1959,190 @@ mod tests {
         }
     }
 
+    #[test]
+    fn stage_five_reconstruction_contracts_round_trip_exactly() {
+        let attempt_id = AttemptId(fixture_uuid("00000000-0000-4000-8000-000000000101"));
+        let context = fixture_context_manifest(attempt_id);
+        let invocation = fixture_invocation_manifest(attempt_id, &context);
+        let run = ModelRun {
+            id: ModelRunId(fixture_uuid("00000000-0000-4000-8000-000000000301")),
+            invocation_id: invocation.id,
+            role: InvocationRole::Work,
+            state: ModelRunState::Completed,
+            provider_request_id: Some("fake-provider-request-1".to_owned()),
+            response_artifact: Some(ArtifactRef {
+                content_hash: fixture_hash("response-artifact"),
+                media_type: "application/json".to_owned(),
+                byte_length: 128,
+            }),
+            usage: Some(ModelUsage {
+                input_tokens: 21,
+                output_tokens: 8,
+                cached_input_tokens: 0,
+                reasoning_tokens: 2,
+            }),
+            started_at: fixture_time("2026-08-30T12:00:00Z"),
+            finished_at: Some(fixture_time("2026-08-30T12:00:01Z")),
+        };
+        let certificate = fixture_completion_certificate(attempt_id, invocation.id);
+
+        context.validate().unwrap();
+        invocation.validate().unwrap();
+        run.validate().unwrap();
+        certificate.validate().unwrap();
+
+        let expected: Value = serde_json::from_str(include_str!(
+            "../fixtures/stage-five-reconstruction-v1.expected.json"
+        ))
+        .expect("checked-in Stage 5 reconstruction fixture hashes");
+        for (domain, expected_key, value) in [
+            (
+                "ContextManifest",
+                "context_manifest_blake3_256",
+                serde_json::to_value(&context).unwrap(),
+            ),
+            (
+                "InvocationManifest",
+                "invocation_manifest_blake3_256",
+                serde_json::to_value(&invocation).unwrap(),
+            ),
+            (
+                "ModelRun",
+                "model_run_blake3_256",
+                serde_json::to_value(&run).unwrap(),
+            ),
+            (
+                "CompletionCertificate",
+                "completion_certificate_blake3_256",
+                serde_json::to_value(&certificate).unwrap(),
+            ),
+        ] {
+            let hash = VersionedPayload::canonical_v1(
+                StableTypeId::parse("test.stage_five_fixture.v1").unwrap(),
+                &value,
+            )
+            .unwrap()
+            .content_hash(domain)
+            .unwrap();
+            assert_eq!(hash.digest_hex, expected[expected_key].as_str().unwrap());
+        }
+
+        for value in [
+            serde_json::to_value(&context).unwrap(),
+            serde_json::to_value(&invocation).unwrap(),
+            serde_json::to_value(&run).unwrap(),
+            serde_json::to_value(&certificate).unwrap(),
+        ] {
+            let bytes = canonical_cbor_v1(&value).unwrap();
+            let decoded = decode_canonical_cbor_v1(&bytes).unwrap();
+            assert_eq!(decoded, value);
+            assert_eq!(canonical_cbor_v1(&decoded).unwrap(), bytes);
+        }
+    }
+
+    #[test]
+    fn context_manifest_rejects_inexact_order_tokens_and_unbounded_transformations() {
+        let attempt_id = AttemptId::new();
+        let mut context = fixture_context_manifest(attempt_id);
+        context.selected_sources[0].placement = 1;
+        assert_eq!(
+            context.validate(),
+            Err(ContractError::InvalidContract(
+                "context placements are not contiguous and ordered"
+            ))
+        );
+
+        let mut context = fixture_context_manifest(attempt_id);
+        context.approximate_tokens += 1;
+        assert_eq!(
+            context.validate(),
+            Err(ContractError::InvalidContract(
+                "context approximate token total does not match its selections"
+            ))
+        );
+
+        let mut context = fixture_context_manifest(attempt_id);
+        context.selected_sources[0].transformations =
+            vec![fixture_source("transform"); MAX_CONTEXT_TRANSFORMATIONS + 1];
+        assert_eq!(
+            context.validate(),
+            Err(ContractError::InvalidContract(
+                "context selection contains too many transformations"
+            ))
+        );
+    }
+
+    #[test]
+    fn invocation_and_model_run_reject_ambiguous_or_unbounded_evidence() {
+        let attempt_id = AttemptId::new();
+        let context = fixture_context_manifest(attempt_id);
+        let mut invocation = fixture_invocation_manifest(attempt_id, &context);
+        invocation
+            .available_tool_manifests
+            .push(invocation.available_tool_manifests[0].clone());
+        assert_eq!(
+            invocation.validate(),
+            Err(ContractError::InvalidContract(
+                "available tool manifest is duplicated"
+            ))
+        );
+
+        let mut invocation = fixture_invocation_manifest(attempt_id, &context);
+        invocation.resolved_provider.locator.clear();
+        assert_eq!(
+            invocation.validate(),
+            Err(ContractError::InvalidContract(
+                "source locator is empty, oversized, or contains control characters"
+            ))
+        );
+
+        let run = ModelRun {
+            id: ModelRunId::new(),
+            invocation_id: invocation.id,
+            role: InvocationRole::Work,
+            state: ModelRunState::Dispatched,
+            provider_request_id: None,
+            response_artifact: None,
+            usage: None,
+            started_at: fixture_time("2026-08-30T12:00:00Z"),
+            finished_at: Some(fixture_time("2026-08-30T12:00:01Z")),
+        };
+        assert_eq!(
+            run.validate(),
+            Err(ContractError::InvalidContract(
+                "model run state and timestamps are inconsistent"
+            ))
+        );
+
+        assert!(ModelRunState::Planned.can_transition_to(ModelRunState::Dispatched));
+        assert!(ModelRunState::Dispatched.can_transition_to(ModelRunState::Completed));
+        assert!(!ModelRunState::Completed.can_transition_to(ModelRunState::Dispatched));
+        assert!(ModelRunState::OutcomeUnknown.is_terminal());
+    }
+
+    #[test]
+    fn completion_certificate_requires_independent_verify_and_truthful_verdict() {
+        let attempt_id = AttemptId::new();
+        let work_invocation = InvocationId::new();
+        let mut certificate = fixture_completion_certificate(attempt_id, work_invocation);
+        certificate.verify_invocations[0] = work_invocation;
+        assert_eq!(
+            certificate.validate(),
+            Err(ContractError::InvalidContract(
+                "completion invocation lineage is duplicated or not independent"
+            ))
+        );
+
+        let mut certificate = fixture_completion_certificate(attempt_id, work_invocation);
+        certificate.criterion_results[0].passed = false;
+        assert_eq!(
+            certificate.validate(),
+            Err(ContractError::InvalidContract(
+                "satisfied completion contains a failed criterion"
+            ))
+        );
+    }
+
     fn fixture_hash(label: &str) -> ContentHash {
         VersionedPayload::canonical_v1(
             StableTypeId::parse("test.fixture_hash.v1").unwrap(),
@@ -1378,6 +2151,156 @@ mod tests {
         .unwrap()
         .content_hash("TestFixture")
         .unwrap()
+    }
+
+    fn fixture_uuid(value: &str) -> Uuid {
+        Uuid::parse_str(value).expect("fixed test UUID")
+    }
+
+    fn fixture_time(value: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(value)
+            .expect("fixed RFC 3339 timestamp")
+            .with_timezone(&Utc)
+    }
+
+    fn fixture_payload(type_id: &str, label: &str) -> VersionedPayload {
+        VersionedPayload::canonical_v1(
+            StableTypeId::parse(type_id).unwrap(),
+            &json!({"label": label}),
+        )
+        .unwrap()
+    }
+
+    fn fixture_source(label: &str) -> SourceRef {
+        SourceRef {
+            source_type: StableTypeId::parse("test.source.v1").unwrap(),
+            locator: format!("artifact://{label}"),
+            content_hash: fixture_hash(label),
+        }
+    }
+
+    fn fixture_context_manifest(attempt_id: AttemptId) -> ContextManifest {
+        ContextManifest {
+            id: ContextManifestId(fixture_uuid("00000000-0000-4000-8000-000000000201")),
+            attempt_id,
+            selected_sources: vec![
+                ContextSelection {
+                    source: fixture_source("task"),
+                    perspective: Some(fixture_source("owner-perspective")),
+                    influence: fixture_payload("test.influence.v1", "trusted-user-input"),
+                    transformations: vec![fixture_source("task-summary")],
+                    placement: 0,
+                    approximate_tokens: 13,
+                },
+                ContextSelection {
+                    source: fixture_source("repository-state"),
+                    perspective: None,
+                    influence: fixture_payload("test.influence.v1", "local-observation"),
+                    transformations: Vec::new(),
+                    placement: 1,
+                    approximate_tokens: 8,
+                },
+            ],
+            selection_policy: fixture_payload("test.context_policy.v1", "bounded-progressive"),
+            expansion_steps: vec![ContextExpansionStep {
+                sequence: 0,
+                reason: StableTypeId::parse("test.expansion_reason.v1").unwrap(),
+                added_sources: vec![fixture_source("repository-state")],
+            }],
+            approximate_tokens: 21,
+        }
+    }
+
+    fn fixture_invocation_manifest(
+        attempt_id: AttemptId,
+        context: &ContextManifest,
+    ) -> InvocationManifest {
+        let context_hash = VersionedPayload::canonical_v1(
+            StableTypeId::parse(ContextManifest::TYPE_ID).unwrap(),
+            &serde_json::to_value(context).unwrap(),
+        )
+        .unwrap()
+        .content_hash("ContextManifest")
+        .unwrap();
+        InvocationManifest {
+            id: InvocationId(fixture_uuid("00000000-0000-4000-8000-000000000401")),
+            role: InvocationRole::Work,
+            attempt_id,
+            task_contract: VersionedRef {
+                id: TaskContractId(fixture_uuid("00000000-0000-4000-8000-000000000001")),
+                version: 1,
+                content_hash: fixture_hash("task-contract"),
+            },
+            runtime_identity: RuntimeIdentity {
+                instance_id: RuntimeInstanceId(fixture_uuid(
+                    "00000000-0000-4000-8000-000000000501",
+                )),
+                build_hash: fixture_hash("runtime-build"),
+                protocol_version: PROTOCOL_V1,
+                started_at: fixture_time("2026-08-30T11:59:00Z"),
+            },
+            cognitive_configuration: fixture_hash("cognitive-configuration"),
+            role_manifest: fixture_hash("work-role"),
+            prompt_bundle: fixture_hash("prompt-bundle"),
+            context_manifest: context_hash,
+            model_route: fixture_payload("test.model_route.v1", "deterministic-fake"),
+            resolved_provider: fixture_source("fake-provider"),
+            resolved_model: fixture_source("fake-model-v1"),
+            observed_model_fingerprint: Some("fake-model-v1-build-1".to_owned()),
+            sampling: fixture_payload("test.sampling.v1", "temperature-zero"),
+            reasoning: Some(fixture_payload("test.reasoning.v1", "bounded")),
+            available_tool_manifests: vec![fixture_hash("read-only-tool")],
+            selected_skill_manifests: vec![fixture_hash("coding-skill")],
+            authority_envelope: fixture_source("authority-envelope"),
+            egress_permit: None,
+            repository_revision: Some(fixture_hash("repository-revision")),
+            environment: fixture_source("isolated-worktree"),
+            runtime_build: fixture_hash("runtime-build"),
+            request_hash: fixture_hash("provider-request"),
+            response_hash: Some(fixture_hash("provider-response")),
+        }
+    }
+
+    fn fixture_completion_certificate(
+        attempt_id: AttemptId,
+        work_invocation: InvocationId,
+    ) -> CompletionCertificate {
+        CompletionCertificate {
+            id: CompletionCertificateId(fixture_uuid("00000000-0000-4000-8000-000000000601")),
+            workflow_id: WorkflowId(fixture_uuid("00000000-0000-4000-8000-000000000701")),
+            attempt_id,
+            task_contract: VersionedRef {
+                id: TaskContractId(fixture_uuid("00000000-0000-4000-8000-000000000001")),
+                version: 1,
+                content_hash: fixture_hash("task-contract"),
+            },
+            work_invocations: vec![work_invocation],
+            verify_invocations: vec![InvocationId(fixture_uuid(
+                "00000000-0000-4000-8000-000000000402",
+            ))],
+            criterion_results: vec![CriterionResult {
+                clause_id: "acceptance-1".to_owned(),
+                passed: true,
+                evidence_refs: vec![fixture_source("verification-evidence")],
+                detail_hash: fixture_hash("criterion-detail"),
+            }],
+            evidence_refs: vec![fixture_source("completion-evidence")],
+            tests_run: vec![fixture_source("test-run")],
+            artifacts: vec![ArtifactRef {
+                content_hash: fixture_hash("delivered-artifact"),
+                media_type: "application/octet-stream".to_owned(),
+                byte_length: 64,
+            }],
+            known_untested_paths: vec!["provider rate-limit retry".to_owned()],
+            unresolved_assumptions: vec![RecordId(fixture_uuid(
+                "00000000-0000-4000-8000-000000000801",
+            ))],
+            remaining_risks: vec![RecordId(fixture_uuid(
+                "00000000-0000-4000-8000-000000000802",
+            ))],
+            verdict: CompletionVerdict::Satisfied,
+            issued_at: fixture_time("2026-08-30T12:00:02Z"),
+        }
     }
 
     fn fixture_policy(label: &str) -> PolicyBinding {

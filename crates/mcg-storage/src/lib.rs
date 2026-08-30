@@ -34,6 +34,7 @@ mod agents;
 mod backup;
 mod backup_secrets;
 mod experiments;
+mod invocations;
 mod mcp;
 mod organization_sharing;
 mod platform;
@@ -73,13 +74,14 @@ pub use experiments::{
     AutomaticExperimentDisposition, AutomaticExperimentOutcome, AutomaticSupervisionMutation,
     CandidateRevisionMutation, ExperimentMutation, GovernorProposalMutation,
 };
+pub use invocations::{InvocationInspection, ModelRunRecord};
 pub use plugins::PluginRecoveryReport;
 pub use scheduler::{ScheduleClaim, ScheduleWakeMutation};
 pub use shadow_workspaces::ShadowWorkspaceMutation;
 pub use workflows::{TaskContractHead, WorkflowRecoveryReport, task_contract_content_hash};
 
 type EventRow = (i64, String, i64, String, Option<String>, String, String);
-pub const STORAGE_SCHEMA_VERSION: i64 = 55;
+pub const STORAGE_SCHEMA_VERSION: i64 = 56;
 
 const MIGRATION_1: &str = r"
 CREATE TABLE IF NOT EXISTS events (
@@ -1926,6 +1928,145 @@ CREATE UNIQUE INDEX action_envelopes_one_compensation
     WHERE compensates_action_id IS NOT NULL;
 ";
 
+const MIGRATION_56: &str = r"
+CREATE TABLE IF NOT EXISTS context_manifests (
+    context_manifest_id TEXT PRIMARY KEY,
+    workflow_attempt_id TEXT NOT NULL,
+    type_id TEXT NOT NULL,
+    schema_version INTEGER NOT NULL CHECK(schema_version > 0),
+    content_hash_json TEXT NOT NULL UNIQUE,
+    manifest_json TEXT NOT NULL,
+    persisted_at TEXT NOT NULL,
+    FOREIGN KEY(workflow_attempt_id) REFERENCES workflow_attempts(attempt_id)
+);
+CREATE INDEX IF NOT EXISTS context_manifests_attempt_persisted
+    ON context_manifests(workflow_attempt_id, persisted_at, context_manifest_id);
+CREATE TABLE IF NOT EXISTS invocation_manifests (
+    invocation_id TEXT PRIMARY KEY,
+    role TEXT NOT NULL CHECK(role IN ('work', 'verify')),
+    workflow_attempt_id TEXT NOT NULL,
+    task_contract_id TEXT NOT NULL,
+    task_contract_version INTEGER NOT NULL,
+    context_manifest_hash_json TEXT NOT NULL,
+    type_id TEXT NOT NULL,
+    schema_version INTEGER NOT NULL CHECK(schema_version > 0),
+    content_hash_json TEXT NOT NULL UNIQUE,
+    manifest_json TEXT NOT NULL,
+    persisted_at TEXT NOT NULL,
+    FOREIGN KEY(workflow_attempt_id) REFERENCES workflow_attempts(attempt_id),
+    FOREIGN KEY(task_contract_id, task_contract_version)
+        REFERENCES task_contract_versions(task_contract_id, version),
+    FOREIGN KEY(context_manifest_hash_json)
+        REFERENCES context_manifests(content_hash_json)
+);
+CREATE INDEX IF NOT EXISTS invocation_manifests_attempt_persisted
+    ON invocation_manifests(workflow_attempt_id, persisted_at, invocation_id);
+CREATE TABLE IF NOT EXISTS model_run_versions (
+    model_run_id TEXT NOT NULL,
+    revision INTEGER NOT NULL CHECK(revision > 0),
+    invocation_id TEXT NOT NULL,
+    role TEXT NOT NULL CHECK(role IN ('work', 'verify')),
+    state TEXT NOT NULL,
+    content_hash_json TEXT NOT NULL,
+    run_json TEXT NOT NULL,
+    recorded_at TEXT NOT NULL,
+    PRIMARY KEY(model_run_id, revision),
+    FOREIGN KEY(invocation_id) REFERENCES invocation_manifests(invocation_id)
+);
+CREATE TABLE IF NOT EXISTS model_run_heads (
+    model_run_id TEXT PRIMARY KEY,
+    invocation_id TEXT NOT NULL UNIQUE,
+    current_revision INTEGER NOT NULL CHECK(current_revision > 0),
+    FOREIGN KEY(model_run_id, current_revision)
+        REFERENCES model_run_versions(model_run_id, revision),
+    FOREIGN KEY(invocation_id) REFERENCES invocation_manifests(invocation_id)
+);
+CREATE INDEX IF NOT EXISTS model_run_versions_invocation_revision
+    ON model_run_versions(invocation_id, revision);
+CREATE TABLE IF NOT EXISTS completion_certificates (
+    completion_certificate_id TEXT PRIMARY KEY,
+    workflow_id TEXT NOT NULL,
+    workflow_attempt_id TEXT NOT NULL,
+    task_contract_id TEXT NOT NULL,
+    task_contract_version INTEGER NOT NULL,
+    verdict TEXT NOT NULL,
+    type_id TEXT NOT NULL,
+    schema_version INTEGER NOT NULL CHECK(schema_version > 0),
+    content_hash_json TEXT NOT NULL UNIQUE,
+    certificate_json TEXT NOT NULL,
+    issued_at TEXT NOT NULL,
+    persisted_at TEXT NOT NULL,
+    FOREIGN KEY(workflow_attempt_id) REFERENCES workflow_attempts(attempt_id),
+    FOREIGN KEY(task_contract_id, task_contract_version)
+        REFERENCES task_contract_versions(task_contract_id, version)
+);
+CREATE INDEX IF NOT EXISTS completion_certificates_attempt_issued
+    ON completion_certificates(workflow_attempt_id, issued_at, completion_certificate_id);
+CREATE TABLE IF NOT EXISTS completion_certificate_invocations (
+    completion_certificate_id TEXT NOT NULL,
+    invocation_id TEXT NOT NULL,
+    role TEXT NOT NULL CHECK(role IN ('work', 'verify')),
+    ordinal INTEGER NOT NULL CHECK(ordinal >= 0),
+    PRIMARY KEY(completion_certificate_id, role, ordinal),
+    UNIQUE(completion_certificate_id, invocation_id),
+    FOREIGN KEY(completion_certificate_id)
+        REFERENCES completion_certificates(completion_certificate_id),
+    FOREIGN KEY(invocation_id) REFERENCES invocation_manifests(invocation_id)
+);
+CREATE TRIGGER IF NOT EXISTS context_manifests_no_update
+BEFORE UPDATE ON context_manifests BEGIN
+    SELECT RAISE(FAIL, 'context manifests are immutable reconstruction evidence');
+END;
+CREATE TRIGGER IF NOT EXISTS context_manifests_no_delete
+BEFORE DELETE ON context_manifests BEGIN
+    SELECT RAISE(FAIL, 'context manifests are durable reconstruction evidence');
+END;
+CREATE TRIGGER IF NOT EXISTS invocation_manifests_no_update
+BEFORE UPDATE ON invocation_manifests BEGIN
+    SELECT RAISE(FAIL, 'invocation manifests are immutable reconstruction evidence');
+END;
+CREATE TRIGGER IF NOT EXISTS invocation_manifests_no_delete
+BEFORE DELETE ON invocation_manifests BEGIN
+    SELECT RAISE(FAIL, 'invocation manifests are durable reconstruction evidence');
+END;
+CREATE TRIGGER IF NOT EXISTS model_run_versions_no_update
+BEFORE UPDATE ON model_run_versions BEGIN
+    SELECT RAISE(FAIL, 'model run versions are immutable history');
+END;
+CREATE TRIGGER IF NOT EXISTS model_run_versions_no_delete
+BEFORE DELETE ON model_run_versions BEGIN
+    SELECT RAISE(FAIL, 'model run versions are durable history');
+END;
+CREATE TRIGGER IF NOT EXISTS model_run_heads_monotonic_update
+BEFORE UPDATE ON model_run_heads
+WHEN NEW.model_run_id <> OLD.model_run_id
+  OR NEW.invocation_id <> OLD.invocation_id
+  OR NEW.current_revision <> OLD.current_revision + 1
+BEGIN
+    SELECT RAISE(FAIL, 'model run head must advance exactly one immutable revision');
+END;
+CREATE TRIGGER IF NOT EXISTS model_run_heads_no_delete
+BEFORE DELETE ON model_run_heads BEGIN
+    SELECT RAISE(FAIL, 'model run heads cannot be deleted');
+END;
+CREATE TRIGGER IF NOT EXISTS completion_certificates_no_update
+BEFORE UPDATE ON completion_certificates BEGIN
+    SELECT RAISE(FAIL, 'completion certificates are immutable evidence');
+END;
+CREATE TRIGGER IF NOT EXISTS completion_certificates_no_delete
+BEFORE DELETE ON completion_certificates BEGIN
+    SELECT RAISE(FAIL, 'completion certificates are durable evidence');
+END;
+CREATE TRIGGER IF NOT EXISTS completion_certificate_invocations_no_update
+BEFORE UPDATE ON completion_certificate_invocations BEGIN
+    SELECT RAISE(FAIL, 'completion invocation lineage is immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS completion_certificate_invocations_no_delete
+BEFORE DELETE ON completion_certificate_invocations BEGIN
+    SELECT RAISE(FAIL, 'completion invocation lineage is durable');
+END;
+";
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RootOwnership {
     pub runtime_identity: RuntimeIdentity,
@@ -2197,6 +2338,7 @@ impl SqliteEventStore {
             (53_i64, MIGRATION_53),
             (54_i64, MIGRATION_54),
             (55_i64, MIGRATION_55),
+            (56_i64, MIGRATION_56),
         ] {
             let applied = self.connection.query_row(
                 "SELECT EXISTS(SELECT 1 FROM mcg_schema WHERE version = ?1)",
@@ -5967,7 +6109,13 @@ mod tests {
             store
                 .connection
                 .execute_batch(
-                    "DROP TABLE reconciliation_jobs;
+                    "DROP TABLE completion_certificate_invocations;
+                     DROP TABLE completion_certificates;
+                     DROP TABLE model_run_heads;
+                     DROP TABLE model_run_versions;
+                     DROP TABLE invocation_manifests;
+                     DROP TABLE context_manifests;
+                     DROP TABLE reconciliation_jobs;
                      DROP TABLE action_events;
                      DROP TABLE action_receipts;
                      DROP TABLE action_executions;
@@ -5979,7 +6127,7 @@ mod tests {
                      DROP TABLE task_contract_heads;
                      DROP TABLE task_contract_versions;
                      DROP TABLE root_ownership;
-                     DELETE FROM mcg_schema WHERE version IN (51, 52, 53, 54, 55);",
+                     DELETE FROM mcg_schema WHERE version IN (51, 52, 53, 54, 55, 56);",
                 )
                 .expect("downgrade fixture to schema 50");
         }
