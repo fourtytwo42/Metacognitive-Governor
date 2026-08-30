@@ -1964,6 +1964,10 @@ fn git_output(root: &Path, arguments: &[&str]) -> Result<Vec<u8>, StorageError> 
 fn git_with_input(root: &Path, arguments: &[&str], input: &[u8]) -> Result<(), StorageError> {
     for attempt in 0..3 {
         let mut child = Command::new("git")
+            // Integration patches are authoritative byte streams. Never let a
+            // host-global checkout preference rewrite LF to CRLF while applying
+            // an accepted specialist or cloud patch.
+            .args(["-c", "core.autocrlf=false"])
             .args(arguments)
             .current_dir(root)
             .stdin(Stdio::piped())
@@ -30535,6 +30539,27 @@ mod tests {
         assert!(patch.contains("created by coder"));
         assert!(!patch.contains("chrome-temp"));
         assert!(!patch.contains("site-preview.png"));
+    }
+
+    #[test]
+    fn git_patch_application_preserves_lf_bytes_when_host_autocrlf_is_enabled() {
+        let repository = tempfile::tempdir().expect("temporary repository");
+        git_output(repository.path(), &["init", "-b", "main"]).expect("initialize repository");
+        git_output(repository.path(), &["config", "core.autocrlf", "true"])
+            .expect("enable repository autocrlf");
+        let patch = b"diff --git a/exact.txt b/exact.txt\nnew file mode 100644\n--- /dev/null\n+++ b/exact.txt\n@@ -0,0 +1 @@\n+exact bytes\n";
+
+        git_with_input(
+            repository.path(),
+            &["apply", "--whitespace=nowarn", "-"],
+            patch,
+        )
+        .expect("apply byte-stable patch");
+
+        assert_eq!(
+            fs::read(repository.path().join("exact.txt")).expect("read applied file"),
+            b"exact bytes\n"
+        );
     }
 
     #[test]

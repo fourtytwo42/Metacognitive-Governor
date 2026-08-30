@@ -2,6 +2,16 @@
 
 Durable project context lives here. Update this file whenever information should survive chat context compression or future agent handoff.
 
+### 2026-08-30 - Stage 2 byte-stable Windows integration correction
+
+- Context: Exact clean `6ca368c300891186c58b9eb4f7166ed9a369e7b4` Windows installed qualification proved the Ask-mode storage deadlock fix: the revision-bound apply returned, delegation state became `completed`, the integration journal became `applied`, one owner intervention was recorded on both delegation and batch, and the managed worktree was removed. The final exact-byte assertion then found the linked-project file was 34 bytes ending `0D0A`, although the accepted report/worktree evidence proved 33 bytes ending `0A`.
+- Diagnosis: The Windows host/repository had `core.autocrlf=true`; `git apply` rewrote the accepted LF-only text patch during integration. Governance cannot claim evidence-bound integration when host-global checkout preferences change bytes after acceptance.
+- Decision: All runtime patch application through `git_with_input` now passes a per-invocation `-c core.autocrlf=false`. This covers specialist integration, cloud diff apply, and managed baseline patch application without changing the owner's persisted Git configuration.
+- Files: `crates/mcg-runtime/src/lib.rs`, `docs/NewPRD/STAGE_2_PROTECTED_ROOT.md`, `docs/testing/strategy.md`, and `MEMORY.md`.
+- Commands/tests: Complete `mcg-runtime` passes 108 active tests with two explicit Windows Sandbox qualifications ignored; the complete Root-owned `mcg-api` compatibility suite passes 102/102; `mcg-agent-mcp`, documentation, packaging, formatting, and diff gates pass. Strict Rust 1.93 Clippy still reaches the documented repository-wide backlog and reports no finding at the changed `git_with_input` helper or its regression.
+- Result: `6ca368c` is rejected as a release candidate but supplies positive evidence for report acceptance, explicit owner apply, terminal state, intervention accounting, journal completion, and cleanup. The byte-stable correction is fully affected-test green and requires a new exact package/UAT cycle.
+- Follow-up: Commit/push, rebuild exact packages, and repeat Windows installed provider UAT through exact-byte apply/restart before resuming Linux/macOS qualification.
+
 ### 2026-08-30 - Stage 2 owner-apply storage deadlock correction
 
 - Context: A clean exact-`fcaf607` Windows installed run with pinned Codex 0.150.1 proved the isolated Coder grant works: one accepted hashed `report_result`, a completed coordination batch, and an exact verified 33-byte result in the managed worktree. The Chat Agent correctly returned Review/Apply and the linked project remained unchanged under `Ask`. After the verifier was corrected to perform explicit owner apply, the apply request and all later API calls timed out.

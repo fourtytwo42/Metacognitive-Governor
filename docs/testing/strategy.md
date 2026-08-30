@@ -336,6 +336,13 @@ owner intervention, exact linked-project bytes, managed-worktree removal, and th
 same report hash and integration state after Root restart. A focused runtime test
 also guards the read-then-save storage lifetime that previously deadlocked this
 owner apply path.
+Patch-application regression coverage enables repository `core.autocrlf=true`,
+applies an LF-only patch through the runtime helper, and requires identical LF-only
+bytes. Every governed apply uses a per-command `core.autocrlf=false` override so
+host-global newline preferences cannot alter accepted evidence.
+At the byte-stability checkpoint, the complete runtime suite passes 108 active
+tests with two explicit Windows Sandbox qualifications ignored, and the complete
+Root-owned compatibility API suite passes 102/102 before exact package rebuild.
 The Chat/Coordinator handoff crosses only the executable-pinned, per-thread
 `mcg_agent` MCP bridge, whose Codex server-scoped tool approval is explicit; tests
 must prove this bridge works while the role thread remains read-only and must not
