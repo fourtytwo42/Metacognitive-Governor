@@ -68,6 +68,7 @@ import { scrollChainByDelta, wheelDeltaToPixels } from "./scroll-chain";
 
 export const CHAT_FOLLOW_THRESHOLD_PX = 96;
 const CHATGPT_SITES_LIBRARY_ENABLED = true;
+const DEVELOPER_GOVERNANCE_WARNING = "Developer mode remains governed: protected policy, evaluator fixtures, Root authority, signing keys, secrets, direct database writes, and trust bypasses are unavailable or read-only.";
 
 export function isChatViewportNearBottom(
   viewport: Pick<HTMLElement, "scrollHeight" | "scrollTop" | "clientHeight">,
@@ -10064,7 +10065,7 @@ export function App() {
                 <input type="radio" name="interface-complexity" value={complexity} checked={userSettings.interface_complexity === complexity} disabled={settingsBusy} onChange={() => void setInterfaceComplexity(complexity)} />
                 <span><strong>{complexity[0].toUpperCase() + complexity.slice(1)}</strong><small>{complexity === "simple" ? "Everyday chat, projects, approvals, progress, and verified outcomes." : complexity === "advanced" ? "Practical engineering controls, commands, diffs, hooks, policies, and detailed verification." : "Under-the-hood contracts, manifests, lineage, experiments, IPC, sandbox, and diagnostic state."}</small></span>
               </label>)}
-              {userSettings.interface_complexity === "developer" && <p className="form-note">Developer mode remains governed: protected policy, evaluator fixtures, Root authority, signing keys, secrets, direct database writes, and trust bypasses are unavailable or read-only.</p>}
+              {userSettings.interface_complexity === "developer" && <p aria-label={DEVELOPER_GOVERNANCE_WARNING} className="form-note" role="alert" tabIndex={0}>{DEVELOPER_GOVERNANCE_WARNING}</p>}
             </fieldset>
             {advanced && <label className="check-row">
               <input
