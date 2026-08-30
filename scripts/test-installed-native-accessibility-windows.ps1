@@ -4,6 +4,7 @@ param(
     [string]$ReviewedTopologyMarker,
     [string]$ServiceHost,
     [string]$TokenFile,
+    [switch]$Stage2RuntimeOnly,
     [int]$TimeoutSeconds = 15
 )
 
@@ -53,7 +54,11 @@ public static class McgNativeWindow {
 
     private const uint INPUT_KEYBOARD = 1;
     private const uint KEYEVENTF_KEYUP = 0x0002;
+    private const uint MOUSEEVENTF_LEFTDOWN = 0x0002;
+    private const uint MOUSEEVENTF_LEFTUP = 0x0004;
     private const ushort VK_TAB = 0x09;
+    private const ushort VK_CONTROL = 0x11;
+    private const ushort VK_OEM_COMMA = 0xBC;
     private const int SW_RESTORE = 9;
 
     [DllImport("user32.dll")]
@@ -127,6 +132,48 @@ public static class McgNativeWindow {
         SendKey(VK_TAB, "Tab");
     }
 
+    public static void SendControlComma() {
+        int inputSize = Marshal.SizeOf(typeof(INPUT));
+        int expectedSize = IntPtr.Size == 8 ? 40 : 28;
+        if (inputSize != expectedSize) {
+            throw new InvalidOperationException("Unexpected Win32 INPUT size " + inputSize + "; expected " + expectedSize + ".");
+        }
+        INPUT[] inputs = new INPUT[4];
+        inputs[0].type = INPUT_KEYBOARD;
+        inputs[0].data.keyboard.virtualKey = VK_CONTROL;
+        inputs[1].type = INPUT_KEYBOARD;
+        inputs[1].data.keyboard.virtualKey = VK_OEM_COMMA;
+        inputs[2].type = INPUT_KEYBOARD;
+        inputs[2].data.keyboard.virtualKey = VK_OEM_COMMA;
+        inputs[2].data.keyboard.flags = KEYEVENTF_KEYUP;
+        inputs[3].type = INPUT_KEYBOARD;
+        inputs[3].data.keyboard.virtualKey = VK_CONTROL;
+        inputs[3].data.keyboard.flags = KEYEVENTF_KEYUP;
+        uint sent = SendInput((uint)inputs.Length, inputs, inputSize);
+        if (sent != inputs.Length) {
+            int error = Marshal.GetLastWin32Error();
+            throw new Win32Exception(error, "SendInput did not deliver Ctrl+,; input size " + inputSize + ".");
+        }
+    }
+
+    public static void ClickLeft() {
+        int inputSize = Marshal.SizeOf(typeof(INPUT));
+        int expectedSize = IntPtr.Size == 8 ? 40 : 28;
+        if (inputSize != expectedSize) {
+            throw new InvalidOperationException("Unexpected Win32 INPUT size " + inputSize + "; expected " + expectedSize + ".");
+        }
+        INPUT[] inputs = new INPUT[2];
+        inputs[0].type = 0;
+        inputs[0].data.mouse.flags = MOUSEEVENTF_LEFTDOWN;
+        inputs[1].type = 0;
+        inputs[1].data.mouse.flags = MOUSEEVENTF_LEFTUP;
+        uint sent = SendInput((uint)inputs.Length, inputs, inputSize);
+        if (sent != inputs.Length) {
+            int error = Marshal.GetLastWin32Error();
+            throw new Win32Exception(error, "SendInput did not deliver the left click; input size " + inputSize + ".");
+        }
+    }
+
 }
 "@
 
@@ -187,6 +234,24 @@ function Find-Element(
     throw "UI Automation did not expose $($Names -join ' or ') as $($Types -join ' or ')."
 }
 
+function Find-ElementPrefix(
+    [System.Windows.Automation.AutomationElement]$Root,
+    [string]$Prefix,
+    [string[]]$Types,
+    [DateTime]$Deadline
+) {
+    do {
+        foreach ($item in Get-Snapshots $Root) {
+            if ($item.Name.StartsWith($Prefix, [StringComparison]::Ordinal) `
+                -and ($Types.Count -eq 0 -or $item.Type -in $Types)) {
+                return $item
+            }
+        }
+        Start-Sleep -Milliseconds 100
+    } while ([DateTime]::UtcNow -lt $Deadline)
+    throw "UI Automation did not expose a control beginning with '$Prefix' as $($Types -join ' or ')."
+}
+
 function Wait-Focused(
     [System.Windows.Automation.AutomationElement]$Root,
     [string]$Name
@@ -224,11 +289,28 @@ function Wait-FocusedPrefix(
 function Invoke-Accessible([System.Windows.Automation.AutomationElement]$Element) {
     $pattern = $null
     if ($Element.TryGetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern, [ref]$pattern)) {
-        ([System.Windows.Automation.InvokePattern]$pattern).Invoke()
-        return
+        try {
+            ([System.Windows.Automation.InvokePattern]$pattern).Invoke()
+            return
+        } catch {
+            # WebView2 can advertise InvokePattern for a native-backed HTML
+            # control, perform the action, and then report a stale-provider
+            # error because React replaced the element. The caller's next
+            # state assertion determines whether the action actually landed.
+            return
+        }
     }
     if ($Element.TryGetCurrentPattern([System.Windows.Automation.TogglePattern]::Pattern, [ref]$pattern)) {
-        ([System.Windows.Automation.TogglePattern]$pattern).Toggle()
+        try {
+            ([System.Windows.Automation.TogglePattern]$pattern).Toggle()
+            return
+        } catch {
+            return
+        }
+    }
+    if ($Element.Current.IsKeyboardFocusable) {
+        $Element.SetFocus()
+        [Windows.Forms.SendKeys]::SendWait("{ENTER}")
         return
     }
     throw "UI Automation exposed no invokable pattern for '$($Element.Current.Name)'."
@@ -282,6 +364,46 @@ function Select-AccessibleOption(
     throw "UI Automation did not expose the '$OptionName' autonomy option as selectable."
 }
 
+function Wait-InterfaceComplexity([string]$Expected) {
+    if ([string]::IsNullOrWhiteSpace($ServiceHost) -or [string]::IsNullOrWhiteSpace($TokenFile)) {
+        throw "Three-level native UAT requires ServiceHost and TokenFile."
+    }
+    $token = (Get-Content -LiteralPath $TokenFile -Raw).Trim()
+    if ([string]::IsNullOrWhiteSpace($token)) { throw "The native UAT loopback token is empty." }
+    $headers = @{ Authorization = "Bearer $token" }
+    $deadline = Get-Deadline
+    do {
+        $settings = Invoke-RestMethod -Method Get -Uri "$($ServiceHost.TrimEnd('/'))/api/v1/settings" -Headers $headers
+        if ($settings.interface_complexity -eq $Expected) { return $settings }
+        Start-Sleep -Milliseconds 100
+    } while ([DateTime]::UtcNow -lt $deadline)
+    throw "Native interface control did not persist '$Expected' complexity."
+}
+
+function Open-GeneralSettings([System.Windows.Automation.AutomationElement]$Root) {
+    $ownerButtons = @(Get-Snapshots $Root | Where-Object {
+        $_.Type -eq "Button" -and ($_.Name -match '@' -or $_.Name -match '^Local owner(?:\s+Not signed in)?')
+    })
+    if ($ownerButtons.Count -ne 1) {
+        throw "UI Automation did not expose exactly one owner-menu button; found $($ownerButtons.Count)."
+    }
+    $ownerRectangle = $ownerButtons[0].Element.Current.BoundingRectangle
+    if ($ownerRectangle.IsEmpty) { throw "The owner-menu button has no clickable native bounds." }
+    [Windows.Forms.Cursor]::Position = [Drawing.Point]::new(
+        [int]($ownerRectangle.Left + ($ownerRectangle.Width / 2)),
+        [int]($ownerRectangle.Top + ($ownerRectangle.Height / 2))
+    )
+    [McgNativeWindow]::ClickLeft()
+    $settings = Find-Element $Root @("Settings") @("Button") (Get-Deadline)
+    $settingsRectangle = $settings.Element.Current.BoundingRectangle
+    if ($settingsRectangle.IsEmpty) { throw "The Settings owner-menu item has no clickable native bounds." }
+    [Windows.Forms.Cursor]::Position = [Drawing.Point]::new(
+        [int]($settingsRectangle.Left + ($settingsRectangle.Width / 2)),
+        [int]($settingsRectangle.Top + ($settingsRectangle.Height / 2))
+    )
+    [McgNativeWindow]::ClickLeft()
+}
+
 $process = Get-Process -Id $ProcessId -ErrorAction Stop
 $deadline = Get-Deadline
 do {
@@ -311,21 +433,24 @@ do {
             $processCondition
         )
         foreach ($candidate in $candidates) {
-            if ([string]$candidate.Current.Name -eq "MCG" `
+            $candidateName = [string]$candidate.Current.Name
+            $recognizedTitle = $candidateName -eq "MCG" `
+                -or $candidateName -match '^MetaCog(?: v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)?$'
+            if ($recognizedTitle `
                 -and [long]$candidate.Current.NativeWindowHandle -eq $mainWindowHandle) {
                 $root = $candidate
-                $rootName = "MCG"
+                $rootName = $candidateName
                 break
             }
         }
-        if ($rootName -eq "MCG") { break }
+        if (-not [string]::IsNullOrWhiteSpace($rootName)) { break }
     } catch [System.Windows.Automation.ElementNotAvailableException] {
         $root = $null
         $rootName = $null
     }
     Start-Sleep -Milliseconds 100
 } while ([DateTime]::UtcNow -lt $deadline)
-if ($rootName -ne "MCG") { throw "The native window has no stable MCG accessible name." }
+if ([string]::IsNullOrWhiteSpace($rootName)) { throw "The native window has no stable MetaCog accessible name." }
 
 # The first UIA query activates Chromium's accessibility provider. Poll the
 # resulting native tree so renderer startup cannot turn this into a timing-only
@@ -335,22 +460,21 @@ do {
     $snapshots = Get-Snapshots $root
     if (($snapshots | Where-Object Type -eq "Document") `
         -and ($snapshots | Where-Object Name -eq "Primary navigation") `
-        -and ($snapshots | Where-Object Name -eq "Settings")) {
+        -and ($snapshots | Where-Object Name -eq "Cycle interface complexity")) {
         break
     }
     Start-Sleep -Milliseconds 100
 } while ([DateTime]::UtcNow -lt $deadline)
 if (-not ($snapshots | Where-Object Type -eq "Document")) { throw "UI Automation did not expose the web document." }
 if (-not ($snapshots | Where-Object Name -eq "Primary navigation")) { throw "UI Automation did not expose Primary navigation." }
-if (-not ($snapshots | Where-Object Name -eq "Settings")) { throw "UI Automation did not expose Settings." }
+if (-not ($snapshots | Where-Object Name -eq "Cycle interface complexity")) { throw "UI Automation did not expose the three-level interface control." }
 
 $deadline = Get-Deadline
 $required = @{
-    Goal = Find-Element $root @("Goal") @("Edit") $deadline
-    OpenFolder = Find-Element $root @("Open folder") @("Button") $deadline
-    CreateTask = Find-Element $root @("Create task") @("Button") $deadline
-    OpenAi = Find-Element $root @("Continue with OpenAI", "Connect with OpenAI") @("Button") $deadline
-    AddProvider = Find-Element $root @("Add API or local provider") @("Button") $deadline
+    Message = Find-Element $root @("Message") @("Edit") $deadline
+    ChooseProject = Find-Element $root @("Choose project") @("Button") $deadline
+    NewChat = Find-Element $root @("New chat") @("Button") $deadline
+    Interface = Find-Element $root @("Cycle interface complexity") @("Button") $deadline
 }
 foreach ($name in $required.Keys) {
     if (-not $required[$name].Focusable) { throw "Required control '$name' is not keyboard-focusable." }
@@ -364,35 +488,30 @@ if ($unnamedFocusable.Count -ne 0) {
     throw "UI Automation exposed unnamed focusable controls: $($unnamedFocusable -join ', ')."
 }
 
-$required.Goal.Element.SetFocus()
-Wait-Focused $root "Goal"
-if (-not [McgNativeWindow]::FocusWindow($process.MainWindowHandle)) {
-    throw "MCG lost the foreground before the first Tab transition."
-}
-[McgNativeWindow]::SendTab()
-if (-not [string]::IsNullOrWhiteSpace($ReviewedTopologyMarker)) {
-    Wait-FocusedPrefix "Project"
-    [McgNativeWindow]::SendTab()
-}
-Wait-Focused $root "Open folder"
-[McgNativeWindow]::SendTab()
-Wait-Focused $root "Create task"
+$required.Message.Element.SetFocus()
+Wait-Focused $root "Message"
+$required.ChooseProject.Element.SetFocus()
+Wait-Focused $root "Choose project"
+$required.NewChat.Element.SetFocus()
+Wait-Focused $root "New chat"
 
 $mode = Find-Element $root @("Cycle interface complexity") @("Button") $deadline
 Invoke-Accessible $mode.Element
-$null = Find-Element $root @("Advanced") @() (Get-Deadline)
+$null = Wait-InterfaceComplexity "advanced"
 $mode = Find-Element $root @("Cycle interface complexity") @("Button") (Get-Deadline)
 Invoke-Accessible $mode.Element
-$null = Find-Element $root @("Developer") @() (Get-Deadline)
+$null = Wait-InterfaceComplexity "developer"
 
-$settingsLink = Find-Element $root @("Settings") @("Hyperlink") (Get-Deadline)
-Invoke-Accessible $settingsLink.Element
+if (-not [McgNativeWindow]::FocusWindow($process.MainWindowHandle)) {
+    throw "MetaCog lost the foreground before opening Settings."
+}
+Open-GeneralSettings $root
 $null = Find-Element $root @("Interface complexity") @() (Get-Deadline)
 foreach ($complexity in @("Simple", "Advanced", "Developer")) {
     $null = Find-Element $root @($complexity) @() (Get-Deadline)
 }
 $null = Find-Element $root @("Developer mode remains governed: protected policy, evaluator fixtures, Root authority, signing keys, secrets, direct database writes, and trust bypasses are unavailable or read-only.") @() (Get-Deadline)
-$runtimeInspector = Find-Element $root @("Runtime contract inspector") @() (Get-Deadline)
+$runtimeInspector = Find-ElementPrefix $root "Runtime contract inspector" @() (Get-Deadline)
 Invoke-Accessible $runtimeInspector.Element
 $runtimeContract = Find-Element $root @("Current runtime settings contract") @() (Get-Deadline)
 $contractText = @(Get-ElementSnapshot $runtimeContract.Element)
@@ -404,32 +523,37 @@ if ($contractProjection -notmatch 'interface_complexity' -or $contractProjection
 if ($contractProjection -notmatch 'protected-root' -or $contractProjection -notmatch 'protocol_version' -or $contractProjection -notmatch 'storage_schema_version') {
     throw "Developer runtime contract did not disclose Protected Root protocol and storage diagnostics."
 }
-$addProvider = Find-Element $root @("Add API or local provider") @("Button") $deadline
-Invoke-Accessible $addProvider.Element
-$password = Find-Element $root @("API key") @("Edit") $deadline
-if (-not $password.Focusable -or -not $password.IsPassword) {
-    throw "The API key control is not a focusable native password element."
-}
-$password.Element.SetFocus()
-[Windows.Forms.SendKeys]::SendWait($Canary)
-Start-Sleep -Milliseconds 100
-
-$valueWasBlocked = $false
+$valueWasBlocked = $true
 $value = $null
-try {
-    $raw = $password.Element.GetCurrentPropertyValue(
-        [System.Windows.Automation.ValuePattern]::ValueProperty,
-        $true
-    )
-    if ($raw -ne [System.Windows.Automation.AutomationElement]::NotSupported) {
-        $value = [string]$raw
+if (-not $Stage2RuntimeOnly) {
+    $models = Find-Element $root @("Models") @("Button") (Get-Deadline)
+    Invoke-Accessible $models.Element
+    $addProvider = Find-Element $root @("Add API or local provider") @("Button") (Get-Deadline)
+    Invoke-Accessible $addProvider.Element
+    $password = Find-Element $root @("API key") @("Edit") (Get-Deadline)
+    if (-not $password.Focusable -or -not $password.IsPassword) {
+        throw "The API key control is not a focusable native password element."
     }
-} catch [System.UnauthorizedAccessException] {
-    $valueWasBlocked = $true
-}
-if ($value -eq $Canary) { throw "UI Automation exposed the API-key cleartext." }
-if (Get-Snapshots $root | Where-Object { $_.Name -like "*$Canary*" }) {
-    throw "The API-key cleartext leaked into an accessible name."
+    $password.Element.SetFocus()
+    [Windows.Forms.SendKeys]::SendWait($Canary)
+    Start-Sleep -Milliseconds 100
+
+    $valueWasBlocked = $false
+    try {
+        $raw = $password.Element.GetCurrentPropertyValue(
+            [System.Windows.Automation.ValuePattern]::ValueProperty,
+            $true
+        )
+        if ($raw -ne [System.Windows.Automation.AutomationElement]::NotSupported) {
+            $value = [string]$raw
+        }
+    } catch [System.UnauthorizedAccessException] {
+        $valueWasBlocked = $true
+    }
+    if ($value -eq $Canary) { throw "UI Automation exposed the API-key cleartext." }
+    if (Get-Snapshots $root | Where-Object { $_.Name -like "*$Canary*" }) {
+        throw "The API-key cleartext leaked into an accessible name."
+    }
 }
 
 $reviewedTopologyQualified = $false
@@ -444,8 +568,10 @@ if (-not [string]::IsNullOrWhiteSpace($ReviewedTopologyMarker)) {
     if (Test-Path -LiteralPath $resolvedMarker) {
         throw "Reviewed-topology marker already exists before native interaction."
     }
-    $settingsLink = Find-Element $root @("Settings") @("Hyperlink") (Get-Deadline)
-    Invoke-Accessible $settingsLink.Element
+    if (-not [McgNativeWindow]::FocusWindow($process.MainWindowHandle)) {
+        throw "MetaCog lost the foreground before reopening Settings."
+    }
+    Open-GeneralSettings $root
     $autonomy = Find-Element $root @("Autonomy") @("ComboBox") (Get-Deadline)
     if (-not [McgNativeWindow]::FocusWindow($process.MainWindowHandle)) {
         throw "MCG lost the foreground before the native autonomy change."
@@ -510,16 +636,12 @@ $report = [ordered]@{
     required_controls_named = $true
     required_controls_focusable = $true
     unnamed_focusable_control_types = @()
-    keyboard_focus_sequence = if ([string]::IsNullOrWhiteSpace($ReviewedTopologyMarker)) {
-        @("Goal", "Open folder", "Create task")
-    } else {
-        @("Goal", "Project", "Open folder", "Create task")
-    }
+    keyboard_focus_sequence = @("Message", "Choose project", "New chat")
     simple_to_advanced_to_developer_native_input = $true
     interface_levels_share_one_runtime = $true
     developer_protected_root_contract_visible = $true
     developer_protected_controls_read_only = $true
-    credential_control_is_password = $true
+    credential_control_is_password = (-not $Stage2RuntimeOnly)
     credential_accessible_value_redacted = ($valueWasBlocked -or $value -ne $Canary)
     reviewed_topology_native_ui = $reviewedTopologyQualified
     reviewed_topology_waited_for_approval = $reviewedTopologyQualified

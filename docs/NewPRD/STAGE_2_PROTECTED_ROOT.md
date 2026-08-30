@@ -38,14 +38,16 @@
 - `scripts/test-protected-root-ipc.ps1` launches the real Root process, exercises both new IPC commands and legacy HTTP CLI behavior, then performs an authenticated clean shutdown.
 - Exact commit `f0129cedcccad112934d645d0fa30deaaca943e2` passes the native Unix process harness on Ubuntu and macOS. Both runs exercise direct authenticated IPC status/inspect, legacy HTTP health/status/stop, and clean Root exit. The transferred source archive SHA-256 is `DD01309C2ACE6DE99B0223ABB2D0320328A36FEB189D60C07B7ABC00D4227061` on all three hosts.
 - The same Unix source line passes platform 2/2, Protected Root 3/3, strict no-dependency Stage 2 Clippy, representative schema-50 migration, and native Root/CLI builds on Ubuntu and macOS.
+- Clean commit `2ceaaa80f67f5ca211468fe8dc9b4a0121c1526a` produces the v0.4.67 Windows one-file portable candidate (515,992,576 bytes, SHA-256 `1AA2D43D9A07C09ECB1817EE21B168B1E99C8E79A6F852BB5C88D652F6904404`). `scripts/test-portable-stage2-windows.ps1` launches it with an isolated profile, proves the embedded listener is the packaged `mcg-service`, and drives the real WebView through native UI Automation.
+- Windows native portable UAT proves named/focusable chat controls, Simple → Advanced → Developer persistence through one authoritative settings projection, the Developer Protected Root contract inspector, and the read-only protected-control boundary. Evidence is retained under `target/stage2-portable-uat/d93a42e1aa814072ab7ff32a36a21cf8/`.
 - Desktop typecheck, focused Vitest, focused Playwright, documentation validation, and packaging-source validation pass at the current checkpoint.
 
 ## Remaining Stage 2 exit evidence
 
 - Exercise interrupted migration, retry, and backup restore with a representative old-profile fixture in one process-level test.
 - Add an automated production dependency/packaging assertion that presentation binaries cannot acquire normal authoritative write access. Confirmed offline restore remains a separately authorized, stopped-service recovery operation.
-- Run native packaged three-level UAT across the same conversations/projects before and after restart.
-- Run the package and native three-level UAT suites on Windows, macOS, and Linux. Cross-platform local IPC, migration, compatibility, and source-build qualification is complete for this checkpoint.
+- Run native packaged three-level UAT across the same conversations/projects before and after restart; Windows portable runtime/interface projection is now qualified, while the full installed workflow and Unix package lanes remain open.
+- Run the package and native three-level UAT suites on macOS and Linux. Cross-platform local IPC, migration, compatibility, and source-build qualification plus Windows portable UAT are complete for this checkpoint.
 - Repeat full workspace Rust, Vitest, Playwright, portable, installer, accessibility, and release-smoke gates before declaring Stage 2 complete.
 
 Until those cumulative gates pass, this document is implementation evidence rather than a release-complete claim.

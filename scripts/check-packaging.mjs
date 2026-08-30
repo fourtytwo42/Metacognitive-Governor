@@ -135,7 +135,7 @@ if (JSON.stringify(developmentConfig.plugins?.updater) !== JSON.stringify({ endp
   throw new Error("The base Tauri config must provide a valid inert updater object so unsigned packages start without update authority.");
 }
 
-const [windowsBuilder, linuxBuilder, macosBuilder, macosDmgBuilder, updaterSigningTest, releaseArtifactScanner, releaseArtifactScannerTest, updaterBuildConfigWriter, updaterManifestWriter, updaterSignatureVerifier, updaterUatScenarioWriter, updaterUatTlsGenerator, updaterUatServer, updaterUatServerTest, updaterUatSourcePreparer, updaterUatSourcePreparerTest, updaterUatWorkspacePreparer, updaterUatWorkspacePreparerTest, windowsUpdaterHarness, windowsUpdaterHarnessTest, windowsVerifier, windowsPrepare, linuxPrepare, linuxSandboxPrepare, linuxDebHardener, linuxSandboxProfile, notices, apache, wasmtime, shadowRunner, shadowVerification, updaterSupervisor, windowsPackageHarness, linuxPackageHarness, macosPackageHarness, windowsNativeAccessibility, linuxNativeAccessibility, nativeReviewedTopology, macosNativeAccessibility, macosWindowCapture] = await Promise.all([
+const [windowsBuilder, linuxBuilder, macosBuilder, macosDmgBuilder, updaterSigningTest, releaseArtifactScanner, releaseArtifactScannerTest, updaterBuildConfigWriter, updaterManifestWriter, updaterSignatureVerifier, updaterUatScenarioWriter, updaterUatTlsGenerator, updaterUatServer, updaterUatServerTest, updaterUatSourcePreparer, updaterUatSourcePreparerTest, updaterUatWorkspacePreparer, updaterUatWorkspacePreparerTest, windowsUpdaterHarness, windowsUpdaterHarnessTest, windowsVerifier, windowsPrepare, linuxPrepare, linuxSandboxPrepare, linuxDebHardener, linuxSandboxProfile, notices, apache, wasmtime, shadowRunner, shadowVerification, updaterSupervisor, windowsPackageHarness, linuxPackageHarness, macosPackageHarness, windowsNativeAccessibility, windowsPortableStage2, linuxNativeAccessibility, nativeReviewedTopology, macosNativeAccessibility, macosWindowCapture] = await Promise.all([
   read("scripts/build-release.ps1"),
   read("scripts/build-release.sh"),
   read("scripts/build-release-macos.sh"),
@@ -172,6 +172,7 @@ const [windowsBuilder, linuxBuilder, macosBuilder, macosDmgBuilder, updaterSigni
   read("scripts/test-linux-packages.sh"),
   read("scripts/test-macos-packages.sh"),
   read("scripts/test-installed-native-accessibility-windows.ps1"),
+  read("scripts/test-portable-stage2-windows.ps1"),
   read("scripts/test-installed-native-accessibility-linux.py"),
   read("scripts/test-installed-native-reviewed-topology.py"),
   read("scripts/test-installed-native-accessibility-macos.swift"),
@@ -194,6 +195,9 @@ for (const [harness, label] of [
 }
 for (const invariant of ["UI Automation", "IsPassword", "keyboard_focus_sequence", "credential_accessible_value_redacted", "MCG_NATIVE_SECRET_CANARY", "Reviewed topology reason", "Run reviewed plan", "Approve and run", "reviewed_topology_terminal_succeeded_visible"]) {
   requireText(windowsNativeAccessibility, invariant, "Windows native accessibility verifier");
+}
+for (const invariant of ["stage2-portable-uat", "Stage2RuntimeOnly", "mcg-service", "artifact_sha256", "source_commit", "developer_protected_root_contract_visible"]) {
+  requireText(windowsPortableStage2 + windowsNativeAccessibility, invariant, "Windows Stage 2 portable UAT");
 }
 for (const invariant of ["AT-SPI", "password text", "keyboard_focus_sequence", "credential_accessible_value_redacted", "MCG_NATIVE_SECRET_CANARY", "Reviewed topology reason", "Run reviewed plan", "Approve and run", "reviewed_topology_terminal_succeeded_visible"]) {
   requireText(linuxNativeAccessibility, invariant, "Linux native accessibility verifier");
