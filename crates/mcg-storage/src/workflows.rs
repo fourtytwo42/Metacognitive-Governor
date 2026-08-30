@@ -13,6 +13,7 @@ const WORKFLOW_CREATED_TYPE_ID: &str = "mcg.workflow_created.v1";
 const WORKFLOW_CLAIMED_TYPE_ID: &str = "mcg.workflow_claimed.v1";
 const WORKFLOW_HEARTBEAT_TYPE_ID: &str = "mcg.workflow_heartbeat.v1";
 const WORKFLOW_LEASE_EXPIRED_TYPE_ID: &str = "mcg.workflow_lease_expired.v1";
+const WORKFLOW_WAIT_SATISFIED_TYPE_ID: &str = "mcg.workflow_wait_satisfied.v1";
 const WORKFLOW_RETRIED_TYPE_ID: &str = "mcg.workflow_retried.v1";
 const WORKFLOW_TRANSITIONED_TYPE_ID: &str = "mcg.workflow_transitioned.v1";
 
@@ -22,6 +23,8 @@ pub struct WorkflowRecoveryReport {
     pub fenced_expired: u64,
     pub awaiting_reconciliation: u64,
     pub requeued_for_verification: u64,
+    pub requeued_satisfied_dependencies: u64,
+    pub requeued_elapsed_backoffs: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -787,10 +790,11 @@ impl SqliteEventStore {
         Ok(attempt)
     }
 
-    /// Fences expired worker generations during Root startup without guessing effect outcomes.
+    /// Recovers workflow leases and objectively satisfied wait conditions during Root startup.
     ///
     /// Running work moves to `Waiting(Reconciliation)`; expired verification work can safely
-    /// return to Ready. Waiting and terminal work are never reactivated by this scanner.
+    /// return to Ready. Dependency and retry-backoff waits resume only when their persisted
+    /// condition is satisfied. Other waits, cancellation, and terminal work are not guessed.
     ///
     /// # Errors
     /// Returns a storage error for query, malformed stored data, or atomic update failures.
@@ -807,13 +811,21 @@ impl SqliteEventStore {
             fenced_expired: 0,
             awaiting_reconciliation: 0,
             requeued_for_verification: 0,
+            requeued_satisfied_dependencies: 0,
+            requeued_elapsed_backoffs: 0,
         };
         for mut attempt in attempts {
             let expired = matches!(
                 attempt.state,
                 WorkflowState::Running | WorkflowState::Verifying
             ) && attempt.lease_expires_at.is_some_and(|expiry| expiry <= now);
-            if !expired {
+            let satisfied_dependency_wait = attempt.state
+                == WorkflowState::Waiting(WaitReason::Dependency)
+                && dependencies_satisfied(&self.connection, &attempt)?;
+            let elapsed_retry_backoff = attempt.state
+                == WorkflowState::Waiting(WaitReason::RetryBackoff)
+                && retry_backoff_elapsed(&attempt, now);
+            if !expired && !satisfied_dependency_wait && !elapsed_retry_backoff {
                 continue;
             }
             let expected_revision = attempt.revision;
@@ -822,10 +834,15 @@ impl SqliteEventStore {
             attempt.state = match previous_state {
                 WorkflowState::Running => WorkflowState::Waiting(WaitReason::Reconciliation),
                 WorkflowState::Verifying => WorkflowState::Ready,
-                _ => unreachable!("expired filter restricts recoverable states"),
+                WorkflowState::Waiting(WaitReason::Dependency | WaitReason::RetryBackoff) => {
+                    WorkflowState::Ready
+                }
+                _ => unreachable!("recovery filters restrict recoverable states"),
             };
             attempt.revision = increment(attempt.revision, "workflow revision")?;
-            attempt.lease_generation = increment(attempt.lease_generation, "lease generation")?;
+            if expired {
+                attempt.lease_generation = increment(attempt.lease_generation, "lease generation")?;
+            }
             attempt.lease_owner = None;
             attempt.lease_expires_at = None;
             attempt.heartbeat_at = None;
@@ -839,17 +856,41 @@ impl SqliteEventStore {
                 expected_generation,
             )?;
             let (sequence, cause) = next_event_position(&transaction, attempt.workflow_id)?;
-            let idempotency_key = format!(
-                "recover-expired:{}:{expected_revision}:{expected_generation}",
-                attempt.attempt_id
-            );
+            let (idempotency_key, type_id, recovery_reason) = if expired {
+                (
+                    format!(
+                        "recover-expired:{}:{expected_revision}:{expected_generation}",
+                        attempt.attempt_id
+                    ),
+                    WORKFLOW_LEASE_EXPIRED_TYPE_ID,
+                    "lease_expired",
+                )
+            } else if satisfied_dependency_wait {
+                (
+                    format!(
+                        "recover-dependency:{}:{expected_revision}:{expected_generation}",
+                        attempt.attempt_id
+                    ),
+                    WORKFLOW_WAIT_SATISFIED_TYPE_ID,
+                    "dependencies_satisfied",
+                )
+            } else {
+                (
+                    format!(
+                        "recover-backoff:{}:{expected_revision}:{expected_generation}",
+                        attempt.attempt_id
+                    ),
+                    WORKFLOW_WAIT_SATISFIED_TYPE_ID,
+                    "retry_backoff_elapsed",
+                )
+            };
             let event = workflow_event(
                 &attempt,
                 sequence,
                 correlation_id,
                 cause,
                 &idempotency_key,
-                WORKFLOW_LEASE_EXPIRED_TYPE_ID,
+                type_id,
                 now,
                 &serde_json::json!({
                     "attempt_id": attempt.attempt_id,
@@ -857,22 +898,42 @@ impl SqliteEventStore {
                     "to": attempt.state,
                     "fenced_generation": expected_generation,
                     "active_generation": attempt.lease_generation,
+                    "recovery_reason": recovery_reason,
                     "attempt": attempt,
                 }),
             )?;
             insert_event(&transaction, &event)?;
             transaction.commit()?;
-            report.fenced_expired += 1;
+            if expired {
+                report.fenced_expired += 1;
+            }
             match attempt.state {
                 WorkflowState::Waiting(WaitReason::Reconciliation) => {
                     report.awaiting_reconciliation += 1;
                 }
-                WorkflowState::Ready => report.requeued_for_verification += 1,
+                WorkflowState::Ready if previous_state == WorkflowState::Verifying => {
+                    report.requeued_for_verification += 1;
+                }
+                WorkflowState::Ready if satisfied_dependency_wait => {
+                    report.requeued_satisfied_dependencies += 1;
+                }
+                WorkflowState::Ready if elapsed_retry_backoff => {
+                    report.requeued_elapsed_backoffs += 1;
+                }
                 _ => {}
             }
         }
         Ok(report)
     }
+}
+
+fn retry_backoff_elapsed(attempt: &WorkflowAttempt, now: DateTime<Utc>) -> bool {
+    let elapsed_ms = now
+        .signed_duration_since(attempt.updated_at)
+        .num_milliseconds();
+    elapsed_ms >= 0
+        && u64::try_from(elapsed_ms)
+            .is_ok_and(|elapsed| elapsed >= attempt.retry_policy.initial_backoff_ms)
 }
 
 fn validate_initial_workflow(
@@ -1454,6 +1515,40 @@ mod tests {
         (contract, attempt)
     }
 
+    fn waiting_fixture(
+        store: &mut SqliteEventStore,
+        reason: WaitReason,
+        key: &str,
+    ) -> WorkflowAttempt {
+        let (contract, attempt) = fixture();
+        store
+            .create_workflow(&contract, &attempt, CorrelationId::new(), now())
+            .unwrap();
+        let claimed = store
+            .claim_workflow_attempt(
+                attempt.attempt_id,
+                attempt.revision,
+                attempt.lease_generation,
+                RuntimeActorId::new(),
+                now() + chrono::Duration::minutes(5),
+                CorrelationId::new(),
+                &format!("{key}-claim"),
+                now(),
+            )
+            .unwrap();
+        store
+            .transition_workflow_attempt(
+                attempt.attempt_id,
+                claimed.revision,
+                claimed.lease_generation,
+                WorkflowState::Waiting(reason),
+                CorrelationId::new(),
+                &format!("{key}-wait"),
+                now(),
+            )
+            .unwrap()
+    }
+
     #[test]
     fn workflow_create_is_atomic_and_exact_replay_is_idempotent() {
         let mut store = SqliteEventStore::open_in_memory().unwrap();
@@ -1997,6 +2092,104 @@ mod tests {
                 .unwrap()
                 .unwrap(),
             succeeded
+        );
+    }
+
+    #[test]
+    fn restart_scanner_resumes_only_objectively_satisfied_wait_conditions() {
+        let mut store = SqliteEventStore::open_in_memory().unwrap();
+        let dependency = waiting_fixture(&mut store, WaitReason::Dependency, "dependency");
+        let backoff = waiting_fixture(&mut store, WaitReason::RetryBackoff, "backoff");
+        let approval = waiting_fixture(&mut store, WaitReason::Approval, "approval");
+
+        let (cancel_contract, cancel_attempt) = fixture();
+        store
+            .create_workflow(
+                &cancel_contract,
+                &cancel_attempt,
+                CorrelationId::new(),
+                now(),
+            )
+            .unwrap();
+        let cancel_running = store
+            .claim_workflow_attempt(
+                cancel_attempt.attempt_id,
+                cancel_attempt.revision,
+                cancel_attempt.lease_generation,
+                RuntimeActorId::new(),
+                now() + chrono::Duration::minutes(5),
+                CorrelationId::new(),
+                "cancel-claim",
+                now(),
+            )
+            .unwrap();
+        let cancelling = store
+            .transition_workflow_attempt(
+                cancel_attempt.attempt_id,
+                cancel_running.revision,
+                cancel_running.lease_generation,
+                WorkflowState::CancelRequested,
+                CorrelationId::new(),
+                "cancel-request",
+                now(),
+            )
+            .unwrap();
+
+        let early = store
+            .recover_expired_workflow_leases(
+                CorrelationId::new(),
+                now() + chrono::Duration::milliseconds(99),
+            )
+            .unwrap();
+        assert_eq!(early.requeued_satisfied_dependencies, 1);
+        assert_eq!(early.requeued_elapsed_backoffs, 0);
+        assert_eq!(
+            store
+                .workflow_attempt(dependency.attempt_id)
+                .unwrap()
+                .unwrap()
+                .state,
+            WorkflowState::Ready
+        );
+        assert_eq!(
+            store
+                .workflow_attempt(backoff.attempt_id)
+                .unwrap()
+                .unwrap()
+                .state,
+            WorkflowState::Waiting(WaitReason::RetryBackoff)
+        );
+
+        let due = store
+            .recover_expired_workflow_leases(
+                CorrelationId::new(),
+                now() + chrono::Duration::milliseconds(100),
+            )
+            .unwrap();
+        assert_eq!(due.requeued_satisfied_dependencies, 0);
+        assert_eq!(due.requeued_elapsed_backoffs, 1);
+        assert_eq!(
+            store
+                .workflow_attempt(backoff.attempt_id)
+                .unwrap()
+                .unwrap()
+                .state,
+            WorkflowState::Ready
+        );
+        assert_eq!(
+            store
+                .workflow_attempt(approval.attempt_id)
+                .unwrap()
+                .unwrap()
+                .state,
+            WorkflowState::Waiting(WaitReason::Approval)
+        );
+        assert_eq!(
+            store
+                .workflow_attempt(cancelling.attempt_id)
+                .unwrap()
+                .unwrap(),
+            cancelling
         );
     }
 

@@ -80,7 +80,9 @@ pub fn open(config: AppConfig) -> Result<Arc<AppRuntime>, ProtectedRootError> {
             fenced_expired = workflow_recovery.fenced_expired,
             awaiting_reconciliation = workflow_recovery.awaiting_reconciliation,
             requeued_for_verification = workflow_recovery.requeued_for_verification,
-            "recovered expired canonical workflow leases"
+            requeued_satisfied_dependencies = workflow_recovery.requeued_satisfied_dependencies,
+            requeued_elapsed_backoffs = workflow_recovery.requeued_elapsed_backoffs,
+            "recovered canonical workflow leases and satisfied waits"
         );
     }
     Ok(runtime)
@@ -672,6 +674,94 @@ mod tests {
                 .expect("workflow events")
                 .len(),
             3
+        );
+    }
+
+    #[test]
+    fn root_startup_resumes_elapsed_backoff_without_guessing_other_waits_or_cancellation() {
+        let temporary = tempfile::tempdir().expect("temporary Root data directory");
+        let config = AppConfig::default().with_data_directory(temporary.path());
+        let seeded_at = Utc::now() - chrono::Duration::minutes(3);
+        let (backoff_contract, backoff_attempt) = expired_workflow_fixture(seeded_at);
+        let (approval_contract, approval_attempt) = expired_workflow_fixture(seeded_at);
+        let (cancel_contract, cancel_attempt) = expired_workflow_fixture(seeded_at);
+        let (backoff_waiting, approval_waiting, cancelling) = {
+            let mut store = SqliteEventStore::open(config.database_path()).expect("workflow store");
+            let mut seed = |contract: &TaskContract,
+                            attempt: &WorkflowAttempt,
+                            next_state: WorkflowState,
+                            key: &str| {
+                store
+                    .create_workflow(contract, attempt, CorrelationId::new(), seeded_at)
+                    .expect("create workflow");
+                let running = store
+                    .claim_workflow_attempt(
+                        attempt.attempt_id,
+                        attempt.revision,
+                        attempt.lease_generation,
+                        RuntimeActorId::new(),
+                        seeded_at + chrono::Duration::minutes(5),
+                        CorrelationId::new(),
+                        &format!("{key}-claim"),
+                        seeded_at,
+                    )
+                    .expect("claim workflow");
+                store
+                    .transition_workflow_attempt(
+                        attempt.attempt_id,
+                        running.revision,
+                        running.lease_generation,
+                        next_state,
+                        CorrelationId::new(),
+                        &format!("{key}-transition"),
+                        seeded_at,
+                    )
+                    .expect("park workflow")
+            };
+            (
+                seed(
+                    &backoff_contract,
+                    &backoff_attempt,
+                    WorkflowState::Waiting(WaitReason::RetryBackoff),
+                    "backoff",
+                ),
+                seed(
+                    &approval_contract,
+                    &approval_attempt,
+                    WorkflowState::Waiting(WaitReason::Approval),
+                    "approval",
+                ),
+                seed(
+                    &cancel_contract,
+                    &cancel_attempt,
+                    WorkflowState::CancelRequested,
+                    "cancel",
+                ),
+            )
+        };
+
+        let runtime = open(config.clone()).expect("restart Protected Root");
+        drop(runtime);
+        let store = SqliteEventStore::open(config.database_path()).expect("reopen recovered store");
+        let recovered_backoff = store
+            .workflow_attempt(backoff_waiting.attempt_id)
+            .expect("backoff query")
+            .expect("backoff workflow");
+        assert_eq!(recovered_backoff.state, WorkflowState::Ready);
+        assert_eq!(recovered_backoff.revision, backoff_waiting.revision + 1);
+        assert_eq!(
+            store
+                .workflow_attempt(approval_waiting.attempt_id)
+                .expect("approval query")
+                .expect("approval workflow"),
+            approval_waiting
+        );
+        assert_eq!(
+            store
+                .workflow_attempt(cancelling.attempt_id)
+                .expect("cancellation query")
+                .expect("cancelling workflow"),
+            cancelling
         );
     }
 

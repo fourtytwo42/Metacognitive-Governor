@@ -2,6 +2,15 @@
 
 Durable project context lives here. Update this file whenever information should survive chat context compression or future agent handoff.
 
+### 2026-08-30 - Stage 3 objective wait recovery checkpoint
+
+- Context: After the pushed Desktop workflow projection, the Root restart scanner still handled only expired Running and Verifying leases and did not evaluate any persisted wait condition.
+- Decision: Resume only conditions Root can prove from canonical state. `Waiting(Dependency)` returns to Ready only when exact TaskContract dependencies are satisfied; `Waiting(RetryBackoff)` returns only after its persisted backoff elapsed. User, approval, external, reconciliation, protected-component, and cancellation states remain untouched rather than guessed.
+- Files: `crates/mcg-storage/src/workflows.rs`, `crates/mcg-protected-root/src/lib.rs`, `docs/NewPRD/{REQUIREMENTS_TRACEABILITY.md,IMPLEMENTATION_STATUS_REPORT_2026-08-30.md}`, and `MEMORY.md`.
+- Commands/tests: `mcg-storage` 89/89; `mcg-protected-root` 6/6; `mcg-runtime` 108 passed plus two explicit Windows Sandbox ignores; formatting and focused real Root reopen coverage pass.
+- Result: Root emits an ordered `mcg.workflow_wait_satisfied.v1` event for each proven wake, preserves generation when no lease is fenced, records separate recovery counts, and a real reopen test proves elapsed backoff resumes while approval and cancellation remain unchanged.
+- Follow-up: Add the Root-owned action ledger so cancellation can classify active external effects and settle only after `NO_EFFECT`, `EFFECT_CONFIRMED`, or explicit reconciliation; then complete forced-process restart coverage.
+
 ### 2026-08-30 - Stage 3 Desktop canonical workflow projection verified
 
 - Context: The owner requested a current implemented-versus-remaining report while Stage 3 Desktop work and a concurrent untracked Stage 3 design document are present; the persistent production goal then resumed from the canonical workflow checkpoint.
