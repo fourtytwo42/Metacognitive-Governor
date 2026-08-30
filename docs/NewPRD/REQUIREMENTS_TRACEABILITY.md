@@ -1,6 +1,6 @@
 # Cognitive Runtime Requirements Traceability
 
-**Status:** Active implementation matrix; Stages 1–2 implementation complete with owner-bound package lanes open, and the Stage 3 durable-workflow kernel in progress
+**Status:** Active implementation matrix; Stages 1–2 implementation complete with owner-bound package lanes open, Stages 3–4 substantially implemented, and Stage 5 reconstruction contracts/Root persistence underway
 **Purpose:** Map normative requirements to implementation stages, automated evidence, E2E/UAT evidence, and release artifacts
 
 This matrix is updated as implementation lands. `Implemented / cumulative UAT pending` means local implementation and its stage-level automated evidence pass, while final native/cross-platform evidence remains open.
@@ -76,14 +76,14 @@ This matrix is updated as implementation lands. `Implemented / cumulative UAT pe
 
 | Requirement | Stage | Automated evidence | E2E/UAT evidence | Status |
 |---|---:|---|---|---|
-| Every material call has a reconstructable `InvocationManifest` | 5 | Manifest completeness tests | CLI reconstruction | Planned |
-| Exact context refs are captured in `ContextManifest` | 5, 8 | Context tests | Developer inspector | Planned |
+| Every material call has a reconstructable `InvocationManifest` | 5 | Manifest completeness tests | CLI reconstruction | Complete bounded DTO, canonical hash fixture, schema-56 immutable persistence, exact replay/substitution, restart reconstruction, and model-run lineage implemented / Runtime producer, Root IPC, CLI, Desktop, and E2E pending |
+| Exact context refs are captured in `ContextManifest` | 5, 8 | Context tests | Developer inspector | Exact source/perspective/influence/transformation/order/token/selection/expansion contract and content-addressed schema-56 storage implemented / live Runtime capture, Developer inspection, and Stage 8 retrieval integration pending |
 | Remote model calls require Root-bound egress permit | 6 | Permit/policy tests | Unauthorized destination/context attack | Planned |
 | Runtime receives no ambient provider secrets | 6 | Secret scanning/process tests | Compromised Runtime probe | Planned |
 | Secret handles resolve only for exact authorized execution | 6 | Gateway tests | Wrong provider/action handle | Planned |
 | Provider retry respects effect and idempotency semantics | 6 | Fake provider fault tests | Dropped/late stream | Planned |
-| Resolved provider/model/config fingerprint is persisted | 5, 6 | Manifest tests | Run inspection | Planned |
-| Private prompts, scratch reasoning, and secrets are excluded from generic telemetry | 5, 6 | Redaction tests | Logs/backups/UI inspection | Planned |
+| Resolved provider/model/config fingerprint is persisted | 5, 6 | Manifest tests | Run inspection | InvocationManifest contract and immutable Root storage bind resolved provider/model, observed fingerprint, configuration, prompts, role, sampling, reasoning, environment, build, and request/response hashes / deterministic Runtime producer and Stage 6 real gateway pending |
+| Private prompts, scratch reasoning, and secrets are excluded from generic telemetry | 5, 6 | Redaction tests | Logs/backups/UI inspection | Context and invocation records retain governed refs/hashes and bounded metadata rather than materialized prompt contents; schema-56 inspection is bounded / Runtime log, backup, UI, and Stage 6 secret-redaction adversarial gates pending |
 
 ## 7. Tools, Skills, Capabilities, and Sandboxing
 
@@ -189,4 +189,4 @@ This matrix is updated as implementation lands. `Implemented / cumulative UAT pe
 | Migration + backup/restore receipt | Every schema/ownership change | Schema 50→55 protected-root migration-process and focused schema-54 action-history migration tests pass / packaged backup/restore UAT pending |
 | Golden payload/hash compatibility receipt | Every codec/schema release | TaskContract v1 fixture/hash plus existing canonical-v1 fixtures pass / cross-version package replay pending |
 | Experiment artifact set | Every protected experiment | Planned |
-| Commit/remote parity and artifact manifest | Every verified major stage | Stage 3 through Root-integrated real-child fault recovery is implemented through `bada68e`; push and cumulative release artifacts remain pending |
+| Commit/remote parity and artifact manifest | Every verified major stage | Stage 5 reconstruction contracts and schema-56 Root persistence are committed at `83b5629`; documentation push and cumulative release artifacts remain pending |

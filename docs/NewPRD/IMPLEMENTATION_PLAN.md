@@ -1,6 +1,6 @@
 # MetaCog Cognitive Runtime Implementation Plan
 
-**Status:** Proposed staged delivery plan
+**Status:** Active staged delivery plan; Stages 0–4 have implementation checkpoints and Stage 5 contract/persistence work is underway
 **Scope:** Alignment with the Adaptive Cognitive Agent Runtime PRD v1.4.2, Cognitive Runtime Implementation Contract v0.1, and Cognitive Runtime Experimental Protocol Specification v0.2
 **Product:** MetaCog desktop and `mcg` CLI on Windows, macOS, and Linux
 
