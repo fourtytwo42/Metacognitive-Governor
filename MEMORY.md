@@ -2,6 +2,15 @@
 
 Durable project context lives here. Update this file whenever information should survive chat context compression or future agent handoff.
 
+### 2026-08-30 - New PRD completion report reconciled through action inspection
+
+- Context: The owner requested a current complete-versus-remaining NewPRD report while another agent owns the untracked Stage 3 document.
+- Decision: Classify implementation separately from release qualification and preserve the concurrent Stage 3 boundary. Correct stale report text that still described pushed cancellation work as local and canonical action inspection as not yet implemented.
+- Files: `docs/NewPRD/IMPLEMENTATION_STATUS_REPORT_2026-08-30.md`; `MEMORY.md`. `docs/NewPRD/STAGE_3_DURABLE_WORKFLOW.md` was read-only and remains untracked.
+- Commands/tests: Audited the three specifications, staged plan, traceability matrix, current source symbols, pushed history, repository status, and recorded verification ledger. Documentation-only change; no product tests were required.
+- Result: The report now distinguishes the completed Stages 0–2 foundation, substantial but open Stage 3, Root/CLI-complete but Desktop/release-open Stage 4, and unbuilt Stages 5–12 at repository checkpoint `02d4fa7`.
+- Follow-up: Build the Desktop action projection and approval-source navigation, close Stage 3 recovery/streaming/compatibility, add forced-process/adversarial Stage 4 E2E, rebuild/qualify matched packages, then begin Stage 5.
+
 ### 2026-08-30 - Canonical action inspection through Root IPC and CLI
 
 - Context: The governed action lifecycle was authoritative but had no safe product inspection boundary.
