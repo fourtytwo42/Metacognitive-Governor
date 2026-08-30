@@ -337,6 +337,12 @@ unverified conditions to the Coordinator as blockers; the protected validator
 continues to reject missing, duplicate, unsatisfied, evidence-free, or incorrectly
 readiness-marked reports. Installed provider UAT must observe one accepted durable
 report and a terminal coordination batch after exercising this correction.
+Coordinator-generated delegation contracts are validated before specialist launch.
+Every success condition must describe an observable result the assigned specialist
+can independently verify before `report_result`; outer task/request completion,
+report acceptance, integration settlement, and owner delivery are rejected with an
+actionable correction message. Unit coverage includes the exact circular condition
+observed in installed UAT plus concrete accepted conditions and settlement variants.
 The fixture is disconnected before daemon restart; the second phase requires the
 same task, evaluator, audit, and deterministic side-effect-free replay evidence with
 no provider available. Windows, Linux, and macOS package harnesses share this gate,

@@ -103,9 +103,11 @@ async fn renew(
 
 fn tool_schema(name: &str) -> Value {
     let description = match name {
-        "delegate_code" => "Delegate a bounded coding brief to an isolated MCG Coding Agent.",
+        "delegate_code" => {
+            "Delegate a bounded coding brief to an isolated MCG Coding Agent. Every success condition must be an observable result the Coding Agent can independently verify before reporting; outer task, report-acceptance, integration-settlement, and owner-delivery completion are invalid success conditions."
+        }
         "delegate_test" => {
-            "Delegate a bounded UAT or verification brief to a read-only MCG Tester with governed in-app Browser access."
+            "Delegate a bounded UAT or verification brief to a read-only MCG Tester with governed in-app Browser access. Every success condition must be an observable result the Tester can independently verify before reporting; outer task, report-acceptance, integration-settlement, and owner-delivery completion are invalid success conditions."
         }
         "message_coder" => "Answer or amend an active Coding Agent delegation.",
         "settle_delegation" => {
@@ -144,7 +146,7 @@ fn tool_schema(name: &str) -> Value {
                 "objective":{"type":"string","minLength":1},
                 "scope":{"type":"array","items":{"type":"string"}},
                 "constraints":{"type":"array","items":{"type":"string"}},
-                "success_conditions":{"type":"array","items":{"type":"string"}},
+                "success_conditions":{"type":"array","description":"Independently observable results the assigned specialist can verify before report_result; never outer task, request, report-acceptance, integration-settlement, or owner-delivery completion.","items":{"type":"string"}},
                 "context_references":{"type":"array","items":{"type":"string"}}
             },
             "required":["objective","scope","constraints","success_conditions","context_references"],
