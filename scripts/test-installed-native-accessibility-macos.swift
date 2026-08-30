@@ -135,6 +135,55 @@ private func postKey(_ virtualKey: CGKeyCode) {
     CGEvent(keyboardEventSource: source, virtualKey: virtualKey, keyDown: false)?.post(tap: .cghidEventTap)
 }
 
+private func postCommandComma() {
+    let source = CGEventSource(stateID: .hidSystemState)
+    let down = CGEvent(keyboardEventSource: source, virtualKey: 0x2B, keyDown: true)
+    down?.flags = .maskCommand
+    down?.post(tap: .cghidEventTap)
+    let up = CGEvent(keyboardEventSource: source, virtualKey: 0x2B, keyDown: false)
+    up?.flags = .maskCommand
+    up?.post(tap: .cghidEventTap)
+}
+
+private func readInterfaceComplexity(_ host: String, _ token: String) throws -> String {
+    guard let url = URL(string: host.trimmingCharacters(in: CharacterSet(charactersIn: "/")) + "/api/v1/settings") else {
+        throw QualificationError.failed("The native UAT service URL is invalid.")
+    }
+    var request = URLRequest(url: url)
+    request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+    let semaphore = DispatchSemaphore(value: 0)
+    var result: Result<String, Error>?
+    URLSession.shared.dataTask(with: request) { data, _, error in
+        defer { semaphore.signal() }
+        if let error {
+            result = .failure(error)
+            return
+        }
+        do {
+            let object = try JSONSerialization.jsonObject(with: data ?? Data())
+            guard let settings = object as? [String: Any], let complexity = settings["interface_complexity"] as? String else {
+                throw QualificationError.failed("The native settings projection omitted interface_complexity.")
+            }
+            result = .success(complexity)
+        } catch {
+            result = .failure(error)
+        }
+    }.resume()
+    guard semaphore.wait(timeout: .now() + 5) == .success, let result else {
+        throw QualificationError.failed("The native settings projection timed out.")
+    }
+    return try result.get()
+}
+
+private func waitForInterfaceComplexity(_ host: String, _ token: String, _ expected: String) throws {
+    let deadline = Date().addingTimeInterval(timeoutSeconds)
+    repeat {
+        if try readInterfaceComplexity(host, token) == expected { return }
+        Thread.sleep(forTimeInterval: 0.1)
+    } while Date() < deadline
+    throw QualificationError.failed("The native interface control did not persist '\(expected)' complexity.")
+}
+
 private func typeText(_ text: String) {
     let utf16 = Array(text.utf16)
     let source = CGEventSource(stateID: .hidSystemState)
@@ -154,23 +203,27 @@ private func press(_ element: AXUIElement, _ name: String) throws {
 }
 
 private func run() throws {
-    guard CommandLine.arguments.count == 3, let processId = pid_t(CommandLine.arguments[1]) else {
-        throw QualificationError.failed("Usage: test-installed-native-accessibility-macos.swift PROCESS_ID OUTPUT_PATH")
+    guard CommandLine.arguments.count == 5, let processId = pid_t(CommandLine.arguments[1]) else {
+        throw QualificationError.failed("Usage: test-installed-native-accessibility-macos.swift PROCESS_ID OUTPUT_PATH SERVICE_HOST TOKEN_FILE")
     }
     guard AXIsProcessTrusted() else {
         throw QualificationError.failed("The macOS AX verifier is not trusted; run package UAT from the authorized Terminal session.")
     }
 
     let outputPath = URL(fileURLWithPath: CommandLine.arguments[2]).standardizedFileURL
+    let serviceHost = CommandLine.arguments[3]
+    let token = try String(contentsOfFile: CommandLine.arguments[4], encoding: .utf8)
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !token.isEmpty else { throw QualificationError.failed("The native UAT loopback token is empty.") }
     let app = AXUIElementCreateApplication(processId)
     let initial = try waitForSnapshots(app) { values in
-        values.contains { $0.role == kAXWindowRole as String && $0.name == "MCG" }
+        values.contains { $0.role == kAXWindowRole as String && ($0.name == "MCG" || $0.name.hasPrefix("MetaCog")) }
             && values.contains { $0.role == "AXWebArea" }
             && values.contains { $0.name == "Primary navigation" }
-            && values.contains { $0.name == "Settings" }
+            && values.contains { $0.name == "Cycle interface complexity" }
     }
-    guard initial.contains(where: { $0.role == kAXWindowRole as String && $0.name == "MCG" }) else {
-        throw QualificationError.failed("macOS AX did not expose the named MCG window.")
+    guard initial.contains(where: { $0.role == kAXWindowRole as String && ($0.name == "MCG" || $0.name.hasPrefix("MetaCog")) }) else {
+        throw QualificationError.failed("macOS AX did not expose the named MetaCog window.")
     }
     guard initial.contains(where: { $0.role == "AXWebArea" }) else {
         throw QualificationError.failed("macOS AX did not expose the web document.")
@@ -178,16 +231,15 @@ private func run() throws {
     guard initial.contains(where: { $0.name == "Primary navigation" }) else {
         throw QualificationError.failed("macOS AX did not expose Primary navigation.")
     }
-    guard initial.contains(where: { $0.name == "Settings" }) else {
-        throw QualificationError.failed("macOS AX did not expose Settings.")
+    guard initial.contains(where: { $0.name == "Cycle interface complexity" }) else {
+        throw QualificationError.failed("macOS AX did not expose the three-level interface control.")
     }
 
-    let goal = try find(app, names: ["Goal"], roles: [kAXTextAreaRole as String, kAXTextFieldRole as String])
-    let openFolder = try find(app, names: ["Open folder"], roles: [kAXButtonRole as String])
-    let createTask = try find(app, names: ["Create task"], roles: [kAXButtonRole as String])
-    let openAI = try find(app, names: ["Continue with OpenAI", "Connect with OpenAI"], roles: [kAXButtonRole as String])
-    let addProvider = try find(app, names: ["Add API or local provider"], roles: [kAXButtonRole as String])
-    for required in [goal, openFolder, createTask, openAI, addProvider] {
+    let message = try find(app, names: ["Message"], roles: [kAXTextAreaRole as String, kAXTextFieldRole as String])
+    let chooseProject = try find(app, names: ["Choose project"], roles: [kAXButtonRole as String])
+    let newChat = try find(app, names: ["New chat"], roles: [kAXButtonRole as String])
+    let interfaceMode = try find(app, names: ["Cycle interface complexity"], roles: [kAXButtonRole as String])
+    for required in [message, chooseProject, newChat, interfaceMode] {
         guard required.focusable && required.enabled else {
             throw QualificationError.failed("Required native control '\(required.name)' is not focusable and enabled.")
         }
@@ -205,20 +257,27 @@ private func run() throws {
         throw QualificationError.failed("macOS AX exposed unnamed focusable controls: \(unnamed.sorted().joined(separator: ", ")).")
     }
 
-    try setFocused(goal.element)
-    try waitForFocus(goal.element, "Goal")
-    postKey(0x30)
-    try waitForFocus(openFolder.element, "Open folder")
-    postKey(0x30)
-    try waitForFocus(createTask.element, "Create task")
+    for control in [message, chooseProject, newChat] {
+        try setFocused(control.element)
+        try waitForFocus(control.element, control.name)
+    }
 
     let modeRoles: Set<String> = [kAXButtonRole as String]
-    let interfaceMode = try find(app, names: ["Cycle interface complexity"], roles: modeRoles)
     try press(interfaceMode.element, interfaceMode.name)
-    _ = try find(app, names: ["Advanced"], roles: [])
+    try waitForInterfaceComplexity(serviceHost, token, "advanced")
     let advancedInterfaceMode = try find(app, names: ["Cycle interface complexity"], roles: modeRoles)
     try press(advancedInterfaceMode.element, advancedInterfaceMode.name)
-    _ = try find(app, names: ["Developer"], roles: [])
+    try waitForInterfaceComplexity(serviceHost, token, "developer")
+
+    postCommandComma()
+    _ = try find(app, names: ["Interface complexity"], roles: [])
+    _ = try find(app, names: ["Developer mode remains governed: protected policy, evaluator fixtures, Root authority, signing keys, secrets, direct database writes, and trust bypasses are unavailable or read-only."], roles: [])
+    let runtimeInspector = try find(app, names: ["Runtime contract inspector"], roles: [])
+    try press(runtimeInspector.element, runtimeInspector.name)
+    _ = try find(app, names: ["Current runtime settings contract"], roles: [])
+
+    let models = try find(app, names: ["Models"], roles: [kAXButtonRole as String])
+    try press(models.element, models.name)
     let refreshedProvider = try find(app, names: ["Add API or local provider"], roles: [kAXButtonRole as String])
     try press(refreshedProvider.element, refreshedProvider.name)
     let password = try find(app, names: ["API key"], roles: [kAXTextFieldRole as String])
@@ -248,9 +307,10 @@ private func run() throws {
         "required_controls_named": true,
         "required_controls_focusable": true,
         "unnamed_focusable_control_roles": [],
-        "keyboard_focus_sequence": ["Goal", "Open folder", "Create task"],
+        "keyboard_focus_sequence": ["Message", "Choose project", "New chat"],
         "simple_to_advanced_to_developer_native_input": true,
         "interface_levels_share_one_runtime": true,
+        "developer_protected_root_contract_visible": true,
         "developer_protected_controls_read_only": true,
         "credential_control_is_password": true,
         "credential_accessible_value_redacted": accessibleValue != canary,

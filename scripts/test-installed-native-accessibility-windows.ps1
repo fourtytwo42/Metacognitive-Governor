@@ -381,13 +381,8 @@ function Wait-InterfaceComplexity([string]$Expected) {
 }
 
 function Open-GeneralSettings([System.Windows.Automation.AutomationElement]$Root) {
-    $ownerButtons = @(Get-Snapshots $Root | Where-Object {
-        $_.Type -eq "Button" -and ($_.Name -match '@' -or $_.Name -match '^Local owner(?:\s+Not signed in)?')
-    })
-    if ($ownerButtons.Count -ne 1) {
-        throw "UI Automation did not expose exactly one owner-menu button; found $($ownerButtons.Count)."
-    }
-    $ownerRectangle = $ownerButtons[0].Element.Current.BoundingRectangle
+    $ownerButton = Find-Element $Root @("Open owner menu") @("Button") (Get-Deadline)
+    $ownerRectangle = $ownerButton.Element.Current.BoundingRectangle
     if ($ownerRectangle.IsEmpty) { throw "The owner-menu button has no clickable native bounds." }
     [Windows.Forms.Cursor]::Position = [Drawing.Point]::new(
         [int]($ownerRectangle.Left + ($ownerRectangle.Width / 2)),

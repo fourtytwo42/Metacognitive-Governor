@@ -362,7 +362,7 @@ test.beforeEach(async ({ page }) => {
 async function openOwnerMenu(page: import("@playwright/test").Page) {
   const menu = page.locator(".owner-menu");
   if (!await menu.isVisible()) {
-    await page.getByRole("button", { name: /Local owner/ }).click();
+    await page.getByRole("button", { name: "Open owner menu" }).click();
   }
   await expect(menu).toBeVisible();
   return menu;
@@ -887,7 +887,7 @@ test("transient menus dismiss outside, on Escape, and when the app loses focus",
   await expect(workspaceDetails).not.toHaveAttribute("open", "");
   await expect(workspaceTrigger).toBeFocused();
 
-  const ownerTrigger = page.getByRole("button", { name: /Local owner/ });
+  const ownerTrigger = page.getByRole("button", { name: "Open owner menu" });
   await ownerTrigger.click();
   await expect(page.locator(".owner-menu")).toBeVisible();
   await outsideTarget.click();
@@ -949,6 +949,7 @@ test("keyboard-only navigation reaches every workspace and exposes visible focus
     "Open activity",
     "New chat",
     "Pull requests",
+    "Projects",
     "Sites",
     "Scheduled",
     "Agents",
@@ -958,7 +959,7 @@ test("keyboard-only navigation reaches every workspace and exposes visible focus
     await page.keyboard.press("Tab");
     const control = name === "Search chats"
       ? page.getByRole("button", { name })
-      : page.getByRole(name === "New chat" ? "button" : name === "Pull requests" || name === "Sites" || name === "Scheduled" || name === "Agents" || name === "Plugins" ? "link" : "button", { name, exact: true });
+      : page.getByRole(name === "New chat" ? "button" : name === "Pull requests" || name === "Projects" || name === "Sites" || name === "Scheduled" || name === "Agents" || name === "Plugins" ? "link" : "button", { name, exact: true });
     await expect(control).toBeFocused();
     await expectVisibleKeyboardFocus(control);
   }
@@ -969,7 +970,7 @@ test("keyboard-only navigation reaches every workspace and exposes visible focus
   const projectChat = page.getByRole("button", { name: "New chat in consumer-app" });
   await expect(projectChat).toBeFocused();
   await expectVisibleKeyboardFocus(projectChat);
-  const owner = page.getByRole("button", { name: /Local owner/ });
+  const owner = page.getByRole("button", { name: "Open owner menu" });
   for (let index = 0; index < 8 && !(await owner.evaluate((element) => document.activeElement === element)); index += 1) {
     await page.keyboard.press("Tab");
   }
@@ -1100,7 +1101,7 @@ test("narrow layout keeps the mode switch reachable without page overflow", asyn
   await page.setViewportSize({ width: 720, height: 900 });
   await page.goto("/");
 
-  const owner = page.getByRole("button", { name: /Local owner/ });
+  const owner = page.getByRole("button", { name: "Open owner menu" });
   await expect(owner).toBeVisible();
   await owner.click();
   await openOwnerSurface(page, "Settings");

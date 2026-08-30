@@ -88,6 +88,15 @@ def find_node(nodes: Iterable[Any], role: str, names: set[str]) -> Any | None:
     return None
 
 
+def find_node_prefix(
+    nodes: Iterable[Any], role: str, prefixes: tuple[str, ...]
+) -> Any | None:
+    for node in nodes:
+        if role_name(node) == role and accessible_name(node).startswith(prefixes):
+            return node
+    return None
+
+
 def wait_for_node(app: Any, role: str, names: set[str], deadline: float) -> Any:
     while time.monotonic() < deadline:
         node = find_node(walk(app), role, names)
@@ -315,6 +324,19 @@ def read_settings(host: str, token: str) -> dict[str, Any]:
         return json.load(response)
 
 
+def wait_for_interface_complexity(
+    host: str, token: str, expected: str, deadline: float
+) -> dict[str, Any]:
+    while time.monotonic() < deadline:
+        settings = read_settings(host, token)
+        if settings.get("interface_complexity") == expected:
+            return settings
+        time.sleep(0.1)
+    raise RuntimeError(
+        f"The native interface control did not persist {expected!r} complexity"
+    )
+
+
 def wait_for_guided_settings(
     host: str, token: str, previous_revision: int, deadline: float
 ) -> dict[str, Any]:
@@ -364,19 +386,13 @@ def main() -> int:
 
     nodes = walk(app)
     required = {
-        "frame": find_node(nodes, "frame", {"MCG"}),
-        "document": find_node(nodes, "document web", {"MCG"}),
+        "frame": find_node_prefix(nodes, "frame", ("MCG", "MetaCog")),
+        "document": find_node_prefix(nodes, "document web", ("MCG", "MetaCog")),
         "primary_navigation": find_node(nodes, "landmark", {"Primary navigation"}),
-        "goal": find_node(nodes, "entry", {"Goal"}),
-        "open_folder": find_node(nodes, "push button", {"Open folder"}),
-        "create_task": find_node(nodes, "push button", {"Create task"}),
-        "openai_oauth": find_node(
-            nodes,
-            "push button",
-            {"Continue with OpenAI", "Connect with OpenAI"},
-        ),
-        "add_provider": find_node(nodes, "push button", {"Add API or local provider"}),
-        "settings": find_node(nodes, "landmark", {"Settings"}),
+        "message": find_node(nodes, "entry", {"Message"}),
+        "choose_project": find_node(nodes, "push button", {"Choose project"}),
+        "new_chat": find_node(nodes, "push button", {"New chat"}),
+        "interface": find_node(nodes, "push button", {"Cycle interface complexity"}),
     }
     missing = [name for name, node in required.items() if node is None]
     if missing:
@@ -385,11 +401,10 @@ def main() -> int:
         )
 
     focusable_required = [
-        "goal",
-        "open_folder",
-        "create_task",
-        "openai_oauth",
-        "add_provider",
+        "message",
+        "choose_project",
+        "new_chat",
+        "interface",
     ]
     not_focusable = [
         name
@@ -416,37 +431,28 @@ def main() -> int:
             + ", ".join(unnamed_focusable)
         )
 
-    goal = required["goal"]
-    assert goal is not None
-    goal.queryComponent().scrollTo(pyatspi.SCROLL_ANYWHERE)
-    if not goal.queryComponent().grabFocus():
-        raise RuntimeError("AT-SPI could not focus the Goal control")
-    wait_for_focused(
-        app, "Goal", pyatspi.STATE_FOCUSED, time.monotonic() + args.timeout_seconds
-    )
-    subprocess.run(["xdotool", "key", "Tab"], check=True, timeout=5)
-    if args.reviewed_topology_marker is not None:
-        wait_for_focused_prefix(
+    for key, label in (
+        ("message", "Message"),
+        ("choose_project", "Choose project"),
+        ("new_chat", "New chat"),
+    ):
+        control = required[key]
+        assert control is not None
+        control.queryComponent().scrollTo(pyatspi.SCROLL_ANYWHERE)
+        if not control.queryComponent().grabFocus():
+            raise RuntimeError(f"AT-SPI could not focus the {label} control")
+        wait_for_focused(
             app,
-            "combo box",
-            "Project ",
+            label,
             pyatspi.STATE_FOCUSED,
             time.monotonic() + args.timeout_seconds,
         )
-        subprocess.run(["xdotool", "key", "Tab"], check=True, timeout=5)
-    wait_for_focused(
-        app,
-        "Open folder",
-        pyatspi.STATE_FOCUSED,
-        time.monotonic() + args.timeout_seconds,
-    )
-    subprocess.run(["xdotool", "key", "Tab"], check=True, timeout=5)
-    wait_for_focused(
-        app,
-        "Create task",
-        pyatspi.STATE_FOCUSED,
-        time.monotonic() + args.timeout_seconds,
-    )
+
+    if not args.host or args.token_file is None:
+        raise RuntimeError("Three-level native UAT requires --host and --token-file")
+    token = args.token_file.read_text(encoding="utf-8").strip()
+    if not token:
+        raise RuntimeError("The installed loopback token is empty")
 
     mode = wait_for_node(
         app,
@@ -457,9 +463,10 @@ def main() -> int:
     if not has_state(mode, pyatspi.STATE_FOCUSABLE):
         raise RuntimeError("The mode switch is not keyboard-focusable through AT-SPI")
     click_accessible(mode, pyatspi)
-    wait_for_named_node(
-        app,
-        {"Advanced"},
+    wait_for_interface_complexity(
+        args.host,
+        token,
+        "advanced",
         time.monotonic() + args.timeout_seconds,
     )
     mode = wait_for_node(
@@ -469,11 +476,45 @@ def main() -> int:
         time.monotonic() + args.timeout_seconds,
     )
     click_accessible(mode, pyatspi)
-    wait_for_named_node(
-        app,
-        {"Developer"},
+    wait_for_interface_complexity(
+        args.host,
+        token,
+        "developer",
         time.monotonic() + args.timeout_seconds,
     )
+
+    subprocess.run(["xdotool", "key", "ctrl+comma"], check=True, timeout=5)
+    wait_for_named_node(
+        app, {"Interface complexity"}, time.monotonic() + args.timeout_seconds
+    )
+    wait_for_named_node(
+        app,
+        {
+            "Developer mode remains governed: protected policy, evaluator fixtures, Root authority, signing keys, secrets, direct database writes, and trust bypasses are unavailable or read-only."
+        },
+        time.monotonic() + args.timeout_seconds,
+    )
+    runtime_inspector = wait_for_named_node(
+        app,
+        {"Runtime contract inspector"},
+        time.monotonic() + args.timeout_seconds,
+    )
+    click_accessible(runtime_inspector, pyatspi)
+    runtime_contract = wait_for_named_node(
+        app,
+        {"Current runtime settings contract"},
+        time.monotonic() + args.timeout_seconds,
+    )
+    wait_for_text_content(
+        runtime_contract,
+        {"developer", "protected-root", "protocol_version", "storage_schema_version"},
+        time.monotonic() + args.timeout_seconds,
+    )
+
+    models = wait_for_node(
+        app, "push button", {"Models"}, time.monotonic() + args.timeout_seconds
+    )
+    click_accessible(models, pyatspi)
 
     add_provider = wait_for_node(
         app,
@@ -504,20 +545,12 @@ def main() -> int:
 
     reviewed_topology_qualified = False
     if args.reviewed_topology_marker is not None:
-        if not args.host or args.token_file is None:
-            raise RuntimeError("Reviewed-topology UAT requires --host and --token-file")
-        token = args.token_file.read_text(encoding="utf-8").strip()
-        if not token:
-            raise RuntimeError("The installed loopback token is empty")
         marker = args.reviewed_topology_marker.resolve()
         if marker.exists():
             raise RuntimeError(
                 "Reviewed-topology marker already exists before native interaction"
             )
-        settings = wait_for_node(
-            app, "link", {"Settings"}, time.monotonic() + args.timeout_seconds
-        )
-        click_accessible(settings, pyatspi)
+        subprocess.run(["xdotool", "key", "ctrl+comma"], check=True, timeout=5)
         autonomy = wait_for_combo_with_options(
             app,
             {"Guided", "Balanced", "Autonomous"},
@@ -634,13 +667,10 @@ def main() -> int:
         "required_controls_named": True,
         "required_controls_focusable": True,
         "unnamed_focusable_control_roles": [],
-        "keyboard_focus_sequence": (
-            ["Goal", "Project", "Open folder", "Create task"]
-            if args.reviewed_topology_marker is not None
-            else ["Goal", "Open folder", "Create task"]
-        ),
+        "keyboard_focus_sequence": ["Message", "Choose project", "New chat"],
         "simple_to_advanced_to_developer_native_input": True,
         "interface_levels_share_one_runtime": True,
+        "developer_protected_root_contract_visible": True,
         "developer_protected_controls_read_only": True,
         "credential_control_role": "password text",
         "credential_accessible_value_redacted": True,

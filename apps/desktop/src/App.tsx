@@ -7952,6 +7952,7 @@ export function App() {
           <button className={activeSurface === "tasks" ? "nav-item active" : "nav-item"} type="button" onClick={() => startNewChat()}><SquarePen className="shortcut-glyph" aria-hidden="true" />New chat</button>
           {([
             { surface: "pull-requests", label: "Pull requests", Icon: GitPullRequest },
+            { surface: "projects", label: "Projects", Icon: FolderOpen },
             { surface: "sites", label: "Sites", Icon: PanelsTopLeft },
             { surface: "scheduler", label: "Scheduled", Icon: Clock3 },
             { surface: "agents", label: "Agents", Icon: Workflow },
@@ -7978,7 +7979,7 @@ export function App() {
           </section>
         </div>
         <div className="sidebar-account-area" data-transient-popover-root="owner-menu">
-          <button className="owner-menu-button" type="button" aria-expanded={ownerMenuOpen} onClick={() => setOwnerMenuOpen((current) => !current)}><AccountAvatar className="owner-avatar" profile={signedInWithOpenAi ? openAiProfile : undefined} avatarUrl={signedInWithOpenAi ? openAiAvatarUrl : undefined} fallback={signedInWithOpenAi ? "O" : "M"} /><span><strong>{signedInWithOpenAi ? openAiAccountName : "Local owner"}</strong><small>{signedInWithOpenAi ? openAiAccountDetail : "Not signed in"}</small></span><span aria-hidden="true">⋯</span></button>
+          <button className="owner-menu-button" type="button" aria-label="Open owner menu" aria-expanded={ownerMenuOpen} onClick={() => setOwnerMenuOpen((current) => !current)}><AccountAvatar className="owner-avatar" profile={signedInWithOpenAi ? openAiProfile : undefined} avatarUrl={signedInWithOpenAi ? openAiAvatarUrl : undefined} fallback={signedInWithOpenAi ? "O" : "M"} /><span><strong>{signedInWithOpenAi ? openAiAccountName : "Local owner"}</strong><small>{signedInWithOpenAi ? openAiAccountDetail : "Not signed in"}</small></span><span aria-hidden="true">⋯</span></button>
           <div className={`owner-menu${ownerMenuOpen ? " open" : ""}`} aria-label="Owner menu">
             <div className="owner-menu-identity"><AccountAvatar className="owner-avatar" profile={signedInWithOpenAi ? openAiProfile : undefined} avatarUrl={signedInWithOpenAi ? openAiAvatarUrl : undefined} fallback={signedInWithOpenAi ? "O" : "M"} /><span><strong>{signedInWithOpenAi ? openAiAccountName : "Local owner"}</strong><small>{signedInWithOpenAi ? openAiAccountDetail : "MetaCog workspace"}</small></span></div>
             <button

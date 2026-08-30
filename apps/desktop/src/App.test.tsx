@@ -3043,7 +3043,7 @@ test("transient menus close on outside interaction, Escape, and app focus loss",
   expect(runDetails.open).toBe(false);
   await waitFor(() => expect(runTrigger).toHaveFocus());
 
-  const ownerTrigger = screen.getByRole("button", { name: /Local owner/ });
+  const ownerTrigger = screen.getByRole("button", { name: "Open owner menu" });
   fireEvent.click(ownerTrigger);
   expect(screen.getByLabelText("Owner menu")).toHaveClass("open");
   fireEvent.pointerDown(screen.getByRole("textbox", { name: "Message" }));
@@ -3167,7 +3167,7 @@ test("account menu stays compact and logs out only ChatGPT OAuth connections", a
   client.disconnectProvider.mockResolvedValue(undefined);
   render(<App />);
 
-  fireEvent.click(await screen.findByRole("button", { name: /Hendo/ }));
+  fireEvent.click(await screen.findByRole("button", { name: "Open owner menu" }));
   const menu = screen.getByLabelText("Owner menu");
   expect(within(menu).getByText("hendo420")).toBeInTheDocument();
   expect(document.querySelector('img[src="https://example.com/avatar.png"]')).toBeInTheDocument();
@@ -3189,12 +3189,12 @@ test("account menu stays compact and logs out only ChatGPT OAuth connections", a
   expect((await screen.findAllByText("ChatGPT Plus")).length).toBeGreaterThan(0);
   expect(screen.getByText("76%")).toBeInTheDocument();
   expect(screen.getByText("20%")).toBeInTheDocument();
-  fireEvent.click(screen.getByRole("button", { name: /Hendo/ }));
+  fireEvent.click(screen.getByRole("button", { name: "Open owner menu" }));
   fireEvent.click(within(menu).getByRole("button", { name: "Log out" }));
 
   await waitFor(() => expect(client.disconnectProvider).toHaveBeenCalledWith(oauth.id));
   expect(client.disconnectProvider).not.toHaveBeenCalledWith(api.id);
-  expect(await screen.findByRole("button", { name: /Local owner/ })).toBeInTheDocument();
+  expect(await screen.findByRole("button", { name: "Open owner menu" })).toBeInTheDocument();
 });
 
 test("a locally chosen account photo persists for the matching ChatGPT profile", async () => {
@@ -3226,7 +3226,7 @@ test("a locally chosen account photo persists for the matching ChatGPT profile",
 
 test("Settings follows the grouped Codex navigation and filters sections", async () => {
   render(<App />);
-  fireEvent.click(screen.getByRole("button", { name: /Local owner/ }));
+  fireEvent.click(screen.getByRole("button", { name: "Open owner menu" }));
   fireEvent.click(within(screen.getByLabelText("Owner menu")).getByRole("button", { name: /Settings/ }));
 
   const navigation = screen.getByRole("navigation", { name: "Settings sections" });
@@ -3247,7 +3247,7 @@ test("Settings follows the grouped Codex navigation and filters sections", async
 
 test("integration and coding settings expose sectioned Codex-style controls", async () => {
   render(<App />);
-  fireEvent.click(screen.getByRole("button", { name: /Local owner/ }));
+  fireEvent.click(screen.getByRole("button", { name: "Open owner menu" }));
   fireEvent.click(within(screen.getByLabelText("Owner menu")).getByRole("button", { name: /Settings/ }));
   const settingsNavigation = screen.getByRole("navigation", { name: "Settings sections" });
   expect(within(settingsNavigation).queryByRole("button", { name: "Hooks" })).not.toBeInTheDocument();
@@ -3303,7 +3303,7 @@ test("advanced Hooks reviews exact definitions and trusts through the shared con
   vi.spyOn(window, "confirm").mockReturnValue(true);
   render(<App />);
   await enableAdvancedMode();
-  fireEvent.click(screen.getByRole("button", { name: /Local owner/ }));
+  fireEvent.click(screen.getByRole("button", { name: "Open owner menu" }));
   fireEvent.click(within(screen.getByLabelText("Owner menu")).getByRole("button", { name: /Settings/ }));
   fireEvent.click(within(screen.getByRole("navigation", { name: "Settings sections" })).getByRole("button", { name: "Hooks" }));
 
@@ -3331,7 +3331,7 @@ test("advanced configuration exposes searchable Codex feature flags and persists
 
   expect(screen.queryByText("Codex feature flags")).not.toBeInTheDocument();
   await enableAdvancedMode();
-  fireEvent.click(screen.getByRole("button", { name: /Local owner/ }));
+  fireEvent.click(screen.getByRole("button", { name: "Open owner menu" }));
   fireEvent.click(within(screen.getByLabelText("Owner menu")).getByRole("button", { name: /Settings/ }));
   fireEvent.click(within(screen.getByRole("navigation", { name: "Settings sections" })).getByRole("button", { name: "Configuration" }));
   fireEvent.click(await screen.findByText("Codex feature flags"));
@@ -3347,7 +3347,7 @@ test("advanced configuration exposes searchable Codex feature flags and persists
 test("advanced configuration connects an authenticated remote Codex app-server without storing a token", async () => {
   render(<App />);
   await enableAdvancedMode();
-  fireEvent.click(screen.getByRole("button", { name: /Local owner/ }));
+  fireEvent.click(screen.getByRole("button", { name: "Open owner menu" }));
   fireEvent.click(within(screen.getByLabelText("Owner menu")).getByRole("button", { name: /Settings/ }));
   fireEvent.click(within(screen.getByRole("navigation", { name: "Settings sections" })).getByRole("button", { name: "Configuration" }));
   fireEvent.click(await screen.findByText("Codex app-server transport"));
@@ -3370,7 +3370,7 @@ test("account settings expose Codex device-code login", async () => {
     .mockResolvedValueOnce({ authenticated: false, requires_openai_auth: true })
     .mockResolvedValue({ authenticated: true, email: "owner@example.com", plan_type: "plus", requires_openai_auth: true });
   render(<App />);
-  fireEvent.click(screen.getByRole("button", { name: /Local owner/ }));
+  fireEvent.click(screen.getByRole("button", { name: "Open owner menu" }));
   fireEvent.click(within(screen.getByLabelText("Owner menu")).getByRole("button", { name: /Settings/ }));
   fireEvent.click(within(screen.getByRole("navigation", { name: "Settings sections" })).getByRole("button", { name: "Account" }));
   fireEvent.click(await screen.findByRole("button", { name: "Use device code" }));
@@ -3387,7 +3387,7 @@ test("advanced account settings submit API credentials once and clear the field"
     .mockResolvedValue({ authenticated: true, account_type: "api_key", requires_openai_auth: true });
   render(<App />);
   await enableAdvancedMode();
-  fireEvent.click(screen.getByRole("button", { name: /Local owner/ }));
+  fireEvent.click(screen.getByRole("button", { name: "Open owner menu" }));
   fireEvent.click(within(screen.getByLabelText("Owner menu")).getByRole("button", { name: /Settings/ }));
   fireEvent.click(within(screen.getByRole("navigation", { name: "Settings sections" })).getByRole("button", { name: "Account" }));
   fireEvent.click(await screen.findByText("Credential login"));
@@ -3425,7 +3425,7 @@ test("advanced configuration runs governed Windows sandbox setup and read grants
 
   expect(screen.queryByText("Windows sandbox", { exact: true })).not.toBeInTheDocument();
   await enableAdvancedMode();
-  fireEvent.click(screen.getByRole("button", { name: /Local owner/ }));
+  fireEvent.click(screen.getByRole("button", { name: "Open owner menu" }));
   fireEvent.click(within(screen.getByLabelText("Owner menu")).getByRole("button", { name: /Settings/ }));
   fireEvent.click(within(screen.getByRole("navigation", { name: "Settings sections" })).getByRole("button", { name: "Configuration" }));
   fireEvent.click(await screen.findByText("Windows sandbox", { exact: true }));
@@ -3450,7 +3450,7 @@ test("Git settings complete browser sign-in and show accessible repositories", a
   client.completeGitHubLogin.mockResolvedValue({ configured: true, connected: true, account: { login: "owner", name: "Owner", html_url: "https://github.com/owner" } });
   client.listGitHubRepositories.mockResolvedValue({ repositories: [{ id: 1, full_name: "owner/project", private: true, html_url: "https://github.com/owner/project", clone_url: "https://github.com/owner/project.git", default_branch: "main" }] });
   render(<App />);
-  fireEvent.click(screen.getByRole("button", { name: /Local owner/ }));
+  fireEvent.click(screen.getByRole("button", { name: "Open owner menu" }));
   fireEvent.click(within(screen.getByLabelText("Owner menu")).getByRole("button", { name: /Settings/ }));
   fireEvent.click(within(screen.getByRole("navigation", { name: "Settings sections" })).getByRole("button", { name: "Git" }));
 
