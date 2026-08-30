@@ -46,10 +46,12 @@ macro_rules! stable_uuid {
 }
 
 stable_uuid!(RuntimeInstanceId);
+stable_uuid!(RuntimeActorId);
 stable_uuid!(TaskContractId);
 stable_uuid!(WorkflowId);
 stable_uuid!(AttemptId);
 stable_uuid!(EventId);
+stable_uuid!(ConfigurationId);
 stable_uuid!(ActionId);
 stable_uuid!(ActionExecutionId);
 stable_uuid!(ActionReceiptId);
@@ -392,13 +394,76 @@ pub struct VersionedRef<T> {
     pub content_hash: ContentHash,
 }
 
+/// Immutable reference to evidence or user intent stored outside the contract.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceRef {
+    pub source_type: StableTypeId,
+    pub locator: String,
+    pub content_hash: ContentHash,
+}
+
+/// A stable, source-backed statement in a task contract.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContractClause {
+    pub clause_id: String,
+    pub statement: String,
+    pub source_refs: Vec<SourceRef>,
+}
+
+/// A versioned policy/configuration payload whose implementation belongs to a later trust layer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PolicyBinding {
+    pub payload: VersionedPayload,
+    pub content_hash: ContentHash,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskContractStatus {
+    Draft,
+    Active,
+    Superseded,
+    Cancelled,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskContract {
     pub id: TaskContractId,
     pub version: u64,
+    pub previous_version: Option<VersionedRef<TaskContractId>>,
+    pub user_intent_ref: SourceRef,
     pub objective: String,
-    pub constraints: Vec<String>,
-    pub acceptance_criteria: Vec<String>,
+    pub non_goals: Vec<String>,
+    pub requirements: Vec<ContractClause>,
+    pub constraints: Vec<ContractClause>,
+    pub assumptions: Vec<ContractClause>,
+    pub acceptance_criteria: Vec<ContractClause>,
+    pub dependencies: Vec<VersionedRef<TaskContractId>>,
+    pub permitted_side_effects: PolicyBinding,
+    pub authority: PolicyBinding,
+    pub environment: PolicyBinding,
+    pub risk: PolicyBinding,
+    pub budgets: PolicyBinding,
+    pub rollback: PolicyBinding,
+    pub status: TaskContractStatus,
+    pub created_at: DateTime<Utc>,
+}
+
+impl TaskContract {
+    pub const SCHEMA_VERSION: u32 = 1;
+    pub const TYPE_ID: &'static str = "mcg.task_contract.v1";
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WaitReason {
+    User,
+    Approval,
+    External,
+    RetryBackoff,
+    Dependency,
+    Reconciliation,
+    ProtectedComponent,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -406,7 +471,7 @@ pub struct TaskContract {
 pub enum WorkflowState {
     Ready,
     Running,
-    Waiting,
+    Waiting(WaitReason),
     Verifying,
     Succeeded,
     Failed,
@@ -417,20 +482,28 @@ pub enum WorkflowState {
 
 impl WorkflowState {
     #[must_use]
+    pub const fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            Self::Succeeded | Self::Failed | Self::Cancelled | Self::Quarantined
+        )
+    }
+
+    #[must_use]
     pub const fn can_transition_to(self, next: Self) -> bool {
         matches!(
             (self, next),
             (Self::Ready, Self::Running)
                 | (
                     Self::Running,
-                    Self::Waiting
+                    Self::Waiting(_)
                         | Self::Verifying
                         | Self::Failed
                         | Self::CancelRequested
                         | Self::Quarantined
                 )
                 | (
-                    Self::Waiting,
+                    Self::Waiting(_),
                     Self::Ready | Self::Failed | Self::CancelRequested | Self::Quarantined
                 )
                 | (
@@ -443,10 +516,24 @@ impl WorkflowState {
                 )
                 | (
                     Self::CancelRequested,
-                    Self::Cancelled | Self::Waiting | Self::Quarantined
+                    Self::Cancelled | Self::Waiting(WaitReason::Reconciliation) | Self::Quarantined
                 )
         )
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactRef {
+    pub content_hash: ContentHash,
+    pub media_type: String,
+    pub byte_length: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetryPolicy {
+    pub max_attempts: u32,
+    pub initial_backoff_ms: u64,
+    pub maximum_backoff_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -454,11 +541,61 @@ pub struct WorkflowAttempt {
     pub workflow_id: WorkflowId,
     pub attempt_id: AttemptId,
     pub task_contract: VersionedRef<TaskContractId>,
+    pub parent_attempt_id: Option<AttemptId>,
+    pub attempt_number: u32,
     pub state: WorkflowState,
-    pub lease_owner: Option<RuntimeInstanceId>,
+    pub revision: u64,
+    pub lease_owner: Option<RuntimeActorId>,
     pub lease_generation: u64,
     pub lease_expires_at: Option<DateTime<Utc>>,
+    pub heartbeat_at: Option<DateTime<Utc>>,
+    pub checkpoint: Option<ArtifactRef>,
+    pub environment_snapshot: ContentHash,
+    pub configuration: VersionedRef<ConfigurationId>,
     pub idempotency_key: String,
+    pub retry_policy: RetryPolicy,
+    pub compensation_policy: PolicyBinding,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl WorkflowAttempt {
+    pub const SCHEMA_VERSION: u32 = 1;
+    pub const TYPE_ID: &'static str = "mcg.workflow_attempt.v1";
+
+    /// Returns whether a worker result still belongs to this authoritative attempt generation.
+    #[must_use]
+    pub fn accepts_worker_result(&self, attempt_id: AttemptId, lease_generation: u64) -> bool {
+        matches!(
+            self.state,
+            WorkflowState::Running | WorkflowState::Verifying
+        ) && self.attempt_id == attempt_id
+            && self.lease_generation == lease_generation
+            && self.lease_owner.is_some()
+    }
+}
+
+/// Ordered Root-owned workflow evidence. Projection consumers never author these events.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowEvent {
+    pub id: EventId,
+    pub type_id: StableTypeId,
+    pub schema_version: u32,
+    pub sequence: u64,
+    pub workflow_id: WorkflowId,
+    pub attempt_id: AttemptId,
+    pub attempt_revision: u64,
+    pub lease_generation: u64,
+    pub correlation_id: CorrelationId,
+    pub causation_id: Option<EventId>,
+    pub idempotency_key: String,
+    pub occurred_at: DateTime<Utc>,
+    pub payload: VersionedPayload,
+}
+
+impl WorkflowEvent {
+    pub const SCHEMA_VERSION: u32 = 1;
+    pub const TYPE_ID: &'static str = "mcg.workflow_event.v1";
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -741,6 +878,132 @@ mod tests {
         assert!(WorkflowState::Verifying.can_transition_to(WorkflowState::Ready));
         assert!(!WorkflowState::Ready.can_transition_to(WorkflowState::Succeeded));
         assert!(!WorkflowState::Succeeded.can_transition_to(WorkflowState::Running));
+        assert!(
+            WorkflowState::CancelRequested
+                .can_transition_to(WorkflowState::Waiting(WaitReason::Reconciliation))
+        );
+        assert!(
+            !WorkflowState::CancelRequested
+                .can_transition_to(WorkflowState::Waiting(WaitReason::User))
+        );
+    }
+
+    #[test]
+    fn workflow_transition_table_is_exhaustive_and_terminals_are_monotonic() {
+        let states = [
+            WorkflowState::Ready,
+            WorkflowState::Running,
+            WorkflowState::Waiting(WaitReason::User),
+            WorkflowState::Waiting(WaitReason::Approval),
+            WorkflowState::Waiting(WaitReason::External),
+            WorkflowState::Waiting(WaitReason::RetryBackoff),
+            WorkflowState::Waiting(WaitReason::Dependency),
+            WorkflowState::Waiting(WaitReason::Reconciliation),
+            WorkflowState::Waiting(WaitReason::ProtectedComponent),
+            WorkflowState::Verifying,
+            WorkflowState::Succeeded,
+            WorkflowState::Failed,
+            WorkflowState::CancelRequested,
+            WorkflowState::Cancelled,
+            WorkflowState::Quarantined,
+        ];
+        for from in states {
+            for to in states {
+                let expected = matches!(
+                    (from, to),
+                    (WorkflowState::Ready, WorkflowState::Running)
+                        | (
+                            WorkflowState::Running,
+                            WorkflowState::Waiting(_)
+                                | WorkflowState::Verifying
+                                | WorkflowState::Failed
+                                | WorkflowState::CancelRequested
+                                | WorkflowState::Quarantined
+                        )
+                        | (
+                            WorkflowState::Waiting(_),
+                            WorkflowState::Ready
+                                | WorkflowState::Failed
+                                | WorkflowState::CancelRequested
+                                | WorkflowState::Quarantined
+                        )
+                        | (
+                            WorkflowState::Verifying,
+                            WorkflowState::Succeeded
+                                | WorkflowState::Ready
+                                | WorkflowState::Failed
+                                | WorkflowState::CancelRequested
+                                | WorkflowState::Quarantined
+                        )
+                        | (
+                            WorkflowState::CancelRequested,
+                            WorkflowState::Cancelled
+                                | WorkflowState::Waiting(WaitReason::Reconciliation)
+                                | WorkflowState::Quarantined
+                        )
+                );
+                assert_eq!(
+                    from.can_transition_to(to),
+                    expected,
+                    "unexpected transition result for {from:?} -> {to:?}"
+                );
+                if from.is_terminal() {
+                    assert!(!from.can_transition_to(to));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn workflow_worker_results_are_generation_and_attempt_fenced() {
+        let attempt_id = AttemptId::new();
+        let attempt = WorkflowAttempt {
+            workflow_id: WorkflowId::new(),
+            attempt_id,
+            task_contract: VersionedRef {
+                id: TaskContractId::new(),
+                version: 1,
+                content_hash: fixture_hash("task-contract"),
+            },
+            parent_attempt_id: None,
+            attempt_number: 1,
+            state: WorkflowState::Running,
+            revision: 2,
+            lease_owner: Some(RuntimeActorId::new()),
+            lease_generation: 7,
+            lease_expires_at: None,
+            heartbeat_at: None,
+            checkpoint: None,
+            environment_snapshot: fixture_hash("environment"),
+            configuration: VersionedRef {
+                id: ConfigurationId::new(),
+                version: 1,
+                content_hash: fixture_hash("configuration"),
+            },
+            idempotency_key: "workflow-attempt-1".to_owned(),
+            retry_policy: RetryPolicy {
+                max_attempts: 3,
+                initial_backoff_ms: 100,
+                maximum_backoff_ms: 1_000,
+            },
+            compensation_policy: fixture_policy("compensation"),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        assert!(attempt.accepts_worker_result(attempt_id, 7));
+        assert!(!attempt.accepts_worker_result(attempt_id, 6));
+        assert!(!attempt.accepts_worker_result(AttemptId::new(), 7));
+
+        let mut terminal = attempt;
+        terminal.state = WorkflowState::Failed;
+        assert!(!terminal.accepts_worker_result(attempt_id, 7));
+        terminal.state = WorkflowState::CancelRequested;
+        assert!(!terminal.accepts_worker_result(attempt_id, 7));
+
+        assert_eq!(TaskContract::SCHEMA_VERSION, 1);
+        assert_eq!(TaskContract::TYPE_ID, "mcg.task_contract.v1");
+        assert_eq!(WorkflowAttempt::TYPE_ID, "mcg.workflow_attempt.v1");
+        assert_eq!(WorkflowEvent::TYPE_ID, "mcg.workflow_event.v1");
     }
 
     #[test]
@@ -771,6 +1034,29 @@ mod tests {
                 !manifest.contains(forbidden),
                 "forbidden dependency: {forbidden}"
             );
+        }
+    }
+
+    fn fixture_hash(label: &str) -> ContentHash {
+        VersionedPayload::canonical_v1(
+            StableTypeId::parse("test.fixture_hash.v1").unwrap(),
+            &json!({"label": label}),
+        )
+        .unwrap()
+        .content_hash("TestFixture")
+        .unwrap()
+    }
+
+    fn fixture_policy(label: &str) -> PolicyBinding {
+        let payload = VersionedPayload::canonical_v1(
+            StableTypeId::parse("test.policy.v1").unwrap(),
+            &json!({"policy": label}),
+        )
+        .unwrap();
+        let content_hash = payload.content_hash("TestPolicy").unwrap();
+        PolicyBinding {
+            payload,
+            content_hash,
         }
     }
 

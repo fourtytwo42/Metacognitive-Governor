@@ -57,7 +57,7 @@ use mcg_config::{
     AppConfig, AutonomyPreset, CliTuiPreferences, InterfaceComplexity, UserSettings,
     UserSettingsRevision,
 };
-use mcg_contracts::RuntimeIdentity;
+use mcg_contracts::{CorrelationId, RuntimeIdentity};
 use mcg_domain::{
     AgentContextCheckpoint, AgentContextCheckpointCause, AgentContextCheckpointId,
     AgentCredentialAudit, AgentCredentialAuditId, AgentCredentialAuditKind, AgentDelegation,
@@ -140,8 +140,9 @@ use mcg_providers::{
 use mcg_storage::{
     AgentRecoveryReport, AgentTurnDisposition, BackupMcpSecret, BackupProviderSecret,
     BackupSecretSnapshot, DataDirectoryLock, RecoveryReport, RootMigrationReceipt, RootOwnership,
-    STORAGE_SCHEMA_VERSION, SqliteEventStore, StorageError, acquire_data_directory_lock,
-    create_encrypted_backup_bundle_from_snapshot, decrypt_backup_bundle_secrets,
+    STORAGE_SCHEMA_VERSION, SqliteEventStore, StorageError, WorkflowRecoveryReport,
+    acquire_data_directory_lock, create_encrypted_backup_bundle_from_snapshot,
+    decrypt_backup_bundle_secrets,
 };
 pub use mcg_storage::{
     AgentTurnCommit, AutomaticExperimentDisposition, AutomaticExperimentOutcome,
@@ -3412,6 +3413,19 @@ impl AppRuntime {
     /// Returns a runtime error when the record cannot be loaded.
     pub fn root_ownership(&self) -> Result<Option<RootOwnership>, RuntimeError> {
         Ok(self.store()?.root_ownership()?)
+    }
+
+    /// Runs the canonical Root-owned expired workflow lease scanner.
+    ///
+    /// # Errors
+    /// Returns a runtime error when authoritative workflow evidence cannot be read or committed.
+    pub fn recover_expired_workflows(
+        &self,
+        now: DateTime<Utc>,
+    ) -> Result<WorkflowRecoveryReport, RuntimeError> {
+        Ok(self
+            .store()?
+            .recover_expired_workflow_leases(CorrelationId::new(), now)?)
     }
 
     /// Creates an isolated runtime for tests and embedded deterministic fixtures.

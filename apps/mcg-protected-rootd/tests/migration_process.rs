@@ -10,7 +10,8 @@ use std::{
 use mcg_domain::Conversation;
 use mcg_platform::{query_root_status, root_ipc_session_path};
 use mcg_storage::{
-    SqliteEventStore, inspect_database_before_root, restore_backup_bundle, verify_backup_bundle,
+    STORAGE_SCHEMA_VERSION, SqliteEventStore, inspect_database_before_root, restore_backup_bundle,
+    verify_backup_bundle,
 };
 use rusqlite::Connection;
 
@@ -105,7 +106,15 @@ async fn old_profile_survives_interruption_retry_and_verified_backup_restore() {
     }
     Connection::open(&database)
         .expect("open fixture for schema downgrade")
-        .execute_batch("DROP TABLE root_ownership; DELETE FROM mcg_schema WHERE version = 51;")
+        .execute_batch(
+            "DROP TABLE workflow_events;
+             DROP TABLE workflow_attempts;
+             DROP TABLE task_contract_dependencies;
+             DROP TABLE task_contract_heads;
+             DROP TABLE task_contract_versions;
+             DROP TABLE root_ownership;
+             DELETE FROM mcg_schema WHERE version IN (51, 52);",
+        )
         .expect("create representative schema-50 fixture");
     let before = inspect_database_before_root(&database).expect("inspect schema-50 fixture");
     assert_eq!(before.schema_version, 50);
@@ -126,7 +135,7 @@ async fn old_profile_survives_interruption_retry_and_verified_backup_restore() {
 
     let mut retried = spawn_root(original.path(), false);
     let retry_status = wait_for_root(original.path()).await;
-    assert_eq!(retry_status.storage_schema_version, 51);
+    assert_eq!(retry_status.storage_schema_version, STORAGE_SCHEMA_VERSION);
     assert_eq!(retry_status.migration_receipt.from_storage_schema, 50);
     stop_process(&mut retried);
     let migrated = SqliteEventStore::open(&database).expect("open migrated original profile");
@@ -149,7 +158,10 @@ async fn old_profile_survives_interruption_retry_and_verified_backup_restore() {
 
     let mut restored_root = spawn_root(restored.path(), false);
     let restored_status = wait_for_root(restored.path()).await;
-    assert_eq!(restored_status.storage_schema_version, 51);
+    assert_eq!(
+        restored_status.storage_schema_version,
+        STORAGE_SCHEMA_VERSION
+    );
     assert_eq!(restored_status.migration_receipt.from_storage_schema, 50);
     stop_process(&mut restored_root);
     let restored_store =

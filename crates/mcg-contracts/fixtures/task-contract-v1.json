@@ -1,0 +1,107 @@
+{
+  "id": "00000000-0000-4000-8000-000000000001",
+  "version": 1,
+  "previous_version": null,
+  "user_intent_ref": {
+    "source_type": "mcg.user_intent.v1",
+    "locator": "conversation:golden-fixture",
+    "content_hash": {
+      "algorithm": "blake3-256",
+      "domain": "MetaCog.UserIntent",
+      "digest_hex": "1111111111111111111111111111111111111111111111111111111111111111"
+    }
+  },
+  "objective": "Recover the exact durable workflow after restart.",
+  "non_goals": ["Execute an external effect."],
+  "requirements": [],
+  "constraints": [],
+  "assumptions": [],
+  "acceptance_criteria": [],
+  "dependencies": [],
+  "permitted_side_effects": {
+    "payload": {
+      "type_id": "mcg.policy.side_effects.v1",
+      "schema_version": 1,
+      "canonical_encoding": "canonical-cbor-v1",
+      "normalization": "acar-normalization-v1",
+      "bytes": [160]
+    },
+    "content_hash": {
+      "algorithm": "blake3-256",
+      "domain": "MetaCog.Policy",
+      "digest_hex": "2222222222222222222222222222222222222222222222222222222222222222"
+    }
+  },
+  "authority": {
+    "payload": {
+      "type_id": "mcg.policy.authority.v1",
+      "schema_version": 1,
+      "canonical_encoding": "canonical-cbor-v1",
+      "normalization": "acar-normalization-v1",
+      "bytes": [160]
+    },
+    "content_hash": {
+      "algorithm": "blake3-256",
+      "domain": "MetaCog.Policy",
+      "digest_hex": "3333333333333333333333333333333333333333333333333333333333333333"
+    }
+  },
+  "environment": {
+    "payload": {
+      "type_id": "mcg.policy.environment.v1",
+      "schema_version": 1,
+      "canonical_encoding": "canonical-cbor-v1",
+      "normalization": "acar-normalization-v1",
+      "bytes": [160]
+    },
+    "content_hash": {
+      "algorithm": "blake3-256",
+      "domain": "MetaCog.Policy",
+      "digest_hex": "4444444444444444444444444444444444444444444444444444444444444444"
+    }
+  },
+  "risk": {
+    "payload": {
+      "type_id": "mcg.policy.risk.v1",
+      "schema_version": 1,
+      "canonical_encoding": "canonical-cbor-v1",
+      "normalization": "acar-normalization-v1",
+      "bytes": [160]
+    },
+    "content_hash": {
+      "algorithm": "blake3-256",
+      "domain": "MetaCog.Policy",
+      "digest_hex": "5555555555555555555555555555555555555555555555555555555555555555"
+    }
+  },
+  "budgets": {
+    "payload": {
+      "type_id": "mcg.policy.budgets.v1",
+      "schema_version": 1,
+      "canonical_encoding": "canonical-cbor-v1",
+      "normalization": "acar-normalization-v1",
+      "bytes": [160]
+    },
+    "content_hash": {
+      "algorithm": "blake3-256",
+      "domain": "MetaCog.Policy",
+      "digest_hex": "6666666666666666666666666666666666666666666666666666666666666666"
+    }
+  },
+  "rollback": {
+    "payload": {
+      "type_id": "mcg.policy.rollback.v1",
+      "schema_version": 1,
+      "canonical_encoding": "canonical-cbor-v1",
+      "normalization": "acar-normalization-v1",
+      "bytes": [160]
+    },
+    "content_hash": {
+      "algorithm": "blake3-256",
+      "domain": "MetaCog.Policy",
+      "digest_hex": "7777777777777777777777777777777777777777777777777777777777777777"
+    }
+  },
+  "status": "active",
+  "created_at": "2026-08-30T12:00:00Z"
+}

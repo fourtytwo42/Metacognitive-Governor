@@ -1,0 +1,8 @@
+{
+  "stable_type_id": "mcg.task_contract.v1",
+  "schema_version": 1,
+  "canonical_encoding": "canonical-cbor-v1",
+  "canonical_normalization": "acar-normalization-v1",
+  "semantic_domain": "MetaCog.TaskContract",
+  "blake3_256": "18b0ba14d68d758351d78d11c1d6a0e9839bd509930f1d3ba27a718e51918c32"
+}

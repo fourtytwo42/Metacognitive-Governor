@@ -45,6 +45,7 @@ mod shadow_workspaces;
 mod sites;
 mod ssh;
 mod ssh_workflows;
+mod workflows;
 
 pub use backup::{
     BACKUP_BUNDLE_SCHEMA_VERSION, BackupBundleEntry, BackupBundleManifest, BackupBundleSummary,
@@ -70,9 +71,10 @@ pub use experiments::{
 pub use plugins::PluginRecoveryReport;
 pub use scheduler::{ScheduleClaim, ScheduleWakeMutation};
 pub use shadow_workspaces::ShadowWorkspaceMutation;
+pub use workflows::{WorkflowRecoveryReport, task_contract_content_hash};
 
 type EventRow = (i64, String, i64, String, Option<String>, String, String);
-pub const STORAGE_SCHEMA_VERSION: i64 = 51;
+pub const STORAGE_SCHEMA_VERSION: i64 = 52;
 
 const MIGRATION_1: &str = r"
 CREATE TABLE IF NOT EXISTS events (
@@ -1705,6 +1707,85 @@ CREATE TABLE IF NOT EXISTS root_ownership (
 );
 ";
 
+const MIGRATION_52: &str = r"
+CREATE TABLE IF NOT EXISTS task_contract_versions (
+    task_contract_id TEXT NOT NULL,
+    version INTEGER NOT NULL CHECK(version > 0),
+    type_id TEXT NOT NULL,
+    schema_version INTEGER NOT NULL CHECK(schema_version > 0),
+    content_hash_json TEXT NOT NULL,
+    contract_json TEXT NOT NULL,
+    status TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY(task_contract_id, version)
+);
+CREATE TABLE IF NOT EXISTS task_contract_heads (
+    task_contract_id TEXT PRIMARY KEY,
+    current_version INTEGER NOT NULL,
+    revision INTEGER NOT NULL CHECK(revision > 0),
+    FOREIGN KEY(task_contract_id, current_version)
+        REFERENCES task_contract_versions(task_contract_id, version)
+);
+CREATE TABLE IF NOT EXISTS task_contract_dependencies (
+    task_contract_id TEXT NOT NULL,
+    task_contract_version INTEGER NOT NULL,
+    dependency_id TEXT NOT NULL,
+    dependency_version INTEGER NOT NULL,
+    PRIMARY KEY(task_contract_id, task_contract_version, dependency_id, dependency_version),
+    FOREIGN KEY(task_contract_id, task_contract_version)
+        REFERENCES task_contract_versions(task_contract_id, version),
+    FOREIGN KEY(dependency_id, dependency_version)
+        REFERENCES task_contract_versions(task_contract_id, version),
+    CHECK(task_contract_id <> dependency_id)
+);
+CREATE TABLE IF NOT EXISTS workflow_attempts (
+    attempt_id TEXT PRIMARY KEY,
+    workflow_id TEXT NOT NULL,
+    attempt_number INTEGER NOT NULL CHECK(attempt_number > 0),
+    parent_attempt_id TEXT,
+    task_contract_id TEXT NOT NULL,
+    task_contract_version INTEGER NOT NULL,
+    state TEXT NOT NULL,
+    revision INTEGER NOT NULL CHECK(revision > 0),
+    lease_generation INTEGER NOT NULL CHECK(lease_generation >= 0),
+    lease_owner TEXT,
+    lease_expires_at TEXT,
+    heartbeat_at TEXT,
+    idempotency_key TEXT NOT NULL,
+    attempt_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(workflow_id, attempt_number),
+    UNIQUE(workflow_id, idempotency_key),
+    FOREIGN KEY(task_contract_id, task_contract_version)
+        REFERENCES task_contract_versions(task_contract_id, version),
+    FOREIGN KEY(parent_attempt_id) REFERENCES workflow_attempts(attempt_id)
+);
+CREATE INDEX IF NOT EXISTS workflow_attempts_state_updated
+    ON workflow_attempts(state, updated_at, workflow_id);
+CREATE TABLE IF NOT EXISTS workflow_events (
+    event_id TEXT PRIMARY KEY,
+    workflow_id TEXT NOT NULL,
+    sequence INTEGER NOT NULL CHECK(sequence > 0),
+    attempt_id TEXT NOT NULL,
+    attempt_revision INTEGER NOT NULL CHECK(attempt_revision > 0),
+    lease_generation INTEGER NOT NULL CHECK(lease_generation >= 0),
+    type_id TEXT NOT NULL,
+    schema_version INTEGER NOT NULL CHECK(schema_version > 0),
+    correlation_id TEXT NOT NULL,
+    causation_id TEXT,
+    idempotency_key TEXT NOT NULL,
+    event_json TEXT NOT NULL,
+    occurred_at TEXT NOT NULL,
+    UNIQUE(workflow_id, sequence),
+    UNIQUE(workflow_id, idempotency_key),
+    FOREIGN KEY(attempt_id) REFERENCES workflow_attempts(attempt_id),
+    FOREIGN KEY(causation_id) REFERENCES workflow_events(event_id)
+);
+CREATE INDEX IF NOT EXISTS workflow_events_attempt_sequence
+    ON workflow_events(attempt_id, sequence);
+";
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RootOwnership {
     pub runtime_identity: RuntimeIdentity,
@@ -1822,6 +1903,8 @@ pub enum StorageError {
     SshHostNotFound(mcg_domain::SshHostId),
     #[error("SSH workflow {0} was not found")]
     SshWorkflowNotFound(mcg_domain::SshWorkflowId),
+    #[error("workflow attempt {0} was not found")]
+    WorkflowAttemptNotFound(mcg_contracts::AttemptId),
     #[error("reviewed topology plan {0} was not found")]
     ReviewedTopologyPlanNotFound(mcg_domain::ReviewedTopologyPlanId),
     #[error("organization share review {0} was not found")]
@@ -1970,6 +2053,7 @@ impl SqliteEventStore {
             (49_i64, MIGRATION_49),
             (50_i64, MIGRATION_50),
             (51_i64, MIGRATION_51),
+            (52_i64, MIGRATION_52),
         ] {
             let applied = self.connection.query_row(
                 "SELECT EXISTS(SELECT 1 FROM mcg_schema WHERE version = ?1)",
@@ -5740,8 +5824,13 @@ mod tests {
             store
                 .connection
                 .execute_batch(
-                    "DROP TABLE root_ownership;
-                     DELETE FROM mcg_schema WHERE version = 51;",
+                    "DROP TABLE workflow_events;
+                     DROP TABLE workflow_attempts;
+                     DROP TABLE task_contract_dependencies;
+                     DROP TABLE task_contract_heads;
+                     DROP TABLE task_contract_versions;
+                     DROP TABLE root_ownership;
+                     DELETE FROM mcg_schema WHERE version IN (51, 52);",
                 )
                 .expect("downgrade fixture to schema 50");
         }

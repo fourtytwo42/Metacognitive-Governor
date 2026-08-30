@@ -70,6 +70,15 @@ pub fn open(config: AppConfig) -> Result<Arc<AppRuntime>, ProtectedRootError> {
     )?);
     let identity = current_runtime_identity()?;
     runtime.initialize_root_ownership(identity, migration_receipt)?;
+    let workflow_recovery = runtime.recover_expired_workflows(Utc::now())?;
+    if workflow_recovery.fenced_expired > 0 {
+        info!(
+            fenced_expired = workflow_recovery.fenced_expired,
+            awaiting_reconciliation = workflow_recovery.awaiting_reconciliation,
+            requeued_for_verification = workflow_recovery.requeued_for_verification,
+            "recovered expired canonical workflow leases"
+        );
+    }
     Ok(runtime)
 }
 
@@ -395,9 +404,113 @@ fn path_relative_to(root: &Path, path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mcg_contracts::{CorrelationId, SessionId};
+    use mcg_contracts::{
+        AttemptId, ConfigurationId, ContractClause, CorrelationId, HashAlgorithm, PolicyBinding,
+        RetryPolicy, RuntimeActorId, SessionId, SourceRef, TaskContract, TaskContractId,
+        TaskContractStatus, VersionedRef, WaitReason, WorkflowAttempt, WorkflowId, WorkflowState,
+    };
     use mcg_platform::{exchange_root_rpc, query_root_status, root_ipc_session_path};
-    use mcg_storage::{SqliteEventStore, verify_backup_bundle};
+    use mcg_storage::{SqliteEventStore, task_contract_content_hash, verify_backup_bundle};
+
+    fn workflow_hash(label: &str) -> ContentHash {
+        VersionedPayload::canonical_v1(
+            StableTypeId::parse("test.root_workflow_ref.v1").expect("reference type"),
+            &serde_json::json!({"label": label}),
+        )
+        .expect("reference payload")
+        .content_hash("TestRootWorkflowRef")
+        .expect("reference hash")
+    }
+
+    fn workflow_policy(label: &str) -> PolicyBinding {
+        let payload = VersionedPayload::canonical_v1(
+            StableTypeId::parse("test.root_workflow_policy.v1").expect("policy type"),
+            &serde_json::json!({"policy": label}),
+        )
+        .expect("policy payload");
+        let content_hash = payload
+            .content_hash("TestRootWorkflowPolicy")
+            .expect("policy hash");
+        PolicyBinding {
+            payload,
+            content_hash,
+        }
+    }
+
+    fn expired_workflow_fixture(at: chrono::DateTime<Utc>) -> (TaskContract, WorkflowAttempt) {
+        let task_id = TaskContractId::new();
+        let source = SourceRef {
+            source_type: StableTypeId::parse("test.root_user_intent.v1").expect("source type"),
+            locator: "test:root-restart".into(),
+            content_hash: workflow_hash("intent"),
+        };
+        let criterion = ContractClause {
+            clause_id: "restart".into(),
+            statement: "expired work is fenced on Root restart".into(),
+            source_refs: vec![source.clone()],
+        };
+        let contract = TaskContract {
+            id: task_id,
+            version: 1,
+            previous_version: None,
+            user_intent_ref: source,
+            objective: "prove Root restart recovery".into(),
+            non_goals: Vec::new(),
+            requirements: vec![criterion.clone()],
+            constraints: Vec::new(),
+            assumptions: Vec::new(),
+            acceptance_criteria: vec![criterion],
+            dependencies: Vec::new(),
+            permitted_side_effects: workflow_policy("none"),
+            authority: workflow_policy("root"),
+            environment: workflow_policy("test"),
+            risk: workflow_policy("low"),
+            budgets: workflow_policy("bounded"),
+            rollback: workflow_policy("not-required"),
+            status: TaskContractStatus::Active,
+            created_at: at,
+        };
+        let mut attempt = WorkflowAttempt {
+            workflow_id: WorkflowId::new(),
+            attempt_id: AttemptId::new(),
+            task_contract: VersionedRef {
+                id: task_id,
+                version: 1,
+                content_hash: ContentHash {
+                    algorithm: HashAlgorithm::Blake3_256,
+                    domain: "MetaCog.TaskContract".into(),
+                    digest_hex: "0".repeat(64),
+                },
+            },
+            parent_attempt_id: None,
+            attempt_number: 1,
+            state: WorkflowState::Ready,
+            revision: 1,
+            lease_owner: None,
+            lease_generation: 0,
+            lease_expires_at: None,
+            heartbeat_at: None,
+            checkpoint: None,
+            environment_snapshot: workflow_hash("environment"),
+            configuration: VersionedRef {
+                id: ConfigurationId::new(),
+                version: 1,
+                content_hash: workflow_hash("configuration"),
+            },
+            idempotency_key: "root-restart-create".into(),
+            retry_policy: RetryPolicy {
+                max_attempts: 2,
+                initial_backoff_ms: 100,
+                maximum_backoff_ms: 1_000,
+            },
+            compensation_policy: workflow_policy("reconcile"),
+            created_at: at,
+            updated_at: at,
+        };
+        attempt.task_contract.content_hash =
+            task_contract_content_hash(&contract).expect("task contract hash");
+        (contract, attempt)
+    }
 
     fn status_request(session: &RootIpcSession) -> AuthenticatedRpcRequest {
         AuthenticatedRpcRequest {
@@ -466,6 +579,54 @@ mod tests {
                 .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "mcgb"))
                 .count(),
             1
+        );
+    }
+
+    #[test]
+    fn root_startup_fences_an_expired_canonical_workflow_generation() {
+        let temporary = tempfile::tempdir().expect("temporary Root data directory");
+        let config = AppConfig::default().with_data_directory(temporary.path());
+        let seeded_at = Utc::now() - chrono::Duration::minutes(3);
+        let (contract, attempt) = expired_workflow_fixture(seeded_at);
+        {
+            let mut store = SqliteEventStore::open(config.database_path()).expect("workflow store");
+            store
+                .create_workflow(&contract, &attempt, CorrelationId::new(), seeded_at)
+                .expect("create workflow");
+            store
+                .claim_workflow_attempt(
+                    attempt.attempt_id,
+                    1,
+                    0,
+                    RuntimeActorId::new(),
+                    seeded_at + chrono::Duration::minutes(1),
+                    CorrelationId::new(),
+                    "root-restart-claim",
+                    seeded_at,
+                )
+                .expect("claim workflow before simulated death");
+        }
+
+        let runtime = open(config.clone()).expect("restart Protected Root");
+        drop(runtime);
+        let store = SqliteEventStore::open(config.database_path()).expect("reopen recovered store");
+        let recovered = store
+            .workflow_attempt(attempt.attempt_id)
+            .expect("workflow query")
+            .expect("recovered workflow");
+        assert_eq!(
+            recovered.state,
+            WorkflowState::Waiting(WaitReason::Reconciliation)
+        );
+        assert_eq!(recovered.revision, 3);
+        assert_eq!(recovered.lease_generation, 2);
+        assert!(recovered.lease_owner.is_none());
+        assert_eq!(
+            store
+                .workflow_events(attempt.workflow_id)
+                .expect("workflow events")
+                .len(),
+            3
         );
     }
 
