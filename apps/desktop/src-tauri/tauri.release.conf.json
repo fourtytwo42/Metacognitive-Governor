@@ -17,6 +17,7 @@
       "binaries/mcg-service",
       "binaries/mcg",
       "binaries/mcg-agent-mcp",
+      "binaries/mcg-action-runner",
       "binaries/mcg-plugin-runner",
       "binaries/mcg-shadow-runner",
       "binaries/mcg-updater"

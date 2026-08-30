@@ -128,7 +128,7 @@ verify_signature() {
 
 verify_payload() {
   local app="$1"
-  for file in mcg-desktop mcg-service mcg mcg-plugin-runner mcg-shadow-runner mcg-updater; do
+  for file in mcg-desktop mcg-service mcg mcg-action-runner mcg-plugin-runner mcg-shadow-runner mcg-updater; do
     [[ -x "$app/Contents/MacOS/$file" ]] || { echo "App bundle is missing executable $file." >&2; exit 1; }
   done
   [[ "$(plutil -extract CFBundleIdentifier raw "$app/Contents/Info.plist")" == "dev.mcg.desktop" ]] || {
@@ -195,6 +195,30 @@ writeFileSync(report, JSON.stringify({valid: validResponse.state, tampered: tamp
 NODE
 }
 
+test_action_runner() {
+  local executable="$1"
+  local report="$2"
+  local qualification_root="$uat_root/action-runner-root"
+  local stderr="$uat_root/action-runner.stderr"
+  mkdir "$qualification_root"
+  "$executable" --qualify-filesystem-root "$qualification_root" >"$report" 2>"$stderr"
+  [[ ! -s "$stderr" ]] || { echo "Packaged action runner wrote unexpected stderr." >&2; exit 1; }
+  node --input-type=module - "$report" <<'NODE'
+import { readFileSync } from "node:fs";
+
+const report = JSON.parse(readFileSync(process.argv[2], "utf8"));
+if (report.created !== "effect_confirmed") throw new Error("action runner create qualification failed");
+if (report.reconciled !== "observational") throw new Error("action runner reconciliation qualification failed");
+if (report.duplicate !== "no_effect_confirmed") throw new Error("action runner duplicate qualification failed");
+if (report.compensated !== "effect_confirmed") throw new Error("action runner compensation qualification failed");
+if (report.final_absent !== true) throw new Error("action runner cleanup qualification failed");
+NODE
+  [[ -z "$(find "$qualification_root" -mindepth 1 -print -quit)" ]] || {
+    echo "Packaged action runner left filesystem residue." >&2
+    exit 1
+  }
+}
+
 hdiutil verify "$dmg" >"$uat_root/dmg-verify.txt"
 hdiutil attach -readonly -nobrowse -mountpoint "$mount_point" "$dmg" >"$uat_root/dmg-attach.txt"
 mounted=true
@@ -212,6 +236,7 @@ ditto "$mounted_app" "$installed_app"
 installed_signature="$(verify_signature "$installed_app" installed)"
 verify_payload "$installed_app"
 test_plugin_runner "$installed_app/Contents/MacOS/mcg-plugin-runner" "$uat_root/plugin-runner.json"
+test_action_runner "$installed_app/Contents/MacOS/mcg-action-runner" "$uat_root/action-runner.json"
 
 sentinel="$service_data/macos-package-uat-retained.txt"
 printf '%s' retain-on-uninstall >"$sentinel"
@@ -471,5 +496,6 @@ REPAIR_PRESERVED_DATA=true
 REINSTALL_PRESERVED_DATA=true
 APPLICATION_REMOVED=true
 PLUGIN_RUNNERS_QUALIFIED=true
+ACTION_RUNNERS_QUALIFIED=true
 NOTARIZATION_REQUIRED=${MCG_MACOS_UAT_REQUIRE_NOTARIZED:-0}
 EOF

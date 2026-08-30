@@ -2,6 +2,15 @@
 
 Durable project context lives here. Update this file whenever information should survive chat context compression or future agent handoff.
 
+### 2026-08-30 - Governed filesystem runner and package contracts
+
+- Context: Stage 4 had a pushed schema-55 ledger but no real effect executor or package identity.
+- Decision: Start with a bounded create-new filesystem effect, observational reconciliation, and exact-hash compensation. Fix the operation hash domain to `MetaCog.ActionOperation`; reject caller-selected domains. Treat the runner only as an effect executor—Protected Root remains the authorization and outcome owner.
+- Files: `apps/mcg-action-runner`; workspace manifests; Desktop Tauri/portable sidecar declarations; sidecar builders; Windows/Linux/macOS package UAT; `docs/NewPRD/{STAGE_4_GOVERNED_ACTIONS.md,REQUIREMENTS_TRACEABILITY.md,IMPLEMENTATION_STATUS_REPORT_2026-08-30.md}`.
+- Commands/tests: Runner 6/6; strict runner all-target Clippy; Desktop Rust 20/20; whole-workspace all-target check; Windows debug sidecar build/copy/qualification; PowerShell and Git Bash syntax; packaging, documentation, formatting, metadata, and diff checks all pass.
+- Result: The one-request runner provides bounded read/inspect, atomic non-overwriting create, exact compensation, explicit effect outcomes, traversal/link/reparse rejection, and empty-root package qualification. It is declared in every package family and the Windows portable payload. Native release packages have not yet been rebuilt or qualified.
+- Follow-up: Add a bounded adjacent-binary Root parent client, derive every request from the authorized ActionEnvelope, durably classify responses, reconcile lost outcomes, then expose action inspection and run the full crash/security/native package matrix.
+
 ### 2026-08-30 - New PRD completion report refreshed through local filesystem runner
 
 - Context: The owner requested a fresh complete-versus-remaining audit while pushed schema-55 action work and an uncommitted governed-filesystem runner coexist with another agent's untracked Stage 3 document.

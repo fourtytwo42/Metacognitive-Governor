@@ -464,9 +464,37 @@ pathlib.Path(report_path).write_text(
 PY
 }
 
+test_action_runner() {
+  local executable="$1"
+  local label="$2"
+  local qualification_root="$uat_root/$label-action-runner-root"
+  local report="$uat_root/$label-action-runner.json"
+  local stderr="$uat_root/$label-action-runner.stderr"
+  mkdir "$qualification_root"
+  chown "$uat_user":"$(id -gn "$uat_user")" "$qualification_root"
+  runuser -u "$uat_user" -- "$executable" --qualify-filesystem-root "$qualification_root" >"$report" 2>"$stderr"
+  [[ ! -s "$stderr" ]] || { echo "$label action runner wrote unexpected stderr." >&2; exit 1; }
+  python3 - "$report" <<'PY'
+import json
+import pathlib
+import sys
+
+report = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+assert report["created"] == "effect_confirmed"
+assert report["reconciled"] == "observational"
+assert report["duplicate"] == "no_effect_confirmed"
+assert report["compensated"] == "effect_confirmed"
+assert report["final_absent"] is True
+PY
+  [[ -z "$(find "$qualification_root" -mindepth 1 -print -quit)" ]] || {
+    echo "$label action runner left filesystem residue." >&2
+    exit 1
+  }
+}
+
 dpkg -i "$deb" >"$uat_root/deb-install.log"
 package_installed=true
-for file in /usr/bin/mcg-desktop /usr/bin/mcg-service /usr/bin/mcg /usr/bin/mcg-plugin-runner /usr/bin/mcg-shadow-runner /usr/bin/mcg-updater \
+for file in /usr/bin/mcg-desktop /usr/bin/mcg-service /usr/bin/mcg /usr/bin/mcg-action-runner /usr/bin/mcg-plugin-runner /usr/bin/mcg-shadow-runner /usr/bin/mcg-updater \
   /usr/lib/MCG/mcg-bwrap /etc/apparmor.d/metacognitive-governor-bwrap; do
   [[ -f "$file" ]] || { echo "Installed payload is missing $file." >&2; exit 1; }
 done
@@ -489,6 +517,7 @@ apparmor_status | grep -Fxq '   metacognitive-governor-unpriv-bwrap'
 /usr/lib/MCG/mcg-bwrap --unshare-all --unshare-user --disable-userns \
   --die-with-parent --ro-bind / / -- /usr/bin/true
 test_plugin_runner /usr/bin/mcg-plugin-runner installed
+test_action_runner /usr/bin/mcg-action-runner installed
 
 sentinel="$installed_data/linux-package-uat-retained.txt"
 runuser -u "$uat_user" -- sh -c 'printf retain-on-uninstall > "$1"' sh "$sentinel"
@@ -864,7 +893,7 @@ appimage_root="$uat_root/appimage"
 mkdir "$appimage_root"
 chown "$uat_user":"$(id -gn "$uat_user")" "$appimage_root"
 runuser -u "$uat_user" -- sh -c 'cd "$1" && "$2" --appimage-extract >/dev/null' sh "$appimage_root" "$appimage"
-for file in AppRun usr/bin/mcg-desktop usr/bin/mcg-service usr/bin/mcg usr/bin/mcg-plugin-runner usr/bin/mcg-shadow-runner usr/bin/mcg-updater; do
+for file in AppRun usr/bin/mcg-desktop usr/bin/mcg-service usr/bin/mcg usr/bin/mcg-action-runner usr/bin/mcg-plugin-runner usr/bin/mcg-shadow-runner usr/bin/mcg-updater; do
   [[ -f "$appimage_root/squashfs-root/$file" ]] || { echo "AppImage is missing $file." >&2; exit 1; }
 done
 [[ -f "$appimage_root/squashfs-root/usr/share/applications/MetaCog.desktop" || \
@@ -876,6 +905,7 @@ find "$appimage_root/squashfs-root" -type f -name THIRD_PARTY_NOTICES.md -print 
 find "$appimage_root/squashfs-root" -type f -name Apache-2.0.txt -print -quit | grep -q .
 find "$appimage_root/squashfs-root" -type f -name Wasmtime-Apache-2.0-WITH-LLVM-exception.txt -print -quit | grep -q .
 test_plugin_runner "$appimage_root/squashfs-root/usr/bin/mcg-plugin-runner" appimage
+test_action_runner "$appimage_root/squashfs-root/usr/bin/mcg-action-runner" appimage
 launch_and_capture "$appimage_root/squashfs-root/AppRun" "$appimage_data" 7777 appimage
 
 dpkg -r "$package_name" >"$uat_root/deb-uninstall.log"
@@ -935,5 +965,6 @@ REPAIR_PRESERVED_DATA=true
 REINSTALL_PRESERVED_DATA=true
 APPLICATION_REMOVED=true
 PLUGIN_RUNNERS_QUALIFIED=true
+ACTION_RUNNERS_QUALIFIED=true
 ENCRYPTED_BACKUP_RESTORE_REPORT=$uat_root/encrypted-restore.json
 EOF

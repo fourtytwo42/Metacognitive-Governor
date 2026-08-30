@@ -345,13 +345,37 @@ try {
     }
     $installationRemoved = $false
 
-    $requiredPayload = @("mcg-desktop.exe", "mcg-service.exe", "mcg.exe", "mcg-agent-mcp.exe", "mcg-plugin-runner.exe", "mcg-shadow-runner.exe", "mcg-updater.exe", "THIRD_PARTY_NOTICES.md", "Apache-2.0.txt", "Wasmtime-Apache-2.0-WITH-LLVM-exception.txt")
+    $requiredPayload = @("mcg-desktop.exe", "mcg-service.exe", "mcg.exe", "mcg-agent-mcp.exe", "mcg-action-runner.exe", "mcg-plugin-runner.exe", "mcg-shadow-runner.exe", "mcg-updater.exe", "THIRD_PARTY_NOTICES.md", "Apache-2.0.txt", "Wasmtime-Apache-2.0-WITH-LLVM-exception.txt")
     $installed = Get-ChildItem -LiteralPath $installRoot -Recurse -File
     foreach ($name in $requiredPayload) {
         if ($installed.Name -notcontains $name) {
             throw "Installed payload is missing $name."
         }
     }
+
+    $actionRunner = Join-Path $installRoot "mcg-action-runner.exe"
+    $actionQualificationRoot = Join-Path $uatRoot "action-runner-qualification"
+    New-Item -ItemType Directory -Path $actionQualificationRoot | Out-Null
+    $actionQualificationStderr = Join-Path $uatRoot "action-runner-stderr.txt"
+    $actionQualificationJson = (& $actionRunner --qualify-filesystem-root $actionQualificationRoot 2> $actionQualificationStderr) -join "`n"
+    if ($LASTEXITCODE -ne 0) {
+        throw "Packaged action runner qualification failed with exit code $LASTEXITCODE."
+    }
+    if ((Get-Item -LiteralPath $actionQualificationStderr).Length -ne 0) {
+        throw "Packaged action runner wrote unexpected stderr."
+    }
+    $actionQualification = $actionQualificationJson | ConvertFrom-Json
+    if ($actionQualification.created -ne "effect_confirmed" -or
+        $actionQualification.reconciled -ne "observational" -or
+        $actionQualification.duplicate -ne "no_effect_confirmed" -or
+        $actionQualification.compensated -ne "effect_confirmed" -or
+        -not $actionQualification.final_absent) {
+        throw "Packaged action runner qualification report is incomplete."
+    }
+    if ((Get-ChildItem -LiteralPath $actionQualificationRoot -Force).Count -ne 0) {
+        throw "Packaged action runner qualification left filesystem residue."
+    }
+    [IO.File]::WriteAllText((Join-Path $uatRoot "action-runner.json"), $actionQualificationJson, [Text.UTF8Encoding]::new($false))
 
     $runner = Join-Path $installRoot "mcg-plugin-runner.exe"
     $module = @'
@@ -760,6 +784,7 @@ try {
         RepairPreservedData = $true
         ReinstallPreservedData = $true
         PluginRunnerQualified = $true
+        ActionRunnerQualified = $true
         AppExecutableRemoved = $true
     }
 } finally {

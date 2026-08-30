@@ -5,6 +5,7 @@ members = [
     "apps/mcg-daemon",
     "apps/mcg-protected-rootd",
     "apps/mcg-agent-mcp",
+    "apps/mcg-action-runner",
     "apps/mcg-plugin-runner",
     "apps/mcg-shadow-runner",
     "apps/mcg-updater",
@@ -35,6 +36,7 @@ default-members = [
     "apps/mcg-daemon",
     "apps/mcg-protected-rootd",
     "apps/mcg-agent-mcp",
+    "apps/mcg-action-runner",
     "apps/mcg-plugin-runner",
     "apps/mcg-shadow-runner",
     "apps/mcg-updater",
@@ -75,6 +77,7 @@ axum = "0.8.9"
 base64 = "0.22.1"
 blake3 = "1.8.2"
 cap-std = "4.0.2"
+cap-fs-ext = "4.0.2"
 chrono = { version = "0.4.42", features = ["serde"] }
 ciborium = "0.2.2"
 chromiumoxide = "0.9.1"
