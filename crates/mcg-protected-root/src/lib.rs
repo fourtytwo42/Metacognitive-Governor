@@ -214,11 +214,9 @@ fn start_root_ipc(
                     break;
                 }
             };
-            if stream
-                .peer_cred()
-                .is_err_or(|credential| credential.uid() != owner_uid)
-            {
-                continue;
+            match stream.peer_cred() {
+                Ok(credential) if credential.uid() == owner_uid => {}
+                _ => continue,
             }
             let Ok(permit) = permits.clone().try_acquire_owned() else {
                 continue;

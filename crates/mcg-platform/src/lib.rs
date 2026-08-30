@@ -1,11 +1,13 @@
 //! Safe cross-platform primitives for Protected Root local IPC.
 
 use std::{
-    fmt::{self, Write as _},
-    fs,
+    fmt, fs,
     io::{ErrorKind, Write as _},
     path::{Path, PathBuf},
 };
+
+#[cfg(windows)]
+use std::fmt::Write as _;
 
 use chrono::{DateTime, Duration, Utc};
 use mcg_contracts::{
@@ -14,6 +16,7 @@ use mcg_contracts::{
     decode_canonical_cbor_v1,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
+#[cfg(windows)]
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use thiserror::Error;
