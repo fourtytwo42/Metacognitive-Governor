@@ -1009,7 +1009,7 @@ function SlashCommandPalette({ value, open, onSelect, hasProject, hasConversatio
 
 function TechnicalDetails({ title, summary, children }: { title: string; summary: string; children: React.ReactNode }) {
   return <details className="technical-details">
-    <summary><span><strong>{title}</strong><small>{summary}</small></span><span aria-hidden="true">⌄</span></summary>
+    <summary aria-label={title} role="button" tabIndex={0}><span aria-hidden="true"><strong>{title}</strong><small>{summary}</small></span><span aria-hidden="true">⌄</span></summary>
     <div className="technical-details-content">{children}</div>
   </details>;
 }

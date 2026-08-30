@@ -14,6 +14,7 @@ repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 deb="${1:-$repository_root/target/release/bundle/deb/MCG_0.1.0_amd64.deb}"
 appimage="${2:-$repository_root/target/release/bundle/appimage/MCG_0.1.0_amd64.AppImage}"
 uat_user="${MCG_UAT_USER:-${SUDO_USER:-$(stat -c '%U' "$repository_root")}}"
+codex_executable="${MCG_CODEX_APP_SERVER_EXECUTABLE:-$(command -v codex || true)}"
 
 [[ -f "$deb" ]] || { echo "Missing deb package: $deb" >&2; exit 1; }
 [[ -f "$appimage" ]] || { echo "Missing AppImage package: $appimage" >&2; exit 1; }
@@ -21,6 +22,15 @@ deb="$(realpath -- "$deb")"
 appimage="$(realpath -- "$appimage")"
 [[ "$uat_user" != "root" ]] || { echo "MCG_UAT_USER must name a non-root desktop user." >&2; exit 1; }
 id "$uat_user" >/dev/null
+[[ -n "$codex_executable" && -x "$codex_executable" ]] || {
+  echo "Linux package UAT requires the pinned Codex executable through MCG_CODEX_APP_SERVER_EXECUTABLE or PATH." >&2
+  exit 1
+}
+codex_executable="$(realpath -- "$codex_executable")"
+[[ "$($codex_executable --version)" == "codex-cli 0.150.1" ]] || {
+  echo "Linux package UAT requires codex-cli 0.150.1." >&2
+  exit 1
+}
 for command in apparmor_parser apparmor_status curl dbus-daemon dpkg dpkg-deb find identify import npm pgrep python3 runuser script ss stat xdotool Xvfb; do
   command -v "$command" >/dev/null || { echo "Missing UAT dependency: $command" >&2; exit 1; }
 done
@@ -449,10 +459,13 @@ PY
 dpkg -i "$deb" >"$uat_root/deb-install.log"
 package_installed=true
 for file in /usr/bin/mcg-desktop /usr/bin/mcg-service /usr/bin/mcg /usr/bin/mcg-plugin-runner /usr/bin/mcg-shadow-runner /usr/bin/mcg-updater \
-  /usr/lib/MCG/mcg-bwrap /etc/apparmor.d/metacognitive-governor-bwrap \
-  /usr/share/applications/MCG.desktop; do
+  /usr/lib/MCG/mcg-bwrap /etc/apparmor.d/metacognitive-governor-bwrap; do
   [[ -f "$file" ]] || { echo "Installed payload is missing $file." >&2; exit 1; }
 done
+[[ -f /usr/share/applications/MetaCog.desktop || -f /usr/share/applications/MCG.desktop ]] || {
+  echo "Installed payload is missing its desktop entry." >&2
+  exit 1
+}
 find /usr/share/icons/hicolor -type f -name 'mcg-desktop.png' -print -quit | grep -q .
 find /usr/lib/MCG -type f -name THIRD_PARTY_NOTICES.md -print -quit | grep -q .
 find /usr/lib/MCG -type f -name Apache-2.0.txt -print -quit | grep -q .
@@ -478,6 +491,7 @@ installed_port=17778
 runuser -u "$uat_user" -- env \
   HOME="$uat_home" XDG_DATA_HOME="$uat_home/.local/share" \
   MCG_DATA_DIR="$installed_data" MCG_BIND_ADDRESS="127.0.0.1:$installed_port" \
+  MCG_CODEX_APP_SERVER_EXECUTABLE="$codex_executable" \
   /usr/bin/mcg-service >"$uat_root/installed-service.log" 2>&1 &
 installed_service_pid=$!
 background_pids+=("$installed_service_pid")
@@ -641,6 +655,7 @@ fi
 runuser -u "$uat_user" -- env \
   HOME="$uat_home" XDG_DATA_HOME="$uat_home/.local/share" \
   MCG_DATA_DIR="$installed_data" MCG_BIND_ADDRESS="127.0.0.1:$installed_port" \
+  MCG_CODEX_APP_SERVER_EXECUTABLE="$codex_executable" \
   /usr/bin/mcg-service >"$uat_root/restarted-service.log" 2>&1 &
 restarted_service_pid=$!
 background_pids+=("$restarted_service_pid")
@@ -747,6 +762,7 @@ launch_and_capture() {
   runuser -u "$uat_user" -- env \
     HOME="$uat_home" XDG_DATA_HOME="$uat_home/.local/share" XDG_RUNTIME_DIR="$uat_runtime" \
     MCG_DATA_DIR="$data_root" MCG_BIND_ADDRESS="127.0.0.1:$port" \
+    MCG_CODEX_APP_SERVER_EXECUTABLE="$codex_executable" \
     "$service_executable" >"$uat_root/$label-prepare-service.log" 2>&1 &
   local prepare_service_pid=$!
   background_pids+=("$prepare_service_pid")
@@ -773,6 +789,7 @@ launch_and_capture() {
     HOME="$uat_home" XDG_DATA_HOME="$uat_home/.local/share" XDG_RUNTIME_DIR="$uat_runtime" DISPLAY="$display" \
     DBUS_SESSION_BUS_ADDRESS="$a11y_dbus_address" NO_AT_BRIDGE=0 GTK_MODULES=gail:atk-bridge \
     MCG_DATA_DIR="$data_root" MCG_BIND_ADDRESS="127.0.0.1:$port" \
+    MCG_CODEX_APP_SERVER_EXECUTABLE="$codex_executable" \
     "$executable" >"$uat_root/$label-desktop.log" 2>&1 &
   local desktop_pid=$!
   background_pids+=("$desktop_pid")

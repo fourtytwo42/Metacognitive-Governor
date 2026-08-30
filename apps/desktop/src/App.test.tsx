@@ -1370,7 +1370,7 @@ test("interface complexity exposes three presentation levels without changing ru
     reason: "Enabled developer interface"
   }));
   expect(within(panel).getByText(/Developer mode remains governed/)).toBeInTheDocument();
-  expect(within(panel).getByText("Runtime contract inspector")).toBeInTheDocument();
+  expect(within(panel).getByRole("button", { name: "Runtime contract inspector" })).toBeInTheDocument();
   expect(within(panel).getByLabelText("Current runtime settings contract")).toHaveTextContent("protected-root");
   expect(within(panel).getByLabelText("Current runtime settings contract")).toHaveTextContent("pre-root.mcgb");
 });
