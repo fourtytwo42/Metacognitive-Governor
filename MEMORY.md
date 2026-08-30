@@ -2,6 +2,15 @@
 
 Durable project context lives here. Update this file whenever information should survive chat context compression or future agent handoff.
 
+### 2026-08-30 - New PRD completion report refreshed through local filesystem runner
+
+- Context: The owner requested a fresh complete-versus-remaining audit while pushed schema-55 action work and an uncommitted governed-filesystem runner coexist with another agent's untracked Stage 3 document.
+- Decision: Count pushed product capability separately from local foundations and release evidence. Stages 0–2 are the completed foundation with cumulative/owner-bound release gates open; Stage 3 is substantial but incomplete; Stage 4 has a pushed authoritative ledger and a focused-test-green local runner that is not yet Root-integrated or packaged; Stages 5–12 remain unbuilt under the new architecture; Stage 13 remains intentionally gated.
+- Files: `docs/NewPRD/IMPLEMENTATION_STATUS_REPORT_2026-08-30.md`; audited but did not modify `docs/NewPRD/STAGE_3_DURABLE_WORKFLOW.md`.
+- Commands/tests: `cargo test -p mcg-action-runner` 4/4; strict all-target runner Clippy passes.
+- Result: The report now distinguishes complete implementation, local uncommitted foundation, and open E2E/UAT/package/release gates through pushed checkpoint `707fbdd`.
+- Follow-up: Finish/package/checkpoint the runner, integrate it with the Root action lifecycle, then close Stages 3–4 before proceeding to the Stage 5 runtime-worker boundary.
+
 ### 2026-08-30 - Schema-55 validated commit and causal compensation
 
 - Context: A confirmed external effect still lacked an exact Root validation/commit boundary, compensation could be represented only as an opaque plan, and irreversible effects had no separate elevated-authority binding.
