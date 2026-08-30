@@ -4,6 +4,8 @@ use std::{collections::HashMap, path::Path, time::Duration};
 
 use chrono::{DateTime, Utc};
 use mcg_agents::{AgentInstance, AgentLease, AgentRun, WorkPlan};
+pub use mcg_contracts::RootMigrationReceipt;
+use mcg_contracts::RuntimeIdentity;
 use mcg_domain::{
     AgentContextCheckpoint, AgentCredentialAudit, AgentDelegation, AgentMessage, AgentWake,
     AgentWakeId, AgentWakeKind, AgentWakeState, AgentWakeTarget, ApprovalId, BlackboardEntry,
@@ -70,7 +72,7 @@ pub use scheduler::{ScheduleClaim, ScheduleWakeMutation};
 pub use shadow_workspaces::ShadowWorkspaceMutation;
 
 type EventRow = (i64, String, i64, String, Option<String>, String, String);
-pub const STORAGE_SCHEMA_VERSION: i64 = 50;
+pub const STORAGE_SCHEMA_VERSION: i64 = 51;
 
 const MIGRATION_1: &str = r"
 CREATE TABLE IF NOT EXISTS events (
@@ -1694,6 +1696,94 @@ CREATE INDEX IF NOT EXISTS cloud_diff_applies_project_updated
     ON cloud_diff_applies(project_id, updated_at DESC, apply_id);
 ";
 
+const MIGRATION_51: &str = r"
+CREATE TABLE IF NOT EXISTS root_ownership (
+    owner_key TEXT PRIMARY KEY CHECK(owner_key = 'protected-root'),
+    runtime_identity_json TEXT NOT NULL,
+    migration_receipt_json TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+";
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RootOwnership {
+    pub runtime_identity: RuntimeIdentity,
+    pub migration_receipt: RootMigrationReceipt,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PreRootDatabaseReport {
+    pub schema_version: i64,
+    pub has_root_ownership: bool,
+}
+
+/// Inspects an existing database without applying migrations or taking write authority.
+///
+/// # Errors
+/// Returns a storage error for unreadable, corrupt, or invalid schema metadata.
+pub fn inspect_database_before_root(path: &Path) -> Result<PreRootDatabaseReport, StorageError> {
+    use rusqlite::OpenFlags;
+
+    let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let integrity =
+        connection.query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0))?;
+    if integrity != "ok" {
+        return Err(StorageError::InvalidData(format!(
+            "database integrity check failed before Root migration: {integrity}"
+        )));
+    }
+    let schema_exists = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'mcg_schema')",
+        [],
+        |row| row.get::<_, bool>(0),
+    )?;
+    let schema_version = if schema_exists {
+        connection.query_row(
+            "SELECT COALESCE(MAX(version), 0) FROM mcg_schema",
+            [],
+            |row| row.get(0),
+        )?
+    } else {
+        0
+    };
+    if schema_version > STORAGE_SCHEMA_VERSION {
+        return Err(StorageError::InvalidData(format!(
+            "database schema version {schema_version} is newer than supported version {STORAGE_SCHEMA_VERSION}"
+        )));
+    }
+    let ownership_table = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'root_ownership')",
+        [],
+        |row| row.get::<_, bool>(0),
+    )?;
+    let has_root_ownership = ownership_table
+        && connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM root_ownership WHERE owner_key = 'protected-root')",
+            [],
+            |row| row.get::<_, bool>(0),
+        )?;
+    Ok(PreRootDatabaseReport {
+        schema_version,
+        has_root_ownership,
+    })
+}
+
+/// Creates a consistent `SQLite` snapshot without opening the source as a migrator.
+///
+/// # Errors
+/// Returns a storage error when the source cannot be opened read-only or copied.
+pub fn snapshot_database_before_root(
+    source: &Path,
+    destination: &Path,
+) -> Result<(), StorageError> {
+    use rusqlite::OpenFlags;
+
+    let connection = Connection::open_with_flags(source, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    connection.backup(rusqlite::MAIN_DB, destination, None)?;
+    Ok(())
+}
+
 #[derive(Debug, Error)]
 pub enum StorageError {
     #[error("storage I/O failed: {0}")]
@@ -1879,6 +1969,7 @@ impl SqliteEventStore {
             (48_i64, MIGRATION_48),
             (49_i64, MIGRATION_49),
             (50_i64, MIGRATION_50),
+            (51_i64, MIGRATION_51),
         ] {
             let applied = self.connection.query_row(
                 "SELECT EXISTS(SELECT 1 FROM mcg_schema WHERE version = ?1)",
@@ -1893,6 +1984,78 @@ impl SqliteEventStore {
             }
         }
         Ok(())
+    }
+
+    /// Creates the immutable installation-level Root ownership record exactly once.
+    ///
+    /// Existing ownership is returned unchanged so a process restart cannot silently
+    /// replace the migrated installation identity or its backup receipt.
+    ///
+    /// # Errors
+    /// Returns a storage error for malformed stored data or a failed transaction.
+    pub fn initialize_root_ownership(
+        &mut self,
+        runtime_identity: &RuntimeIdentity,
+        migration_receipt: &RootMigrationReceipt,
+        now: DateTime<Utc>,
+    ) -> Result<RootOwnership, StorageError> {
+        if let Some(existing) = self.root_ownership()? {
+            return Ok(existing);
+        }
+        if migration_receipt.schema_version != 1
+            || migration_receipt.to_storage_schema != STORAGE_SCHEMA_VERSION
+            || runtime_identity.protocol_version == 0
+        {
+            return Err(StorageError::InvalidData(
+                "Root ownership metadata is invalid".into(),
+            ));
+        }
+        let ownership = RootOwnership {
+            runtime_identity: runtime_identity.clone(),
+            migration_receipt: migration_receipt.clone(),
+            created_at: now,
+        };
+        self.connection.execute(
+            "INSERT INTO root_ownership(owner_key, runtime_identity_json, migration_receipt_json, created_at)
+             VALUES ('protected-root', ?1, ?2, ?3)",
+            params![
+                serde_json::to_string(runtime_identity)?,
+                serde_json::to_string(migration_receipt)?,
+                now.to_rfc3339(),
+            ],
+        )?;
+        Ok(ownership)
+    }
+
+    /// Loads the immutable Root ownership and migration receipt.
+    ///
+    /// # Errors
+    /// Returns a storage error for query or stored-data failures.
+    pub fn root_ownership(&self) -> Result<Option<RootOwnership>, StorageError> {
+        self.connection
+            .query_row(
+                "SELECT runtime_identity_json, migration_receipt_json, created_at
+                 FROM root_ownership WHERE owner_key = 'protected-root'",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .optional()?
+            .map(|(identity, receipt, created_at)| {
+                Ok(RootOwnership {
+                    runtime_identity: serde_json::from_str(&identity)?,
+                    migration_receipt: serde_json::from_str(&receipt)?,
+                    created_at: DateTime::parse_from_rfc3339(&created_at)
+                        .map_err(|error| StorageError::InvalidData(error.to_string()))?
+                        .with_timezone(&Utc),
+                })
+            })
+            .transpose()
     }
 
     /// Persists a chat independently of task/run workflows and records it on the global event log.
@@ -5554,6 +5717,143 @@ mod tests {
         ArtifactReference, TOOL_SCHEMA_VERSION, ToolAuditPhase, ToolOutcomeStatus,
         VerificationEvidence,
     };
+
+    #[test]
+    fn schema_fifty_database_is_detected_and_migrated_to_root_ownership_schema() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("mcg.db");
+        let project_root = directory.path().join("representative-project");
+        std::fs::create_dir(&project_root).expect("project directory");
+        std::fs::write(project_root.join("Cargo.toml"), "[package]\nname='fixture'")
+            .expect("project marker");
+        let project = ProjectDiscoverer::discover(&project_root, ProjectId::new())
+            .expect("representative project");
+        let conversation = Conversation::new("representative existing conversation", None);
+        {
+            let mut store = SqliteEventStore::open(&path).expect("current store");
+            store
+                .record_project_snapshot(&project)
+                .expect("existing project");
+            store
+                .create_conversation(&conversation, Some("legacy-thread"))
+                .expect("existing conversation");
+            store
+                .connection
+                .execute_batch(
+                    "DROP TABLE root_ownership;
+                     DELETE FROM mcg_schema WHERE version = 51;",
+                )
+                .expect("downgrade fixture to schema 50");
+        }
+
+        let before = inspect_database_before_root(&path).expect("read-only pre-Root inspection");
+        assert_eq!(before.schema_version, 50);
+        assert!(!before.has_root_ownership);
+
+        let migrated = SqliteEventStore::open(&path).expect("migrate schema 50 database");
+        assert_eq!(
+            migrated
+                .connection
+                .query_row("SELECT MAX(version) FROM mcg_schema", [], |row| row
+                    .get::<_, i64>(0))
+                .expect("schema version"),
+            STORAGE_SCHEMA_VERSION
+        );
+        assert!(
+            migrated
+                .root_ownership()
+                .expect("ownership query")
+                .is_none()
+        );
+        assert_eq!(
+            migrated
+                .conversation(conversation.id)
+                .expect("conversation query"),
+            Some(conversation)
+        );
+        assert_eq!(migrated.projects().expect("project query"), vec![project]);
+    }
+
+    #[test]
+    fn authoritative_store_enforces_pragmas_and_allows_wal_readers_during_write() {
+        use rusqlite::OpenFlags;
+
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("mcg.db");
+        let store = SqliteEventStore::open(&path).expect("authoritative store");
+        assert_eq!(
+            store
+                .connection
+                .query_row("PRAGMA journal_mode", [], |row| row.get::<_, String>(0))
+                .expect("journal mode")
+                .to_ascii_lowercase(),
+            "wal"
+        );
+        assert_eq!(
+            store
+                .connection
+                .query_row("PRAGMA foreign_keys", [], |row| row.get::<_, i64>(0))
+                .expect("foreign keys"),
+            1
+        );
+        assert_eq!(
+            store
+                .connection
+                .query_row("PRAGMA busy_timeout", [], |row| row.get::<_, i64>(0))
+                .expect("busy timeout"),
+            5_000
+        );
+
+        store
+            .connection
+            .execute_batch("BEGIN IMMEDIATE")
+            .expect("hold writer transaction");
+        let reader_path = path.clone();
+        let version = std::thread::spawn(move || {
+            let reader = Connection::open_with_flags(
+                reader_path,
+                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            )
+            .expect("read-only connection");
+            reader
+                .query_row("SELECT MAX(version) FROM mcg_schema", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .expect("concurrent WAL read")
+        })
+        .join()
+        .expect("reader thread");
+        store
+            .connection
+            .execute_batch("ROLLBACK")
+            .expect("release writer transaction");
+        assert_eq!(version, STORAGE_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn newer_authoritative_schema_is_rejected_without_mutation() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("mcg.db");
+        {
+            let store = SqliteEventStore::open(&path).expect("current store");
+            store
+                .connection
+                .execute(
+                    "INSERT INTO mcg_schema(version) VALUES (?1)",
+                    [STORAGE_SCHEMA_VERSION + 1],
+                )
+                .expect("newer schema fixture");
+        }
+
+        assert!(matches!(
+            inspect_database_before_root(&path),
+            Err(StorageError::InvalidData(message)) if message.contains("newer than supported")
+        ));
+        assert!(matches!(
+            SqliteEventStore::open(&path),
+            Err(StorageError::InvalidData(message)) if message.contains("newer than supported")
+        ));
+    }
 
     #[test]
     fn task_and_event_survive_reopen_with_consistent_sequence() {

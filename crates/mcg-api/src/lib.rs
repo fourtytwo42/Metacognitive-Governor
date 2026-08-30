@@ -98,6 +98,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::{net::TcpListener, sync::watch};
 use tokio_stream::{StreamExt, wrappers::BroadcastStream};
+use tower::limit::ConcurrencyLimitLayer;
 use tower_http::trace::TraceLayer;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
@@ -1515,6 +1516,8 @@ impl IntoResponse for ApiError {
     }
 }
 
+const ROOT_COMPATIBILITY_REQUEST_LIMIT: usize = 64;
+
 pub fn router(runtime: Arc<AppRuntime>) -> Router {
     router_with_shutdown(runtime, None)
 }
@@ -2225,6 +2228,7 @@ fn router_with_shutdown(runtime: Arc<AppRuntime>, shutdown: Option<watch::Sender
         .route("/api/v1/system/health", get(health))
         .merge(internal_agents)
         .merge(protected)
+        .layer(ConcurrencyLimitLayer::new(ROOT_COMPATIBILITY_REQUEST_LIMIT))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }

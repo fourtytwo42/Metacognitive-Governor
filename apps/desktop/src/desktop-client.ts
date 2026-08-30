@@ -1143,6 +1143,30 @@ export interface RuntimeStatus {
   recovered_computer_action_batches: number;
 }
 
+export interface ProtectedRootStatus {
+  schema_version: number;
+  service: string;
+  process_id: number;
+  protocol_version: number;
+  session_id: string;
+  runtime_identity: {
+    instance_id: string;
+    build_hash: { algorithm: "blake3-256" | "sha256"; domain: string; digest_hex: string };
+    protocol_version: number;
+    started_at: string;
+  };
+  storage_schema_version: number;
+  writer_queue_capacity: number;
+  migration_receipt: {
+    schema_version: number;
+    from_storage_schema: number;
+    to_storage_schema: number;
+    backup_path?: string;
+    backup_sha256?: string;
+    migrated_at: string;
+  };
+}
+
 export interface PortableOrganizationGenome {
   schema_version: number;
   source: {
@@ -1901,6 +1925,10 @@ export function listProviders(): Promise<ProviderListResponse> {
 
 export function getLocalServiceStatus(): Promise<LocalServiceStatus> {
   return invoke("local_service_status");
+}
+
+export function getProtectedRootStatus(): Promise<ProtectedRootStatus> {
+  return invoke("protected_root_status");
 }
 
 export function runDiagnostics(): Promise<DiagnosticReport> {

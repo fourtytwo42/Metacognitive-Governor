@@ -172,6 +172,13 @@ fn local_service_status() -> LocalServiceStatus {
 }
 
 #[tauri::command]
+async fn protected_root_status() -> Result<mcg_contracts::RootStatus, String> {
+    mcg_platform::query_root_status(&AppConfig::default().data_directory)
+        .await
+        .map_err(|error| format!("Protected Root status could not be loaded: {error}"))
+}
+
+#[tauri::command]
 async fn run_diagnostics() -> Result<DiagnosticReport, String> {
     let response = reqwest::Client::new()
         .get(format!("{LOCAL_DAEMON}/api/v1/system/diagnostics"))
@@ -3969,6 +3976,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             runtime_label,
             local_service_status,
+            protected_root_status,
             run_diagnostics,
             updater::update_configuration,
             updater::check_for_update,

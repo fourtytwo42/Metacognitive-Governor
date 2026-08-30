@@ -107,6 +107,17 @@ test.beforeEach(async ({ page }) => {
       value: {
         invoke: async (command: string, args: Record<string, any> = {}) => {
           if (command === "get_user_settings") return settings;
+          if (command === "protected_root_status") return {
+            schema_version: 1,
+            service: "protected-root",
+            process_id: 4242,
+            protocol_version: 1,
+            session_id: "00000000-0000-4000-8000-000000000401",
+            runtime_identity: { instance_id: "00000000-0000-4000-8000-000000000402", build_hash: { algorithm: "sha256", domain: "RootExecutable", digest_hex: "a".repeat(64) }, protocol_version: 1, started_at: "2026-08-29T00:00:00Z" },
+            storage_schema_version: 51,
+            writer_queue_capacity: 64,
+            migration_receipt: { schema_version: 1, from_storage_schema: 50, to_storage_schema: 51, backup_path: "backups/pre-root.mcgb", backup_sha256: "b".repeat(64), migrated_at: "2026-08-29T00:00:00Z" }
+          };
           if (command === "update_configuration") return { schema_version: 1, configured: false, current_version: "0.1.0", detail: "This build has no trusted update endpoint." };
           if (command === "user_settings_history") return { revisions: [...history] };
           if (command === "list_backups") return { backups: [] };
@@ -394,6 +405,8 @@ test("Simple Advanced and Developer share one workspace while exposing progressi
   await page.getByRole("radio", { name: /Developer/ }).click();
   await expect(page.getByText(/Developer mode remains governed/)).toBeVisible();
   await expect(page.getByText("Runtime contract inspector")).toBeVisible();
+  await expect(page.getByLabel("Current runtime settings contract")).toContainText("protected-root");
+  await expect(page.getByLabel("Current runtime settings contract")).toContainText("pre-root.mcgb");
 
   await page.getByRole("button", { name: "Back to app" }).click();
   await expect(page.getByRole("button", { name: "Cycle interface complexity" })).toHaveText("Developer");

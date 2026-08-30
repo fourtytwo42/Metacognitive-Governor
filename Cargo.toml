@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "apps/mcg-cli",
     "apps/mcg-daemon",
+    "apps/mcg-protected-rootd",
     "apps/mcg-agent-mcp",
     "apps/mcg-plugin-runner",
     "apps/mcg-shadow-runner",
@@ -17,7 +18,9 @@ members = [
     "crates/mcg-domain",
     "crates/mcg-events",
     "crates/mcg-mcp",
+    "crates/mcg-platform",
     "crates/mcg-policy",
+    "crates/mcg-protected-root",
     "crates/mcg-plugin-protocol",
     "crates/mcg-plugin-trust",
     "crates/mcg-plugins",
@@ -30,6 +33,7 @@ members = [
 default-members = [
     "apps/mcg-cli",
     "apps/mcg-daemon",
+    "apps/mcg-protected-rootd",
     "apps/mcg-agent-mcp",
     "apps/mcg-plugin-runner",
     "apps/mcg-shadow-runner",
@@ -43,7 +47,9 @@ default-members = [
     "crates/mcg-domain",
     "crates/mcg-events",
     "crates/mcg-mcp",
+    "crates/mcg-platform",
     "crates/mcg-policy",
+    "crates/mcg-protected-root",
     "crates/mcg-plugin-protocol",
     "crates/mcg-plugin-trust",
     "crates/mcg-plugins",
@@ -55,7 +61,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "0.4.66"
+version = "0.4.67"
 edition = "2024"
 license = "UNLICENSED"
 rust-version = "1.93"
@@ -111,7 +117,7 @@ proptest = "1.9.0"
 tokio = { version = "1.53.1", features = ["io-std", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-stream = { version = "0.1.18", features = ["sync"] }
 toml = "0.9.12"
-tower = { version = "0.5.3", features = ["util"] }
+tower = { version = "0.5.3", features = ["limit", "util"] }
 tower-http = { version = "0.7.0", features = ["trace"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }

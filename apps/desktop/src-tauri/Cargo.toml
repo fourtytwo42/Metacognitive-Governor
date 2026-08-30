@@ -21,9 +21,11 @@ mcg-agents = { path = "../../../crates/mcg-agents" }
 mcg-api = { path = "../../../crates/mcg-api" }
 mcg-config = { path = "../../../crates/mcg-config" }
 mcg-codex-app-server = { path = "../../../crates/mcg-codex-app-server" }
+mcg-contracts = { path = "../../../crates/mcg-contracts" }
 mcg-domain = { path = "../../../crates/mcg-domain" }
 mcg-events = { path = "../../../crates/mcg-events" }
 mcg-mcp = { path = "../../../crates/mcg-mcp" }
+mcg-platform = { path = "../../../crates/mcg-platform" }
 mcg-providers = { path = "../../../crates/mcg-providers" }
 mcg-runtime = { path = "../../../crates/mcg-runtime" }
 mcg-tools = { path = "../../../crates/mcg-tools" }

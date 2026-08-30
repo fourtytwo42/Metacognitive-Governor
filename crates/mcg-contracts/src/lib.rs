@@ -140,6 +140,35 @@ pub struct RpcEnvelope {
     pub payload: VersionedPayload,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuthenticatedRpcRequest {
+    pub envelope: RpcEnvelope,
+    pub session_capability: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RootMigrationReceipt {
+    pub schema_version: u16,
+    pub from_storage_schema: i64,
+    pub to_storage_schema: i64,
+    pub backup_path: Option<String>,
+    pub backup_sha256: Option<String>,
+    pub migrated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RootStatus {
+    pub schema_version: u16,
+    pub service: String,
+    pub process_id: u32,
+    pub protocol_version: u16,
+    pub session_id: SessionId,
+    pub runtime_identity: RuntimeIdentity,
+    pub storage_schema_version: i64,
+    pub writer_queue_capacity: u32,
+    pub migration_receipt: RootMigrationReceipt,
+}
+
 impl RpcEnvelope {
     /// Validates bounded framing and supported privileged protocol versions.
     ///

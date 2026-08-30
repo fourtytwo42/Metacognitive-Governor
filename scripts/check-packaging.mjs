@@ -39,6 +39,28 @@ const [rootPackage, desktopPackage, cargoManifest, desktopHtml, portableWindowsB
   read("apps/desktop/index.html"),
   read("scripts/build-portable-windows.ps1")
 ]);
+const [rootdManifest, rootdMain, daemonMain, desktopRustManifest, cliMain] = await Promise.all([
+  read("apps/mcg-protected-rootd/Cargo.toml"),
+  read("apps/mcg-protected-rootd/src/main.rs"),
+  read("apps/mcg-daemon/src/main.rs"),
+  read("apps/desktop/src-tauri/Cargo.toml"),
+  read("apps/mcg-cli/src/main.rs")
+]);
+requireText(rootdManifest, 'mcg-protected-root = { path = "../../crates/mcg-protected-root" }', "Protected Root manifest");
+requireText(rootdMain, "mcg_protected_root::serve", "Protected Root executable");
+requireText(daemonMain, "mcg_protected_root::serve", "legacy daemon compatibility entrypoint");
+const desktopProductionDependencies = desktopRustManifest.split("[dev-dependencies]", 1)[0];
+if (desktopProductionDependencies.includes("mcg-storage")) {
+  throw new Error("The production desktop must not link authoritative storage.");
+}
+for (const forbidden of ["SqliteEventStore", "rusqlite::", "Connection::open"]) {
+  if (cliMain.includes(forbidden)) {
+    throw new Error(`The CLI must not acquire ordinary authoritative database access: ${forbidden}`);
+  }
+}
+for (const recoveryPrimitive of ["restore_backup_bundle", "restore_encrypted_backup_bundle"]) {
+  requireText(cliMain, recoveryPrimitive, "explicit stopped-service CLI recovery path");
+}
 const applicationVersion = developmentConfig.version;
 if (
   rootPackage.version !== applicationVersion ||
@@ -265,7 +287,7 @@ for (const [source, label] of [[linuxBuilder, "Linux updater config cleanup"], [
   for (const invariant of ["mktemp -d", "trap cleanup_updater_config EXIT", 'rm -rf -- "$updater_config_directory"']) requireText(source, invariant, label);
 }
 for (const [source, label] of [[windowsPrepare, "Windows sidecar preparer"], [linuxPrepare, "Linux sidecar preparer"]]) {
-  for (const binary of ["mcg", "mcg-daemon", "mcg-service", "mcg-agent-mcp", "mcg-plugin-runner", "mcg-shadow-runner", "mcg-updater"]) requireText(source, binary, label);
+  for (const binary of ["mcg", "mcg-protected-rootd", "mcg-service", "mcg-agent-mcp", "mcg-plugin-runner", "mcg-shadow-runner", "mcg-updater"]) requireText(source, binary, label);
   requireText(source, "rustc -vV", label);
 }
 for (const invariant of ["target-feature=+crt-static", "VCRUNTIME", "MSVCP", "ReadAllBytes", '"rustc", "-p", "mcg-shadow-runner"']) {

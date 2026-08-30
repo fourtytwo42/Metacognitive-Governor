@@ -211,6 +211,7 @@ const client = vi.hoisted(() => ({
   ,checkForUpdate: vi.fn()
   ,installUpdate: vi.fn()
   ,localServiceStatus: vi.fn()
+  ,protectedRootStatus: vi.fn()
   ,listOpenInApplications: vi.fn()
   ,openWorkspaceIn: vi.fn()
   ,runTerminalCommand: vi.fn()
@@ -414,6 +415,7 @@ vi.mock("./desktop-client", () => ({
   checkForUpdate: client.checkForUpdate,
   installUpdate: client.installUpdate,
   getLocalServiceStatus: client.localServiceStatus,
+  getProtectedRootStatus: client.protectedRootStatus,
   listOpenInApplications: client.listOpenInApplications,
   openWorkspaceIn: client.openWorkspaceIn,
   runTerminalCommand: client.runTerminalCommand
@@ -439,6 +441,7 @@ beforeEach(() => {
   window.history.replaceState(null, "", "/");
   window.localStorage.clear();
   client.localServiceStatus.mockReset();
+  client.protectedRootStatus.mockReset();
   client.start.mockReset();
   client.complete.mockReset();
   client.cancel.mockReset();
@@ -916,6 +919,29 @@ beforeEach(() => {
     version: "0.1.0",
     detail: "The packaged local service started successfully."
   });
+  client.protectedRootStatus.mockResolvedValue({
+    schema_version: 1,
+    service: "protected-root",
+    process_id: 4242,
+    protocol_version: 1,
+    session_id: "00000000-0000-4000-8000-000000000401",
+    runtime_identity: {
+      instance_id: "00000000-0000-4000-8000-000000000402",
+      build_hash: { algorithm: "sha256", domain: "RootExecutable", digest_hex: "a".repeat(64) },
+      protocol_version: 1,
+      started_at: "2026-08-29T00:00:00Z"
+    },
+    storage_schema_version: 51,
+    writer_queue_capacity: 64,
+    migration_receipt: {
+      schema_version: 1,
+      from_storage_schema: 50,
+      to_storage_schema: 51,
+      backup_path: "backups/pre-root.mcgb",
+      backup_sha256: "b".repeat(64),
+      migrated_at: "2026-08-29T00:00:00Z"
+    }
+  });
   client.updateSettings.mockImplementation(async (request) => ({
     schema_version: 1,
     revision: request.expected_revision + 1,
@@ -1345,6 +1371,8 @@ test("interface complexity exposes three presentation levels without changing ru
   }));
   expect(within(panel).getByText(/Developer mode remains governed/)).toBeInTheDocument();
   expect(within(panel).getByText("Runtime contract inspector")).toBeInTheDocument();
+  expect(within(panel).getByLabelText("Current runtime settings contract")).toHaveTextContent("protected-root");
+  expect(within(panel).getByLabelText("Current runtime settings contract")).toHaveTextContent("pre-root.mcgb");
 });
 
 test("unsigned development builds fail closed instead of offering an update fallback", async () => {

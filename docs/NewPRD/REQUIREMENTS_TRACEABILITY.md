@@ -1,6 +1,6 @@
 # Cognitive Runtime Requirements Traceability
 
-**Status:** Active implementation matrix; Stage 1 evidence recorded
+**Status:** Active implementation matrix; Stage 1 complete and Stage 2 Windows implementation evidence in progress
 **Purpose:** Map normative requirements to implementation stages, automated evidence, E2E/UAT evidence, and release artifacts
 
 This matrix is updated as implementation lands. `Implemented / cumulative UAT pending` means local implementation and its stage-level automated evidence pass, while final native/cross-platform evidence remains open.
@@ -10,10 +10,10 @@ This matrix is updated as implementation lands. `Implemented / cumulative UAT pe
 | Requirement | Stage | Automated evidence | E2E/UAT evidence | Status |
 |---|---:|---|---|---|
 | Root, Runtime, and Evaluator are separate backend trust-domain processes | 2, 5, 7 | Dependency/process tests | Kill/probe each process independently | Planned |
-| Root is sole authoritative `state.db` writer | 2 | Forbidden dependency + DB access tests | Runtime/UI direct-write attack | Planned |
+| Root is sole authoritative `state.db` writer | 2 | Exclusive owner/DB access tests | Runtime/UI direct-write attack | Root process ownership implemented / attack and package evidence pending |
 | Evaluator is sole `evaluation.db` writer | 7 | Protected store ownership tests | Root/Runtime fixture/store attack | Planned |
 | Runtime proposes cognition but cannot commit authority | 2–5 | Authority/property tests | Proposed mutation must cross Root | Planned |
-| UI is presentation/approval carrier, not authority owner | 2–4 | Tauri/API boundary tests | Client-side tamper/stale approval UAT | Planned |
+| UI is presentation/approval carrier, not authority owner | 2–4 | Tauri/API boundary tests | Client-side tamper/stale approval UAT | Stage 2 read-only Root inspection implemented / later approval gates pending |
 | Evaluator cannot activate a configuration | 7 | Promotion transaction tests | Forged decision/activation attempt | Planned |
 | Production crates cannot depend on research implementation | 1, 7 | Cargo dependency rule | Packaging inspection | Stage 1 boundary implemented / Stage 7 pending |
 | Runtime remains safe when treated as compromised within its OS identity | 2–7 | Security/adversarial suite | Protected path, DB, secret, IPC attacks | Planned |
@@ -26,22 +26,22 @@ This matrix is updated as implementation lands. `Implemented / cumulative UAT pe
 | Versioned canonical encoding and normalization | 1 | Codec/property tests | Old fixture replay | Implemented / cumulative UAT pending |
 | Domain-separated canonical hashes | 1 | Golden hash tests | Upgrade verification | Implemented / cumulative UAT pending |
 | Historical payload bytes remain interpretable | 1 onward | Decoder/upcaster corpus | Multi-version migration | Stage 1 chain implemented / corpus grows by stage |
-| Old canonical history is not rewritten during ordinary migration | 1, 2 | Byte-for-byte migration assertions | Backup/upgrade/restore | Planned |
+| Old canonical history is not rewritten during ordinary migration | 1, 2 | Byte-for-byte migration assertions | Backup/upgrade/restore | Verified pre-migration backup implemented / full fixture comparison pending |
 | Root and Evaluator maintain separate canonical histories | 7 | Cross-store reference tests | Disclosed-summary inspection | Planned |
 | Large immutable artifacts use verified atomic content-addressed storage | 2, 7 | Temp/flush/hash/rename tests | Crash during artifact creation | Planned |
 | Derived indexes are rebuildable and non-authoritative | 8 | Delete/rebuild equivalence | Search before/after rebuild | Planned |
-| Existing MetaCog data migrates into a default runtime lineage | 2 | Migration fixtures | Packaged upgrade UAT | Planned |
-| Unsafe downgrade fails clearly | 2 | Version downgrade tests | Old package against new data copy | Planned |
+| Existing MetaCog data migrates into a default runtime lineage | 2 | Migration fixtures | Packaged upgrade UAT | Schema 50→51 and stable Root identity implemented / packaged UAT pending |
+| Unsafe downgrade fails clearly | 2 | Version downgrade tests | Old package against new data copy | Newer schema refusal implemented / old-package UAT pending |
 
 ## 3. IPC and Process Security
 
 | Requirement | Stage | Automated evidence | E2E/UAT evidence | Status |
 |---|---:|---|---|---|
-| Windows named pipes and Unix-domain sockets | 2 | Platform IPC tests | Native Windows/macOS/Linux process E2E | Planned |
-| Versioned length-framed bounded protocol | 1, 2 | Frame/property tests | Cross-process compatibility | Planned |
-| OS peer identity and per-launch capability | 2 | Wrong-peer/session tests | Forged client attack | Planned |
-| Replay/idempotency protection | 2–4 | Duplicate request tests | Replayed action request | Planned |
-| Oversized/malformed/unknown-version messages fail closed | 2 | Fuzz/boundary tests | Hostile client process | Planned |
+| Windows named pipes and Unix-domain sockets | 2 | Platform IPC tests | Native Windows/macOS/Linux process E2E | Implemented / Windows process pass / macOS/Linux pending |
+| Versioned length-framed bounded protocol | 1, 2 | Frame/property tests | Cross-process compatibility | Implemented / cumulative cross-platform UAT pending |
+| OS peer identity and per-launch capability | 2 | Wrong-peer/session tests | Forged client attack | Capability/session rejection implemented / cross-platform peer UAT pending |
+| Replay/idempotency protection | 2–4 | Duplicate request tests | Replayed action request | Root status replay rejection implemented / action coverage grows in Stage 4 |
+| Oversized/malformed/unknown-version messages fail closed | 2 | Fuzz/boundary tests | Hostile client process | Boundary/version rejection implemented / hostile-process UAT pending |
 | Cancellation and late responses are safe | 3–5 | State/process tests | Cancel during execution | Planned |
 | Root/Runtime/Evaluator death has an explicit restart story | 3–7 | Crash matrix | Packaged kill/restart UAT | Planned |
 

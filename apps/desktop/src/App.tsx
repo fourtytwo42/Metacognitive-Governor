@@ -202,6 +202,7 @@ import {
   loadSshOperations,
   getSiteMonitor,
   getLocalServiceStatus,
+  getProtectedRootStatus,
   getGovernorOverview,
   getGovernorControlPolicy,
   getConversation,
@@ -403,6 +404,7 @@ import {
   type BackupSummary,
   type DiagnosticReport,
   type LocalServiceStatus,
+  type ProtectedRootStatus,
   type UpdateCheck,
   type UpdateConfiguration,
   type TaskEventsResponse,
@@ -2564,6 +2566,7 @@ export function App() {
   const [globalFolderBusy, setGlobalFolderBusy] = useState(false);
   const [globalFolderError, setGlobalFolderError] = useState<string | null>(null);
   const [localService, setLocalService] = useState<LocalServiceStatus | null>(null);
+  const [protectedRoot, setProtectedRoot] = useState<ProtectedRootStatus | null>(null);
   const [advanced, setAdvanced] = useState(false);
   const [userSettings, setUserSettings] = useState<UserSettings | null>(null);
   const [settingsHistory, setSettingsHistory] = useState<UserSettingsRevision[]>([]);
@@ -3969,6 +3972,13 @@ export function App() {
           version: "unknown",
           detail: errorMessage(error)
         });
+      });
+    getProtectedRootStatus()
+      .then((status) => {
+        if (active) setProtectedRoot(status);
+      })
+      .catch(() => {
+        if (active) setProtectedRoot(null);
       });
     getUpdateConfiguration()
       .then((configuration) => {
@@ -8666,6 +8676,7 @@ export function App() {
                 <h2>Runtime status</h2>
                 <dl>
                   <div><dt>Daemon API</dt><dd>Authenticated local loopback</dd></div>
+                  <div><dt>Protected Root</dt><dd>{protectedRoot ? `IPC v${protectedRoot.protocol_version} · schema ${protectedRoot.storage_schema_version}` : "Checking protected IPC…"}</dd></div>
                   <div><dt>Startup</dt><dd>{localService?.detail ?? "Checking packaged service…"}</dd></div>
                   <div><dt>Autonomy</dt><dd>{governorOverview?.autonomy ?? userSettings?.autonomy ?? "Loading"}</dd></div>
                   <div><dt>Organization</dt><dd>{governorOverview?.active_organization.name ?? "Loading"}</dd></div>
@@ -10083,14 +10094,24 @@ export function App() {
               </ul>
             </div>}
             {userSettings.interface_complexity === "developer" && <TechnicalDetails title="Runtime contract inspector" summary="Current compatibility projection">
-              <p className="form-note">This read-only projection exposes the versioned settings contract currently shared by the GUI, CLI, API, and runtime. Protected Root and evaluator internals remain outside this client.</p>
+              <p className="form-note">This read-only projection exposes the shared settings contract and disclosed Protected Root health. Root mutation authority, credentials, and evaluator internals remain outside this client.</p>
               <pre aria-label="Current runtime settings contract">{JSON.stringify({
                 stable_type_id: "metacog.user_settings.v2",
                 schema_version: userSettings.schema_version,
                 revision: userSettings.revision,
                 interface_complexity: userSettings.interface_complexity,
                 authority: "presentation_only",
-                protected_mutation: "root_required"
+                protected_mutation: "root_required",
+                root: protectedRoot ? {
+                  service: protectedRoot.service,
+                  process_id: protectedRoot.process_id,
+                  runtime_identity: protectedRoot.runtime_identity.instance_id,
+                  protocol_version: protectedRoot.protocol_version,
+                  session_id: protectedRoot.session_id,
+                  storage_schema_version: protectedRoot.storage_schema_version,
+                  writer_queue_capacity: protectedRoot.writer_queue_capacity,
+                  migration_receipt: protectedRoot.migration_receipt
+                } : "unavailable"
               }, null, 2)}</pre>
             </TechnicalDetails>}
                 </div><h3>General</h3><div className="settings-card settings-card-stack">

@@ -15,8 +15,8 @@ if [[ -z "$target_triple" ]]; then
 fi
 
 cargo_arguments=(build -p mcg-cli -p mcg-agent-mcp -p mcg-plugin-runner -p mcg-shadow-runner -p mcg-updater)
-if [[ "$profile" == "release" || ! -f "$repository_root/target/debug/mcg-daemon" ]]; then
-  cargo_arguments+=(-p mcg-daemon)
+if [[ "$profile" == "release" || ! -f "$repository_root/target/debug/mcg-protected-rootd" ]]; then
+  cargo_arguments+=(-p mcg-protected-rootd)
 fi
 if [[ "$profile" == "release" ]]; then
   cargo_arguments+=(--release)
@@ -26,7 +26,7 @@ cargo "${cargo_arguments[@]}"
 source_directory="$repository_root/target/$profile"
 sidecar_directory="$repository_root/apps/desktop/src-tauri/binaries"
 mkdir -p "$sidecar_directory"
-for mapping in mcg:mcg mcg-daemon:mcg-service mcg-agent-mcp:mcg-agent-mcp mcg-plugin-runner:mcg-plugin-runner mcg-shadow-runner:mcg-shadow-runner mcg-updater:mcg-updater; do
+for mapping in mcg:mcg mcg-protected-rootd:mcg-service mcg-agent-mcp:mcg-agent-mcp mcg-plugin-runner:mcg-plugin-runner mcg-shadow-runner:mcg-shadow-runner mcg-updater:mcg-updater; do
   binary="${mapping%%:*}"
   sidecar="${mapping##*:}"
   source="$source_directory/$binary"

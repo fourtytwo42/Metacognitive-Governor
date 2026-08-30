@@ -6,16 +6,16 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-mcg-api = { path = "../../crates/mcg-api" }
 mcg-config = { path = "../../crates/mcg-config" }
-mcg-runtime = { path = "../../crates/mcg-runtime" }
+mcg-protected-root = { path = "../../crates/mcg-protected-root" }
 tokio.workspace = true
-tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
 chrono.workspace = true
+mcg-api = { path = "../../crates/mcg-api" }
 mcg-domain = { path = "../../crates/mcg-domain" }
+mcg-runtime = { path = "../../crates/mcg-runtime" }
 reqwest.workspace = true
 tempfile.workspace = true
 

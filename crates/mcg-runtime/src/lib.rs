@@ -57,6 +57,7 @@ use mcg_config::{
     AppConfig, AutonomyPreset, CliTuiPreferences, InterfaceComplexity, UserSettings,
     UserSettingsRevision,
 };
+use mcg_contracts::RuntimeIdentity;
 use mcg_domain::{
     AgentContextCheckpoint, AgentContextCheckpointCause, AgentContextCheckpointId,
     AgentCredentialAudit, AgentCredentialAuditId, AgentCredentialAuditKind, AgentDelegation,
@@ -138,8 +139,8 @@ use mcg_providers::{
 };
 use mcg_storage::{
     AgentRecoveryReport, AgentTurnDisposition, BackupMcpSecret, BackupProviderSecret,
-    BackupSecretSnapshot, DataDirectoryLock, RecoveryReport, STORAGE_SCHEMA_VERSION,
-    SqliteEventStore, StorageError, acquire_data_directory_lock,
+    BackupSecretSnapshot, DataDirectoryLock, RecoveryReport, RootMigrationReceipt, RootOwnership,
+    STORAGE_SCHEMA_VERSION, SqliteEventStore, StorageError, acquire_data_directory_lock,
     create_encrypted_backup_bundle_from_snapshot, decrypt_backup_bundle_secrets,
 };
 pub use mcg_storage::{
@@ -3187,6 +3188,22 @@ impl AppRuntime {
         fs::create_dir_all(&config.data_directory)?;
         restrict_to_owner(&config.data_directory, 0o700)?;
         let data_lock = acquire_data_directory_lock(&config.data_directory)?;
+        Self::open_with_data_directory_lock(config, data_lock)
+    }
+
+    /// Opens the durable runtime using an already-held Root data-directory lock.
+    ///
+    /// This is the production ownership-cutover entrypoint: Protected Root can
+    /// verify a pre-migration backup while retaining exclusive directory ownership.
+    ///
+    /// # Errors
+    /// Returns an error when authentication, migration, or recovery fails.
+    pub fn open_with_data_directory_lock(
+        config: AppConfig,
+        data_lock: DataDirectoryLock,
+    ) -> Result<Self, RuntimeError> {
+        fs::create_dir_all(&config.data_directory)?;
+        restrict_to_owner(&config.data_directory, 0o700)?;
         let auth = LocalAuth::load_or_create(&config.auth_token_path())?;
         let mut store = SqliteEventStore::open(config.database_path())?;
         restrict_to_owner(&config.database_path(), 0o600)?;
@@ -3254,6 +3271,28 @@ impl AppRuntime {
             DeviceAuthorizationConfig::default(),
             None,
         )
+    }
+
+    /// Initializes or loads the immutable Root storage ownership record.
+    ///
+    /// # Errors
+    /// Returns a runtime error when the record cannot be committed or decoded.
+    pub fn initialize_root_ownership(
+        &self,
+        identity: RuntimeIdentity,
+        migration_receipt: RootMigrationReceipt,
+    ) -> Result<RootOwnership, RuntimeError> {
+        Ok(self
+            .store()?
+            .initialize_root_ownership(&identity, &migration_receipt, Utc::now())?)
+    }
+
+    /// Returns immutable Root ownership and migration evidence.
+    ///
+    /// # Errors
+    /// Returns a runtime error when the record cannot be loaded.
+    pub fn root_ownership(&self) -> Result<Option<RootOwnership>, RuntimeError> {
+        Ok(self.store()?.root_ownership()?)
     }
 
     /// Creates an isolated runtime for tests and embedded deterministic fixtures.

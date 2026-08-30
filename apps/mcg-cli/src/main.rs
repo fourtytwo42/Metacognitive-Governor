@@ -296,6 +296,11 @@ enum Command {
         #[arg(long)]
         strict: bool,
     },
+    /// Inspect the Protected Root process, protocol, storage, and migration boundary.
+    Runtime {
+        #[command(subcommand)]
+        command: RuntimeCommand,
+    },
     /// Inspect or change restart-safe owner settings.
     Settings {
         #[command(subcommand)]
@@ -1263,6 +1268,22 @@ enum SettingsCommand {
     },
     /// Show immutable settings revisions.
     History {
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum RuntimeCommand {
+    /// Show concise Protected Root connectivity and authoritative storage health.
+    Status {
+        /// Emit the versioned status contract as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show Root identity, protocol, session, schema, queue, and migration evidence.
+    Inspect {
+        /// Emit the versioned status contract as JSON.
         #[arg(long)]
         json: bool,
     },
@@ -2784,6 +2805,10 @@ async fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
         run_start(&host, &token_path, *timeout_seconds, *json).await?;
         return Ok(());
     }
+    if let Some(Command::Runtime { command }) = &cli.command {
+        run_root_runtime(&config.data_directory, command).await?;
+        return Ok(());
+    }
     if let Some(Command::Backup { command }) = &cli.command {
         match command {
             BackupCommand::Verify { bundle, json } => {
@@ -2890,6 +2915,9 @@ async fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
         }
         Some(Command::Doctor { json, strict }) => {
             run_doctor(&client, host, token.trim(), json, strict).await?;
+        }
+        Some(Command::Runtime { .. }) => {
+            unreachable!("runtime inspection handled before bearer-token loading")
         }
         Some(Command::Settings { command }) => {
             run_settings(&client, host, token.trim(), command).await?;
@@ -10820,6 +10848,59 @@ async fn set_schedule_state_cli(
     Ok(())
 }
 
+async fn run_root_runtime(
+    data_directory: &Path,
+    command: &RuntimeCommand,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let status = mcg_platform::query_root_status(data_directory).await?;
+    let (inspect, json) = match command {
+        RuntimeCommand::Status { json } => (false, *json),
+        RuntimeCommand::Inspect { json } => (true, *json),
+    };
+    if json {
+        println!("{}", serde_json::to_string_pretty(&status)?);
+    } else if inspect {
+        println!("Protected Root");
+        println!("  process: {} ({})", status.service, status.process_id);
+        println!(
+            "  runtime identity: {}",
+            status.runtime_identity.instance_id
+        );
+        println!("  protocol: v{}", status.protocol_version);
+        println!("  IPC session: {}", status.session_id);
+        println!("  storage schema: {}", status.storage_schema_version);
+        println!("  writer queue capacity: {}", status.writer_queue_capacity);
+        println!(
+            "  executable: {:?} {}",
+            status.runtime_identity.build_hash.algorithm,
+            status.runtime_identity.build_hash.digest_hex
+        );
+        if let (Some(path), Some(digest)) = (
+            status.migration_receipt.backup_path.as_deref(),
+            status.migration_receipt.backup_sha256.as_deref(),
+        ) {
+            println!("  migration backup: {path}");
+            println!("  migration backup SHA-256: {digest}");
+        } else {
+            println!("  migration backup: fresh installation; none required");
+        }
+        println!(
+            "  migration: schema {} -> {} at {}",
+            status.migration_receipt.from_storage_schema,
+            status.migration_receipt.to_storage_schema,
+            status.migration_receipt.migrated_at
+        );
+    } else {
+        println!(
+            "Protected Root ready · protocol v{} · storage schema {} · runtime {}",
+            status.protocol_version,
+            status.storage_schema_version,
+            status.runtime_identity.instance_id
+        );
+    }
+    Ok(())
+}
+
 async fn run_status(
     client: &reqwest::Client,
     host: &str,
@@ -15688,6 +15769,26 @@ mod tests {
             Command::Doctor {
                 json: true,
                 strict: true
+            }
+        ));
+    }
+
+    #[test]
+    fn runtime_commands_expose_protected_root_status_and_inspection() {
+        let status = Cli::try_parse_from(["mcg", "runtime", "status", "--json"])
+            .expect("Root status command");
+        assert!(matches!(
+            status.command.expect("command"),
+            Command::Runtime {
+                command: RuntimeCommand::Status { json: true }
+            }
+        ));
+        let inspect =
+            Cli::try_parse_from(["mcg", "runtime", "inspect"]).expect("Root inspect command");
+        assert!(matches!(
+            inspect.command.expect("command"),
+            Command::Runtime {
+                command: RuntimeCommand::Inspect { json: false }
             }
         ));
     }

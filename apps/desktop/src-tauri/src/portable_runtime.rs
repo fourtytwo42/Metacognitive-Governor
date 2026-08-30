@@ -21,7 +21,7 @@ const PAYLOADS: &[Payload] = &[
         name: "mcg-service.exe",
         bytes: include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../../target/release/mcg-daemon.exe"
+            "/../../../target/release/mcg-protected-rootd.exe"
         )),
     },
     Payload {
