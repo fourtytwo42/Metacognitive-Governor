@@ -4769,3 +4769,11 @@ When sources conflict, use this order:
 - Commands/tests: Contracts 12/12; storage 103/103; whole-workspace all-target check; strict contracts Clippy; storage Clippy with only the recorded pre-existing lint classes allowed; Desktop TypeScript; focused causal-navigation component test; full App component suite 113/113; docs, packaging, formatting, and diff gates passed.
 - Result: Product checkpoint `30621ab` makes Root inspection return at most 1,000 creation-ordered compensation action IDs, and the Desktop can inspect both the original and every compensation without granting mutation authority.
 - Follow-up: Expose a separately authorized owner-facing compensation initiation path, then qualify a real reversible effect and compensation through packaged Windows/Linux/macOS UAT.
+# 2026-08-30 - Platform-stable governed filesystem paths
+
+- Context: Normal `Path` components rejected traversal but still gave different meanings to backslashes, drive-relative paths, alternate streams, reserved device names, Unicode aliases, and trailing-dot/space names across operating systems.
+- Decision: Require one portable lexical policy before authorization and again in the executor: NFC strings, forward slashes, normal nonempty relative components, 4 KiB/255-byte bounds, and universal rejection of controls, Windows-invalid characters, ADS syntax, trailing-dot/space aliases, and reserved device names including superscript COM/LPT variants.
+- Files: `apps/mcg-action-runner/{Cargo.toml,src/lib.rs}`, `Cargo.lock`; Stage 4, traceability, status report, and `MEMORY.md`.
+- Commands/tests: Action runner 18/18 serialized (6 unit, 12 real process); strict executor and client-only Clippy; formatting and diff gates passed.
+- Result: Product checkpoint `6e9ee8e` gives the authorized plan and the low-authority executor the same platform-independent path interpretation before filesystem access.
+- Follow-up: Run native Windows/Linux/macOS and packaged alias/case-collision tests, then close broader resource, network, and OS-sandbox gates.

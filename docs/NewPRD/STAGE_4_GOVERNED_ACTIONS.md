@@ -20,6 +20,9 @@ effect family. It supports:
 - explicit observational, no-effect, confirmed-effect, unknown, and denied outcomes;
 - canonical operation payloads with the fixed `MetaCog.ActionOperation` hash domain;
 - absolute real capability roots and normalized relative paths only;
+- platform-stable semantic paths: NFC, forward-slash-only, 4 KiB total/255-byte components,
+  with empty/dot components, controls, alternate streams, invalid Windows characters,
+  trailing-dot/space aliases, and reserved device names rejected on every OS;
 - symlink and Windows reparse-point rejection for inspected roots and path components;
 - no retained capability or process state between invocations.
 
@@ -96,7 +99,7 @@ deadline; this process boundary is defense in depth, not a filesystem or network
 - Contracts and platform strict all-target Clippy: passed.
 - Runtime tests: 108 passed with two explicit native Windows Sandbox package gates ignored.
 - Protected Root migration-process test: passed.
-- Action runner tests: 17 passed (5 unit and 12 separate-process), including deterministic
+- Action runner tests: 18 passed (6 unit and 12 separate-process), including deterministic
   pre-effect exit, post-effect lost response, timeout-before-effect, timeout-after-effect,
   direct-child and descendant reaping, rejection of work scheduled after the deadline,
   malformed responses, diagnostic output, bounded stdout/stderr overflow, and a leader that
@@ -144,10 +147,11 @@ Stage 4 is not complete until all of the following pass:
    compensation history and exact inspection are implemented; initiating a new separately
    authorized compensation is not yet exposed. Add a Root HTTP/API projection only if a
    non-local product consumer requires it.
-3. Semantic path policy, resource budgets beyond bounded I/O/deadlines, network denial, and
-   platform sandbox capability reporting pass adversarial Windows, Linux, and macOS tests.
-   Windows Job Object/POSIX process-group confinement and focused Windows descendant tests
-   are implemented; native Linux/macOS and packaged process-tree qualification remain.
+3. Resource budgets beyond bounded I/O/deadlines, network denial, case-collision/filesystem
+   alias qualification, and platform sandbox capability reporting pass adversarial Windows,
+   Linux, and macOS tests. Platform-stable lexical semantic-path policy and Windows Job
+   Object/POSIX process-group confinement are implemented; native Linux/macOS and packaged
+   path/process-tree qualification remain.
 4. Fresh Windows installer/portable, Linux Debian/AppImage, and macOS app/DMG builds pass
    native package UAT. The Debian sudo and macOS authenticated owner gates remain intact.
 
