@@ -2,6 +2,15 @@
 
 Durable project context lives here. Update this file whenever information should survive chat context compression or future agent handoff.
 
+### 2026-08-30 - Human CLI inspection of immutable action sources
+
+- Context: Canonical action JSON and Desktop exposed `ActionOrigin`, but ordinary `mcg action show` did not reveal the safe source identity needed for CLI-first investigation.
+- Decision: Print every bound source type, locator, hash domain, and digest in human action inspection while continuing to omit raw authority/policy payloads.
+- Files: `apps/mcg-cli/src/main.rs`; Stage 4, traceability, status report, and `MEMORY.md`.
+- Commands/tests: CLI 68 unit and 10 integration passed. Strict transitive CLI Clippy remains blocked by the documented pre-existing 87/91-finding CLI backlog; no finding names the new formatter.
+- Result: Product checkpoint `b544b1a` completes safe source-reference projection across Root JSON, explicit CLI JSON, human CLI, Advanced Desktop, and Developer Desktop.
+- Follow-up: Populate source bindings from real compatibility/runtime producers and add exact deep focusing for conversation, invocation, command, approval, agent, and evidence.
+
 ### 2026-08-30 - Immutable governed-action source binding foundation
 
 - Context: Exact approval-source navigation could not be implemented honestly because canonical actions carried workflow/actor/operation identity but no conversation, invocation, command, approval, agent, or evidence bindings.

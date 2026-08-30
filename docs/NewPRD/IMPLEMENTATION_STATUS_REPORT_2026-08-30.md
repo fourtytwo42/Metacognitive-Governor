@@ -4,7 +4,7 @@
 
 **Branch:** `codex/v34-updater-version-binding`
 
-**Repository implementation checkpoint:** `cccdee0` (`Bind governed actions to immutable source records`)
+**Repository implementation checkpoint:** `b544b1a` (`Show immutable action sources in CLI inspection`)
 
 **Prior Root/CLI checkpoint:** `28de9fb` (`Expose canonical actions through Root IPC and CLI`)
 
@@ -106,6 +106,8 @@ Checkpoint `9b881dd` adds Tauri and TypeScript Root action list/show clients and
 
 Checkpoint `cccdee0` adds a backward-compatible immutable `ActionOrigin` for conversation, invocation, command, approval, agent, and evidence `SourceRef` bindings. Storage authorization rejects empty/oversized/duplicate/malformed sources and replay substitution, while inspection preserves valid bindings and older envelopes decode with no origin. Advanced and Developer show the exact bound locators/hashes; a conversation control stays disabled when the exact compatibility record is absent rather than guessing another source.
 
+Checkpoint `b544b1a` adds safe human CLI origin inspection. `mcg action show` prints every bound source type, locator, hash domain, and full digest without dumping policy/authority payloads; explicit JSON continues to expose the complete canonical envelope. Its formatter has focused unit coverage.
+
 Fresh audit verification on 2026-08-30:
 
 - `cargo test -p mcg-contracts` — 12/12 passed;
@@ -118,7 +120,7 @@ Fresh audit verification on 2026-08-30:
 - `cargo clippy -p mcg-action-runner --no-default-features --all-targets -- -D warnings` — passed for the client-only dependency shape.
 - `cargo check -p mcg-protected-root --all-targets` — passed with the current local integration.
 - `cargo test -p mcg-platform` — 2/2 passed; strict contracts/platform all-target Clippy passed.
-- `cargo test -p mcg-cli` — 67 unit and 10 integration passed.
+- `cargo test -p mcg-cli` — 68 unit and 10 integration passed.
 - `cargo test -p mcg-desktop` — 20/20 passed.
 - Desktop Vitest — 123/123 passed.
 - Serialized Playwright — 30/30 passed, including governed-action progressive disclosure and accessibility.
@@ -146,7 +148,7 @@ The following documents cannot presently be treated as an exact live status dash
 
 - `STAGE_0_ALIGNMENT.md` still has unchecked exit items that repository memory and later evidence say are complete.
 - The concurrent untracked `STAGE_3_DURABLE_WORKFLOW.md` must be reconciled by its owner against the pushed schema-53, Root IPC/CLI, Desktop, and wait-recovery implementation before it becomes release evidence.
-- `REQUIREMENTS_TRACEABILITY.md` is current through immutable action source binding at `cccdee0`; advance it again after producer integration/deep source focus, real-process crash injection, and native package gates.
+- `REQUIREMENTS_TRACEABILITY.md` is current through CLI inspection of immutable action sources at `b544b1a`; advance it again after producer integration/deep source focus, real-process crash injection, and native package gates.
 - The implementation plan still says “Proposed staged delivery plan,” although Stages 0–3 are already underway.
 
 Before the next release claim, reconcile those documents so every row is one of: implemented with evidence, partially implemented with an explicit remaining gate, superseded with a reason, unavailable through capability discovery, or not started.

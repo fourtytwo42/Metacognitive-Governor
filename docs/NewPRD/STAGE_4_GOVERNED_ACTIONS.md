@@ -43,7 +43,8 @@ Authenticated Root IPC now provides bounded action list/show queries. List respo
 content-minimized summaries; show returns the immutable envelope, bounded executions,
 receipts and reconciliation jobs, plus the newest bounded event window in canonical order.
 `mcg action list` presents safe state metadata, while human `mcg action show` omits raw
-authority payloads and the explicit `--json` path exposes the full Developer contract.
+authority payloads and prints each bound origin type, locator, domain, and digest. The
+explicit `--json` path exposes the full Developer contract.
 
 The Desktop consumes the same bounded Root projections through Tauri. Simple shows an
 owner-facing action identity and plain-language outcome only. Advanced adds effect class,
@@ -82,7 +83,8 @@ OS sandboxing, process-tree confinement, or the action ledger.
 - Protected Root tests: 10 passed, including confirmed/lost/pre-launch classification,
   occurred/not-occurred/ambiguous reconciliation, real-store reopen, and stranded dispatch
   restart recovery, plus authenticated bounded action list/show IPC.
-- CLI tests: 67 unit and 10 integration passed, including bounded `action list/show` parsing.
+- CLI tests: 68 unit and 10 integration passed, including bounded `action list/show` parsing
+  and exact content-minimized human origin output.
 - Contracts and platform strict all-target Clippy: passed.
 - Runtime tests: 108 passed with two explicit native Windows Sandbox package gates ignored.
 - Protected Root migration-process test: passed.
