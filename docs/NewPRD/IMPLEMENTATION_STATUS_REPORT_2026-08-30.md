@@ -4,7 +4,7 @@
 
 **Branch:** `codex/v34-updater-version-binding`
 
-**Pushed implementation checkpoint:** `f7ef0ee` (`Establish Root-owned action reconciliation`)
+**Pushed implementation checkpoint:** `257e108` (`Validate and commit governed effects`)
 
 **Audit boundary:** pushed schema-54 action-reconciliation base plus the verified schema-55 validation/commit/compensation checkpoint. The concurrent untracked `STAGE_3_DURABLE_WORKFLOW.md` is excluded from this audit's changes and commits.
 
