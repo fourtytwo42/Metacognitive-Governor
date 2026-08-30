@@ -1,11 +1,15 @@
+#![cfg(feature = "executor")]
+
 use std::io::Write as _;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
 use base64::Engine as _;
 use mcg_action_runner::{
-    ACTION_RUNNER_PROTOCOL_VERSION, ActionRunnerRequest, ActionRunnerResponse,
-    GovernedFilesystemOperation, RunnerEffectOutcome, governed_filesystem_operation_payload,
+    ACTION_RUNNER_PROTOCOL_VERSION, ActionRunnerClient, ActionRunnerClientError,
+    ActionRunnerRequest, ActionRunnerResponse, GovernedFilesystemOperation, RunnerEffectOutcome,
+    governed_filesystem_operation_payload,
 };
 use mcg_contracts::{ActionExecutionId, ActionId};
 use uuid::Uuid;
@@ -100,4 +104,33 @@ fn packaged_qualification_mode_exercises_and_cleans_the_runner() {
     assert_eq!(report["compensated"], "effect_confirmed");
     assert_eq!(report["final_absent"], true);
     assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+}
+
+#[tokio::test]
+async fn bounded_parent_client_validates_the_exact_child_response() {
+    let root = tempfile::tempdir().unwrap();
+    let create = request(
+        root.path(),
+        &GovernedFilesystemOperation::CreateFile {
+            relative_path: "client.txt".into(),
+            content_base64: base64::engine::general_purpose::STANDARD.encode(b"client effect"),
+        },
+    );
+    let client = ActionRunnerClient::with_executable(
+        env!("CARGO_BIN_EXE_mcg-action-runner"),
+        Duration::from_secs(5),
+    )
+    .unwrap();
+    let response = client.invoke(&create).await.unwrap();
+    assert_eq!(response.request_id, Some(create.request_id));
+    assert_eq!(response.action_id, Some(create.action_id));
+    assert_eq!(response.execution_id, Some(create.execution_id));
+    assert_eq!(response.outcome, RunnerEffectOutcome::EffectConfirmed);
+    assert_eq!(
+        std::fs::read(root.path().join("client.txt")).unwrap(),
+        b"client effect"
+    );
+
+    assert!(!ActionRunnerClientError::Launch.effect_may_have_occurred());
+    assert!(ActionRunnerClientError::Timeout.effect_may_have_occurred());
 }

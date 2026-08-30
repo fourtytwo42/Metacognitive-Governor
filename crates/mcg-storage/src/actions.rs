@@ -18,6 +18,7 @@ const ACTION_CANCEL_FENCED_TYPE_ID: &str = "mcg.action_cancel_fenced.v1";
 const ACTION_VALIDATED_TYPE_ID: &str = "mcg.action_validated.v1";
 const ACTION_COMMITTED_TYPE_ID: &str = "mcg.action_committed.v1";
 const ACTION_COMPENSATED_TYPE_ID: &str = "mcg.action_compensated.v1";
+const ACTION_EXECUTION_RECOVERED_TYPE_ID: &str = "mcg.action_execution_recovered.v1";
 const RECONCILIATION_CLAIMED_TYPE_ID: &str = "mcg.reconciliation_claimed.v1";
 const RECONCILIATION_RESOLVED_TYPE_ID: &str = "mcg.reconciliation_resolved.v1";
 const RECONCILIATION_DEFERRED_TYPE_ID: &str = "mcg.reconciliation_deferred.v1";
@@ -65,6 +66,14 @@ pub struct ReconciliationResolutionReceipt {
 pub struct ReconciliationRecoveryReport {
     pub inspected_running: u64,
     pub requeued: u64,
+    pub escalated: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ActionExecutionRecoveryReport {
+    pub inspected: u64,
+    pub no_effect_confirmed: u64,
+    pub outcome_unknown: u64,
     pub escalated: u64,
 }
 
@@ -1208,6 +1217,149 @@ impl SqliteEventStore {
             } else {
                 report.requeued += 1;
             }
+        }
+        Ok(report)
+    }
+
+    /// Classifies action dispatches interrupted before their durable outcome was committed.
+    ///
+    /// Observational operations are safely settled as no-effect. Effectful operations become
+    /// unknown and receive their immutable authorized reconciler; the original operation is
+    /// never redispatched. Jobs whose deadline has already elapsed require user action.
+    ///
+    /// # Errors
+    /// Returns a storage error for malformed authority, missing reconciliation policy, concurrent
+    /// changes, or an atomic update failure.
+    #[allow(clippy::too_many_lines)]
+    pub fn recover_stranded_action_executions(
+        &mut self,
+        correlation_id: CorrelationId,
+        now: DateTime<Utc>,
+    ) -> Result<ActionExecutionRecoveryReport, StorageError> {
+        let mut statement = self.connection.prepare(
+            "SELECT execution_json FROM action_executions
+             WHERE state IN ('executing', 'observed')
+             ORDER BY updated_at, action_id, execution_id",
+        )?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        let executions = rows
+            .map(|row| serde_json::from_str::<ActionExecution>(&row?).map_err(StorageError::from))
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(statement);
+        let mut report = ActionExecutionRecoveryReport::default();
+        for mut execution in executions {
+            report.inspected += 1;
+            let transaction = self.connection.transaction()?;
+            let current = load_action_execution(&transaction, execution.id)?.ok_or_else(|| {
+                StorageError::InvalidData("stranded action execution disappeared".into())
+            })?;
+            if current != execution {
+                return Err(StorageError::Conflict(
+                    "stranded action execution changed during recovery scan".into(),
+                ));
+            }
+            let envelope =
+                load_action_envelope(&transaction, execution.action_id)?.ok_or_else(|| {
+                    StorageError::InvalidData("action execution has no envelope".into())
+                })?;
+            let expected_revision = execution.revision;
+            let expected_generation = execution.lease_generation;
+            let hint = VersionedPayload::canonical_v1(
+                StableTypeId::parse("mcg.action_restart_unknown.v1")
+                    .map_err(|error| StorageError::InvalidData(error.to_string()))?,
+                &serde_json::json!({
+                    "action_id": execution.action_id,
+                    "execution_id": execution.id,
+                    "interrupted_state": execution.state,
+                    "reason": "protected Root restarted before outcome classification",
+                }),
+            )
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+            let (outcome, reconciliation_job) =
+                if envelope.effect_class == EffectClass::Observational {
+                    report.no_effect_confirmed += 1;
+                    (EffectOutcome::NoEffectConfirmed, None)
+                } else {
+                    let adapter = envelope.reconciler.clone().ok_or_else(|| {
+                        StorageError::InvalidData(
+                            "stranded effectful action has no authorized reconciler".into(),
+                        )
+                    })?;
+                    let deadline = envelope.reconciliation_deadline.ok_or_else(|| {
+                        StorageError::InvalidData(
+                            "stranded effectful action has no reconciliation deadline".into(),
+                        )
+                    })?;
+                    let state = if deadline > now {
+                        report.outcome_unknown += 1;
+                        ReconciliationJobState::Pending
+                    } else {
+                        report.escalated += 1;
+                        ReconciliationJobState::UserActionRequired
+                    };
+                    let job = ReconciliationJob {
+                        id: ReconciliationJobId::new(),
+                        action_id: execution.action_id,
+                        execution_id: execution.id,
+                        adapter,
+                        state,
+                        revision: 1,
+                        lease_generation: 0,
+                        lease_owner: None,
+                        lease_expires_at: None,
+                        next_attempt_at: now,
+                        attempts: 0,
+                        deadline,
+                        last_hint: Some(hint.clone()),
+                        created_at: now,
+                        updated_at: now,
+                    };
+                    (
+                        EffectOutcome::OutcomeUnknown { hint: hint.clone() },
+                        Some(job),
+                    )
+                };
+            execution.state = match &outcome {
+                EffectOutcome::NoEffectConfirmed => ActionExecutionState::NoEffectConfirmed,
+                EffectOutcome::OutcomeUnknown { .. } => ActionExecutionState::OutcomeUnknown,
+                EffectOutcome::EffectConfirmed { .. } => unreachable!("restart classification"),
+            };
+            execution.revision = increment(execution.revision, "action revision")?;
+            execution.lease_generation =
+                increment(execution.lease_generation, "action generation")?;
+            execution.executor = None;
+            execution.outcome = Some(outcome.clone());
+            execution.updated_at = now;
+            update_action_execution_cas(
+                &transaction,
+                &execution,
+                expected_revision,
+                expected_generation,
+            )?;
+            if let Some(job) = &reconciliation_job {
+                insert_reconciliation_job(&transaction, job)?;
+            }
+            let (sequence, cause) = next_action_event_position(&transaction, execution.action_id)?;
+            let event = action_event(
+                execution.action_id,
+                Some(execution.id),
+                sequence,
+                correlation_id,
+                cause,
+                &format!(
+                    "recover-action-execution:{}:{expected_revision}:{expected_generation}",
+                    execution.id
+                ),
+                ACTION_EXECUTION_RECOVERED_TYPE_ID,
+                now,
+                &serde_json::json!({
+                    "outcome": outcome,
+                    "execution": execution,
+                    "reconciliation_job": reconciliation_job,
+                }),
+            )?;
+            insert_action_event(&transaction, &event)?;
+            transaction.commit()?;
         }
         Ok(report)
     }
@@ -2397,6 +2549,56 @@ mod tests {
                 now(),
             )
             .unwrap()
+    }
+
+    #[test]
+    fn restart_recovery_never_redispatches_a_stranded_effectful_action() {
+        let mut store = SqliteEventStore::open_in_memory().unwrap();
+        let (_contract, workflow, actor) = running_workflow(&mut store);
+        let (envelope, execution) = action_fixture(&workflow, actor, EffectClass::Reversible);
+        store
+            .authorize_action(
+                &envelope,
+                &execution,
+                workflow.revision,
+                workflow.lease_generation,
+                CorrelationId::new(),
+                now(),
+            )
+            .unwrap();
+        let dispatched = store
+            .dispatch_action(
+                execution.id,
+                execution.revision,
+                execution.lease_generation,
+                RuntimeActorId::new(),
+                CorrelationId::new(),
+                "restart-stranded-dispatch",
+                now(),
+            )
+            .unwrap();
+        assert_eq!(dispatched.state, ActionExecutionState::Executing);
+
+        let recovered_at = now() + chrono::Duration::seconds(1);
+        let report = store
+            .recover_stranded_action_executions(CorrelationId::new(), recovered_at)
+            .unwrap();
+        assert_eq!(report.inspected, 1);
+        assert_eq!(report.outcome_unknown, 1);
+        assert_eq!(report.no_effect_confirmed, 0);
+        let recovered = store.action_execution(execution.id).unwrap().unwrap();
+        assert_eq!(recovered.state, ActionExecutionState::OutcomeUnknown);
+        assert_eq!(recovered.lease_generation, dispatched.lease_generation + 1);
+        let jobs = store.due_reconciliation_jobs(recovered_at, 10).unwrap();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].adapter, envelope.reconciler.unwrap());
+
+        assert_eq!(
+            store
+                .recover_stranded_action_executions(CorrelationId::new(), recovered_at)
+                .unwrap(),
+            ActionExecutionRecoveryReport::default()
+        );
     }
 
     #[test]

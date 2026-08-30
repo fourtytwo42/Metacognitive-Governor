@@ -6,8 +6,10 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+async-trait.workspace = true
 chrono.workspace = true
 mcg-api = { path = "../mcg-api" }
+mcg-action-runner = { path = "../../apps/mcg-action-runner", default-features = false }
 mcg-config = { path = "../mcg-config" }
 mcg-contracts = { path = "../mcg-contracts" }
 mcg-platform = { path = "../mcg-platform" }

@@ -11,12 +11,21 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use chrono::Utc;
+use chrono::{Duration, Utc};
+use mcg_action_runner::{
+    ActionRunnerClient, ActionRunnerClientError, ActionRunnerProtocolError, ActionRunnerRequest,
+    ActionRunnerResponse, GOVERNED_FILESYSTEM_OPERATION_TYPE, GovernedFilesystemObservation,
+    GovernedFilesystemOperation, RunnerEffectOutcome, decode_governed_filesystem_observation,
+    decode_governed_filesystem_operation, request_from_authorized_action,
+    request_from_reconciliation_job, validate_governed_filesystem_envelope,
+};
 use mcg_config::AppConfig;
 use mcg_contracts::{
-    AuthenticatedRpcRequest, ContentHash, ContractError, HashAlgorithm, PROTOCOL_V1, RequestId,
-    RootStatus, RpcEnvelope, RuntimeIdentity, RuntimeInstanceId, StableTypeId, VersionedPayload,
-    WorkflowCancelRequest, WorkflowId, decode_canonical_cbor_v1,
+    ActionExecution, ActionExecutionId, ActionReceipt, ActionReceiptId, AuthenticatedRpcRequest,
+    ContentHash, ContractError, CorrelationId, EffectClass, EffectOutcome, HashAlgorithm,
+    PROTOCOL_V1, ReconciliationJob, ReconciliationJobId, ReconciliationObservation, RequestId,
+    RootStatus, RpcEnvelope, RuntimeActorId, RuntimeIdentity, RuntimeInstanceId, StableTypeId,
+    VersionedPayload, WorkflowCancelRequest, WorkflowId, decode_canonical_cbor_v1,
 };
 use mcg_platform::{
     PlatformError, ROOT_STATUS_REQUEST_TYPE, ROOT_STATUS_RESPONSE_TYPE,
@@ -27,8 +36,8 @@ use mcg_platform::{
 };
 use mcg_runtime::{AppRuntime, RuntimeError};
 use mcg_storage::{
-    RootMigrationReceipt, STORAGE_SCHEMA_VERSION, StorageError, acquire_data_directory_lock,
-    create_backup_bundle_from_snapshot, inspect_database_before_root,
+    ReconciliationResolutionReceipt, RootMigrationReceipt, STORAGE_SCHEMA_VERSION, StorageError,
+    acquire_data_directory_lock, create_backup_bundle_from_snapshot, inspect_database_before_root,
     snapshot_database_before_root,
 };
 use sha2::{Digest, Sha256};
@@ -38,7 +47,7 @@ use tokio::{
     sync::Semaphore,
     task::JoinHandle,
 };
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 use zeroize::Zeroize;
 
@@ -56,8 +65,611 @@ pub enum ProtectedRootError {
     Contract(#[from] ContractError),
     #[error(transparent)]
     Serialization(#[from] serde_json::Error),
+    #[error(transparent)]
+    ActionProtocol(#[from] ActionRunnerProtocolError),
+    #[error("authorized action execution was not found")]
+    ActionNotFound,
     #[error("configured Root API address is invalid: {0}")]
     Address(#[from] std::net::AddrParseError),
+}
+
+#[derive(Debug, Clone)]
+pub struct GovernedActionDispatchReceipt {
+    pub execution: ActionExecution,
+    pub reconciliation_job: Option<ReconciliationJob>,
+    pub runner_response: Option<ActionRunnerResponse>,
+}
+
+#[derive(Debug, Clone)]
+pub struct GovernedActionReconciliationReceipt {
+    pub resolution: ReconciliationResolutionReceipt,
+    pub runner_response: Option<ActionRunnerResponse>,
+}
+
+#[async_trait::async_trait]
+pub trait GovernedActionRunnerGateway: Send + Sync {
+    async fn invoke(
+        &self,
+        request: &ActionRunnerRequest,
+    ) -> Result<ActionRunnerResponse, ActionRunnerClientError>;
+}
+
+#[async_trait::async_trait]
+impl GovernedActionRunnerGateway for ActionRunnerClient {
+    async fn invoke(
+        &self,
+        request: &ActionRunnerRequest,
+    ) -> Result<ActionRunnerResponse, ActionRunnerClientError> {
+        ActionRunnerClient::invoke(self, request).await
+    }
+}
+
+/// Executes one already-authorized filesystem action and durably classifies its physical result.
+///
+/// Root persists dispatch before process launch. A lost/invalid/late response after possible
+/// launch becomes `OutcomeUnknown` and reconciliation work; a proven pre-launch failure becomes
+/// an observed no-effect result. The physical operation is never blindly repeated here.
+///
+/// # Errors
+///
+/// Returns an error before physical execution for missing, stale, or invalid authority, or when
+/// authoritative state cannot be committed. Post-launch runner failures are converted into
+/// durable effect outcomes rather than returned as ordinary execution errors.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+pub async fn execute_authorized_filesystem_action(
+    runtime: &AppRuntime,
+    client: &dyn GovernedActionRunnerGateway,
+    execution_id: ActionExecutionId,
+    expected_revision: u64,
+    expected_generation: u64,
+    executor: RuntimeActorId,
+    now: chrono::DateTime<Utc>,
+) -> Result<GovernedActionDispatchReceipt, ProtectedRootError> {
+    let (envelope, current) = runtime
+        .canonical_action_for_execution(execution_id)?
+        .ok_or(ProtectedRootError::ActionNotFound)?;
+    if current.revision != expected_revision || current.lease_generation != expected_generation {
+        return Err(ProtectedRootError::Storage(StorageError::Conflict(
+            "action dispatch revision or generation is stale".into(),
+        )));
+    }
+    validate_governed_filesystem_envelope(&envelope, now)?;
+    let correlation_id = CorrelationId::new();
+    let dispatched = runtime.dispatch_canonical_action(
+        execution_id,
+        expected_revision,
+        expected_generation,
+        executor,
+        correlation_id,
+        &format!("filesystem-dispatch:{execution_id}:{expected_revision}:{expected_generation}"),
+        now,
+    )?;
+    let request_id = Uuid::new_v4();
+    let request = request_from_authorized_action(&envelope, &dispatched, request_id, now)?;
+    match client.invoke(&request).await {
+        Ok(response) => classify_runner_response(
+            runtime,
+            &envelope,
+            &dispatched,
+            correlation_id,
+            request_id,
+            response,
+        ),
+        Err(error) => classify_runner_failure(
+            runtime,
+            &envelope,
+            &dispatched,
+            correlation_id,
+            request_id,
+            error,
+        ),
+    }
+}
+
+/// Inspects and resolves one due governed-filesystem reconciliation job.
+///
+/// Root first claims the existing job and fences the associated action execution. It then invokes
+/// only the immutable inspection adapter stored in that job. Exact evidence resolves occurrence
+/// or non-occurrence; ambiguous or unavailable evidence remains unknown and is retried or
+/// escalated by the storage policy. The original effect operation is never dispatched here.
+///
+/// # Errors
+///
+/// Returns an error when authority or job bindings are invalid, the lease is stale, or durable
+/// claim/resolution fails. Runner failures are converted into durable `StillUnknown` evidence.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+pub async fn reconcile_filesystem_action(
+    runtime: &AppRuntime,
+    client: &dyn GovernedActionRunnerGateway,
+    job_id: ReconciliationJobId,
+    expected_job_revision: u64,
+    expected_job_generation: u64,
+    expected_execution_revision: u64,
+    expected_execution_generation: u64,
+    worker: RuntimeActorId,
+    now: chrono::DateTime<Utc>,
+) -> Result<GovernedActionReconciliationReceipt, ProtectedRootError> {
+    let job = runtime
+        .canonical_reconciliation_job(job_id)?
+        .ok_or(ProtectedRootError::ActionNotFound)?;
+    let (envelope, execution) = runtime
+        .canonical_action_for_execution(job.execution_id)?
+        .ok_or(ProtectedRootError::ActionNotFound)?;
+    if job.revision != expected_job_revision
+        || job.lease_generation != expected_job_generation
+        || execution.revision != expected_execution_revision
+        || execution.lease_generation != expected_execution_generation
+        || job.action_id != envelope.id
+        || job.execution_id != execution.id
+        || envelope.reconciler.as_ref() != Some(&job.adapter)
+        || envelope.effect_class == EffectClass::Observational
+    {
+        return Err(ProtectedRootError::Storage(StorageError::Conflict(
+            "filesystem reconciliation binding is stale or invalid".into(),
+        )));
+    }
+    validate_governed_filesystem_envelope(&envelope, now)?;
+    let lease_expires_at = std::cmp::min(now + Duration::minutes(2), job.deadline);
+    let correlation_id = CorrelationId::new();
+    let claimed = runtime.claim_canonical_reconciliation(
+        job.id,
+        expected_job_revision,
+        expected_job_generation,
+        expected_execution_revision,
+        expected_execution_generation,
+        worker,
+        lease_expires_at,
+        correlation_id,
+        &format!(
+            "filesystem-reconcile-claim:{job_id}:{expected_job_revision}:{expected_job_generation}"
+        ),
+        now,
+    )?;
+    let request_id = Uuid::new_v4();
+    let request = request_from_reconciliation_job(
+        &envelope,
+        &claimed.execution,
+        &claimed.job,
+        request_id,
+        now,
+    )?;
+    let runner_result = client.invoke(&request).await;
+    let resolved_at = Utc::now();
+    let (observation, runner_response) = match runner_result {
+        Ok(response) if response.outcome == RunnerEffectOutcome::Observational => {
+            let physical = response
+                .observation
+                .as_ref()
+                .ok_or(ActionRunnerProtocolError::Invalid("runner observation"))
+                .and_then(decode_governed_filesystem_observation)?;
+            (
+                interpret_filesystem_reconciliation(
+                    &envelope,
+                    &claimed.execution,
+                    response
+                        .observation
+                        .clone()
+                        .ok_or(ActionRunnerProtocolError::Invalid("runner observation"))?,
+                    &physical,
+                    resolved_at,
+                    claimed.job.deadline,
+                )?,
+                Some(response),
+            )
+        }
+        Ok(response) => (
+            ReconciliationObservation::StillUnknown {
+                hint: runner_outcome_payload(
+                    "mcg.action_reconciliation_runner_unknown.v1",
+                    &serde_json::json!({
+                        "request_id": request_id,
+                        "outcome": response.outcome,
+                        "error_code": response.error_code,
+                    }),
+                )?,
+                next_attempt_at: next_reconciliation_attempt(resolved_at, claimed.job.deadline),
+            },
+            Some(response),
+        ),
+        Err(error) => (
+            ReconciliationObservation::StillUnknown {
+                hint: runner_outcome_payload(
+                    "mcg.action_reconciliation_transport_unknown.v1",
+                    &serde_json::json!({
+                        "request_id": request_id,
+                        "error_code": action_runner_client_error_code(&error),
+                    }),
+                )?,
+                next_attempt_at: next_reconciliation_attempt(resolved_at, claimed.job.deadline),
+            },
+            None,
+        ),
+    };
+    let resolution = runtime.resolve_canonical_reconciliation(
+        claimed.job.id,
+        claimed.job.revision,
+        claimed.job.lease_generation,
+        claimed.execution.revision,
+        claimed.execution.lease_generation,
+        worker,
+        &observation,
+        correlation_id,
+        &format!(
+            "filesystem-reconcile-resolve:{}:{}:{}",
+            claimed.job.id, claimed.job.revision, claimed.job.lease_generation
+        ),
+        resolved_at,
+    )?;
+    Ok(GovernedActionReconciliationReceipt {
+        resolution,
+        runner_response,
+    })
+}
+
+fn interpret_filesystem_reconciliation(
+    envelope: &mcg_contracts::ActionEnvelope,
+    execution: &ActionExecution,
+    observation_payload: VersionedPayload,
+    observation: &GovernedFilesystemObservation,
+    observed_at: chrono::DateTime<Utc>,
+    deadline: chrono::DateTime<Utc>,
+) -> Result<ReconciliationObservation, ProtectedRootError> {
+    let operation = decode_governed_filesystem_operation(&envelope.operation)?;
+    let expected_sha256 = match &operation {
+        GovernedFilesystemOperation::CreateFile { .. } => {
+            let compensation = envelope
+                .compensation
+                .as_ref()
+                .ok_or(ActionRunnerProtocolError::Invalid("create compensation"))?;
+            match decode_governed_filesystem_operation(compensation)? {
+                GovernedFilesystemOperation::RemoveCreatedFile {
+                    expected_sha256, ..
+                } => expected_sha256,
+                _ => {
+                    return Err(ActionRunnerProtocolError::Invalid("create compensation").into());
+                }
+            }
+        }
+        GovernedFilesystemOperation::RemoveCreatedFile {
+            expected_sha256, ..
+        } => expected_sha256.clone(),
+        GovernedFilesystemOperation::ReadFile { .. }
+        | GovernedFilesystemOperation::InspectFile { .. } => {
+            return Err(ActionRunnerProtocolError::Invalid("observational reconciliation").into());
+        }
+    };
+    let exact_original_exists =
+        observation.exists && observation.sha256.as_deref() == Some(expected_sha256.as_str());
+    let confirmed_occurred = match operation {
+        GovernedFilesystemOperation::CreateFile { .. } => exact_original_exists,
+        GovernedFilesystemOperation::RemoveCreatedFile { .. } => !observation.exists,
+        GovernedFilesystemOperation::ReadFile { .. }
+        | GovernedFilesystemOperation::InspectFile { .. } => false,
+    };
+    let confirmed_not_occurred = match operation {
+        GovernedFilesystemOperation::CreateFile { .. } => !observation.exists,
+        GovernedFilesystemOperation::RemoveCreatedFile { .. } => exact_original_exists,
+        GovernedFilesystemOperation::ReadFile { .. }
+        | GovernedFilesystemOperation::InspectFile { .. } => false,
+    };
+    if confirmed_occurred {
+        return Ok(ReconciliationObservation::ConfirmedOccurred {
+            receipt: ActionReceipt {
+                id: ActionReceiptId::new(),
+                action_id: execution.action_id,
+                execution_id: execution.id,
+                observation: observation_payload,
+                observed_at,
+            },
+            evidence: vec![],
+        });
+    }
+    if confirmed_not_occurred {
+        return Ok(ReconciliationObservation::ConfirmedNotOccurred);
+    }
+    Ok(ReconciliationObservation::StillUnknown {
+        hint: runner_outcome_payload(
+            "mcg.action_reconciliation_ambiguous_file.v1",
+            &serde_json::json!({
+                "relative_path": observation.relative_path,
+                "exists": observation.exists,
+                "sha256": observation.sha256,
+                "expected_sha256": expected_sha256,
+            }),
+        )?,
+        next_attempt_at: next_reconciliation_attempt(observed_at, deadline),
+    })
+}
+
+fn next_reconciliation_attempt(
+    now: chrono::DateTime<Utc>,
+    deadline: chrono::DateTime<Utc>,
+) -> chrono::DateTime<Utc> {
+    std::cmp::min(now + Duration::seconds(30), deadline)
+}
+
+fn classify_runner_response(
+    runtime: &AppRuntime,
+    envelope: &mcg_contracts::ActionEnvelope,
+    dispatched: &ActionExecution,
+    correlation_id: CorrelationId,
+    request_id: Uuid,
+    response: ActionRunnerResponse,
+) -> Result<GovernedActionDispatchReceipt, ProtectedRootError> {
+    match response.outcome {
+        RunnerEffectOutcome::OutcomeUnknown => {
+            let hint = runner_outcome_payload(
+                "mcg.action_runner_unknown.v1",
+                &serde_json::json!({
+                    "request_id": request_id,
+                    "error_code": response.error_code,
+                    "outcome": response.outcome,
+                }),
+            )?;
+            if envelope.effect_class == EffectClass::Observational {
+                return classify_proven_no_effect(
+                    runtime,
+                    dispatched,
+                    correlation_id,
+                    request_id,
+                    hint,
+                    response.finished_at,
+                    Some(response),
+                );
+            }
+            classify_unknown(
+                runtime,
+                envelope,
+                dispatched,
+                correlation_id,
+                request_id,
+                hint,
+                Some(response),
+            )
+        }
+        RunnerEffectOutcome::Observational | RunnerEffectOutcome::EffectConfirmed => {
+            let observation = response
+                .observation
+                .clone()
+                .ok_or(ActionRunnerProtocolError::Invalid("runner observation"))?;
+            let observed = observe_runner_result(
+                runtime,
+                dispatched,
+                correlation_id,
+                request_id,
+                observation,
+                response.finished_at,
+            )?;
+            let outcome = if response.outcome == RunnerEffectOutcome::EffectConfirmed {
+                EffectOutcome::EffectConfirmed { evidence: vec![] }
+            } else {
+                EffectOutcome::NoEffectConfirmed
+            };
+            classify_observed(
+                runtime,
+                &observed,
+                correlation_id,
+                request_id,
+                outcome,
+                Some(response),
+            )
+        }
+        RunnerEffectOutcome::NoEffectConfirmed | RunnerEffectOutcome::Denied => {
+            let observation = runner_outcome_payload(
+                "mcg.action_runner_no_effect.v1",
+                &serde_json::json!({
+                    "request_id": request_id,
+                    "error_code": response.error_code,
+                    "outcome": response.outcome,
+                }),
+            )?;
+            let observed = observe_runner_result(
+                runtime,
+                dispatched,
+                correlation_id,
+                request_id,
+                observation,
+                response.finished_at,
+            )?;
+            classify_observed(
+                runtime,
+                &observed,
+                correlation_id,
+                request_id,
+                EffectOutcome::NoEffectConfirmed,
+                Some(response),
+            )
+        }
+    }
+}
+
+fn classify_runner_failure(
+    runtime: &AppRuntime,
+    envelope: &mcg_contracts::ActionEnvelope,
+    dispatched: &ActionExecution,
+    correlation_id: CorrelationId,
+    request_id: Uuid,
+    error: ActionRunnerClientError,
+) -> Result<GovernedActionDispatchReceipt, ProtectedRootError> {
+    let may_have_occurred = error.effect_may_have_occurred();
+    let error_code = action_runner_client_error_code(&error);
+    let observation = runner_outcome_payload(
+        if may_have_occurred {
+            "mcg.action_runner_transport_unknown.v1"
+        } else {
+            "mcg.action_runner_launch_no_effect.v1"
+        },
+        &serde_json::json!({
+            "request_id": request_id,
+            "error_code": error_code,
+        }),
+    )?;
+    if envelope.effect_class == EffectClass::Observational {
+        return classify_proven_no_effect(
+            runtime,
+            dispatched,
+            correlation_id,
+            request_id,
+            observation,
+            Utc::now(),
+            None,
+        );
+    }
+    if may_have_occurred {
+        classify_unknown(
+            runtime,
+            envelope,
+            dispatched,
+            correlation_id,
+            request_id,
+            observation,
+            None,
+        )
+    } else {
+        let observed = observe_runner_result(
+            runtime,
+            dispatched,
+            correlation_id,
+            request_id,
+            observation,
+            Utc::now(),
+        )?;
+        classify_observed(
+            runtime,
+            &observed,
+            correlation_id,
+            request_id,
+            EffectOutcome::NoEffectConfirmed,
+            None,
+        )
+    }
+}
+
+fn classify_proven_no_effect(
+    runtime: &AppRuntime,
+    dispatched: &ActionExecution,
+    correlation_id: CorrelationId,
+    request_id: Uuid,
+    observation: VersionedPayload,
+    observed_at: chrono::DateTime<Utc>,
+    runner_response: Option<ActionRunnerResponse>,
+) -> Result<GovernedActionDispatchReceipt, ProtectedRootError> {
+    let observed = observe_runner_result(
+        runtime,
+        dispatched,
+        correlation_id,
+        request_id,
+        observation,
+        observed_at,
+    )?;
+    classify_observed(
+        runtime,
+        &observed,
+        correlation_id,
+        request_id,
+        EffectOutcome::NoEffectConfirmed,
+        runner_response,
+    )
+}
+
+fn observe_runner_result(
+    runtime: &AppRuntime,
+    dispatched: &ActionExecution,
+    correlation_id: CorrelationId,
+    request_id: Uuid,
+    observation: VersionedPayload,
+    observed_at: chrono::DateTime<Utc>,
+) -> Result<ActionExecution, ProtectedRootError> {
+    let receipt = ActionReceipt {
+        id: ActionReceiptId::new(),
+        action_id: dispatched.action_id,
+        execution_id: dispatched.id,
+        observation,
+        observed_at,
+    };
+    Ok(runtime.observe_canonical_action(
+        &receipt,
+        dispatched.revision,
+        dispatched.lease_generation,
+        correlation_id,
+        &format!("filesystem-observe:{request_id}"),
+        observed_at,
+    )?)
+}
+
+fn classify_observed(
+    runtime: &AppRuntime,
+    observed: &ActionExecution,
+    correlation_id: CorrelationId,
+    request_id: Uuid,
+    outcome: EffectOutcome,
+    runner_response: Option<ActionRunnerResponse>,
+) -> Result<GovernedActionDispatchReceipt, ProtectedRootError> {
+    let (execution, reconciliation_job) = runtime.classify_canonical_action(
+        observed.id,
+        observed.revision,
+        observed.lease_generation,
+        outcome,
+        None,
+        correlation_id,
+        &format!("filesystem-classify:{request_id}"),
+        Utc::now(),
+    )?;
+    Ok(GovernedActionDispatchReceipt {
+        execution,
+        reconciliation_job,
+        runner_response,
+    })
+}
+
+fn classify_unknown(
+    runtime: &AppRuntime,
+    envelope: &mcg_contracts::ActionEnvelope,
+    dispatched: &ActionExecution,
+    correlation_id: CorrelationId,
+    request_id: Uuid,
+    hint: VersionedPayload,
+    runner_response: Option<ActionRunnerResponse>,
+) -> Result<GovernedActionDispatchReceipt, ProtectedRootError> {
+    let (execution, reconciliation_job) = runtime.classify_canonical_action(
+        dispatched.id,
+        dispatched.revision,
+        dispatched.lease_generation,
+        EffectOutcome::OutcomeUnknown { hint },
+        envelope.reconciliation_deadline,
+        correlation_id,
+        &format!("filesystem-classify:{request_id}"),
+        Utc::now(),
+    )?;
+    Ok(GovernedActionDispatchReceipt {
+        execution,
+        reconciliation_job,
+        runner_response,
+    })
+}
+
+fn runner_outcome_payload(
+    type_id: &str,
+    value: &serde_json::Value,
+) -> Result<VersionedPayload, ProtectedRootError> {
+    Ok(VersionedPayload::canonical_v1(
+        StableTypeId::parse(type_id)?,
+        value,
+    )?)
+}
+
+const fn action_runner_client_error_code(error: &ActionRunnerClientError) -> &'static str {
+    match error {
+        ActionRunnerClientError::Unavailable => "unavailable",
+        ActionRunnerClientError::RequestTooLarge => "request_too_large",
+        ActionRunnerClientError::Launch => "launch_failed",
+        ActionRunnerClientError::Delivery => "delivery_failed",
+        ActionRunnerClientError::Timeout => "timeout",
+        ActionRunnerClientError::ResponseTooLarge => "response_too_large",
+        ActionRunnerClientError::DiagnosticOutput => "diagnostic_output",
+        ActionRunnerClientError::InvalidResponse => "invalid_response",
+        ActionRunnerClientError::Process => "process_failed",
+    }
 }
 
 /// Opens the sole authoritative runtime after a verified ownership-migration backup.
@@ -84,6 +696,16 @@ pub fn open(config: AppConfig) -> Result<Arc<AppRuntime>, ProtectedRootError> {
             "fenced expired action reconciliation without redispatching external effects"
         );
     }
+    let action_recovery = runtime.recover_stranded_actions(recovered_at)?;
+    if action_recovery.inspected > 0 {
+        info!(
+            inspected = action_recovery.inspected,
+            no_effect_confirmed = action_recovery.no_effect_confirmed,
+            outcome_unknown = action_recovery.outcome_unknown,
+            escalated = action_recovery.escalated,
+            "classified stranded action executions without redispatching external effects"
+        );
+    }
     let workflow_recovery = runtime.recover_expired_workflows(recovered_at)?;
     if workflow_recovery.fenced_expired > 0
         || workflow_recovery.settled_cancellations > 0
@@ -104,6 +726,79 @@ pub fn open(config: AppConfig) -> Result<Arc<AppRuntime>, ProtectedRootError> {
         );
     }
     Ok(runtime)
+}
+
+fn start_filesystem_reconciliation_worker(runtime: Arc<AppRuntime>) -> Option<JoinHandle<()>> {
+    let executable = match std::env::current_exe() {
+        Ok(executable) => executable,
+        Err(error) => {
+            warn!(%error, "filesystem action runner discovery is unavailable");
+            return None;
+        }
+    };
+    let client = match ActionRunnerClient::adjacent_to(executable) {
+        Ok(client) => client,
+        Err(error) => {
+            warn!(%error, "filesystem action runner is unavailable; reconciliation remains durable");
+            return None;
+        }
+    };
+    Some(tokio::spawn(async move {
+        let worker = RuntimeActorId::new();
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
+        loop {
+            interval.tick().await;
+            let now = Utc::now();
+            let jobs = match runtime.due_canonical_reconciliations(now, 32) {
+                Ok(jobs) => jobs,
+                Err(error) => {
+                    warn!(%error, "could not query due action reconciliation work");
+                    continue;
+                }
+            };
+            for job in jobs {
+                if job.adapter.type_id.as_str() != GOVERNED_FILESYSTEM_OPERATION_TYPE {
+                    continue;
+                }
+                let execution = match runtime.canonical_action_for_execution(job.execution_id) {
+                    Ok(Some((_, execution))) => execution,
+                    Ok(None) => {
+                        warn!(job_id = %job.id, "reconciliation action execution disappeared");
+                        continue;
+                    }
+                    Err(error) => {
+                        warn!(job_id = %job.id, %error, "could not load reconciliation action");
+                        continue;
+                    }
+                };
+                match reconcile_filesystem_action(
+                    &runtime,
+                    &client,
+                    job.id,
+                    job.revision,
+                    job.lease_generation,
+                    execution.revision,
+                    execution.lease_generation,
+                    worker,
+                    now,
+                )
+                .await
+                {
+                    Ok(receipt) => debug!(
+                        job_id = %receipt.resolution.job.id,
+                        action_id = %receipt.resolution.job.action_id,
+                        state = ?receipt.resolution.job.state,
+                        "completed governed filesystem reconciliation attempt"
+                    ),
+                    Err(error) => debug!(
+                        job_id = %job.id,
+                        %error,
+                        "governed filesystem reconciliation attempt did not commit"
+                    ),
+                }
+            }
+        }
+    }))
 }
 
 /// Runs the Root-owned compatibility API until shutdown.
@@ -128,8 +823,12 @@ pub async fn serve(config: AppConfig) -> Result<(), Box<dyn std::error::Error>> 
         session_id: session.session_id,
     };
     let ipc = start_root_ipc(runtime.clone(), session)?;
+    let reconciliation = start_filesystem_reconciliation_worker(runtime.clone());
     info!(%address, "starting MetaCog Protected Root compatibility API");
     let api_result = mcg_api::serve(address, runtime).await;
+    if let Some(reconciliation) = reconciliation {
+        reconciliation.abort();
+    }
     ipc.abort();
     drop(session_guard);
     api_result?;
@@ -466,10 +1165,16 @@ fn path_relative_to(root: &Path, path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mcg_action_runner::{
+        ACTION_RUNNER_CONTENT_MAX_BYTES, GOVERNED_FILESYSTEM_OBSERVATION_TYPE,
+        GovernedFilesystemAuthority, GovernedFilesystemOperation,
+        governed_filesystem_authority_binding, governed_filesystem_operation_payload,
+    };
     use mcg_contracts::{
-        AttemptId, ConfigurationId, ContractClause, CorrelationId, HashAlgorithm, PolicyBinding,
-        RetryPolicy, RuntimeActorId, SessionId, SourceRef, TaskContract, TaskContractId,
-        TaskContractStatus, VersionedRef, WaitReason, WorkflowAttempt, WorkflowId, WorkflowState,
+        ActionEnvelope, ActionExecutionState, ActionId, AttemptId, ConfigurationId, ContractClause,
+        CorrelationId, EffectClass, HashAlgorithm, PolicyBinding, RetryPolicy, RuntimeActorId,
+        SessionId, SourceRef, TaskContract, TaskContractId, TaskContractStatus, VersionedRef,
+        WaitReason, WorkflowAttempt, WorkflowId, WorkflowState,
     };
     use mcg_platform::{
         cancel_root_workflow, exchange_root_rpc, query_root_status, query_root_workflow,
@@ -499,6 +1204,111 @@ mod tests {
         PolicyBinding {
             payload,
             content_hash,
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum GatewayOutcome {
+        Confirmed,
+        LostAfterEffect,
+        LostWithoutEffect,
+        LaunchFailed,
+    }
+
+    struct ScriptedActionGateway(GatewayOutcome);
+
+    #[async_trait::async_trait]
+    impl GovernedActionRunnerGateway for ScriptedActionGateway {
+        async fn invoke(
+            &self,
+            request: &ActionRunnerRequest,
+        ) -> Result<ActionRunnerResponse, ActionRunnerClientError> {
+            match self.0 {
+                GatewayOutcome::LaunchFailed => Err(ActionRunnerClientError::Launch),
+                GatewayOutcome::LostWithoutEffect => Err(ActionRunnerClientError::Timeout),
+                GatewayOutcome::LostAfterEffect => {
+                    fs::write(
+                        request.capability_root.join("authorized.txt"),
+                        b"authorized",
+                    )
+                    .expect("script physical effect");
+                    Err(ActionRunnerClientError::Timeout)
+                }
+                GatewayOutcome::Confirmed => {
+                    fs::write(
+                        request.capability_root.join("authorized.txt"),
+                        b"authorized",
+                    )
+                    .expect("script physical effect");
+                    let now = Utc::now();
+                    let observation = VersionedPayload::canonical_v1(
+                        StableTypeId::parse(GOVERNED_FILESYSTEM_OBSERVATION_TYPE)
+                            .expect("observation type"),
+                        &serde_json::json!({
+                            "relative_path": "authorized.txt",
+                            "exists": true,
+                            "sha256": format!("{:x}", Sha256::digest(b"authorized")),
+                            "size_bytes": 10,
+                            "content_base64": null,
+                        }),
+                    )
+                    .expect("observation payload");
+                    Ok(ActionRunnerResponse {
+                        protocol_version: mcg_action_runner::ACTION_RUNNER_PROTOCOL_VERSION,
+                        request_id: Some(request.request_id),
+                        action_id: Some(request.action_id),
+                        execution_id: Some(request.execution_id),
+                        outcome: RunnerEffectOutcome::EffectConfirmed,
+                        observation: Some(observation),
+                        error_code: None,
+                        detail: "confirmed scripted effect".into(),
+                        started_at: now,
+                        finished_at: now,
+                    })
+                }
+            }
+        }
+    }
+
+    struct InspectingActionGateway;
+
+    #[async_trait::async_trait]
+    impl GovernedActionRunnerGateway for InspectingActionGateway {
+        async fn invoke(
+            &self,
+            request: &ActionRunnerRequest,
+        ) -> Result<ActionRunnerResponse, ActionRunnerClientError> {
+            assert!(matches!(
+                decode_governed_filesystem_operation(&request.operation)
+                    .expect("reconciliation operation"),
+                GovernedFilesystemOperation::InspectFile { .. }
+            ));
+            let bytes = fs::read(request.capability_root.join("authorized.txt")).ok();
+            let now = Utc::now();
+            let observation = VersionedPayload::canonical_v1(
+                StableTypeId::parse(GOVERNED_FILESYSTEM_OBSERVATION_TYPE)
+                    .expect("observation type"),
+                &serde_json::json!({
+                    "relative_path": "authorized.txt",
+                    "exists": bytes.is_some(),
+                    "sha256": bytes.as_ref().map(|value| format!("{:x}", Sha256::digest(value))),
+                    "size_bytes": bytes.as_ref().map(Vec::len),
+                    "content_base64": null,
+                }),
+            )
+            .expect("observation payload");
+            Ok(ActionRunnerResponse {
+                protocol_version: mcg_action_runner::ACTION_RUNNER_PROTOCOL_VERSION,
+                request_id: Some(request.request_id),
+                action_id: Some(request.action_id),
+                execution_id: Some(request.execution_id),
+                outcome: RunnerEffectOutcome::Observational,
+                observation: Some(observation),
+                error_code: None,
+                detail: "scripted reconciliation inspection".into(),
+                started_at: now,
+                finished_at: now,
+            })
         }
     }
 
@@ -945,5 +1755,290 @@ mod tests {
 
         server.abort();
         remove_root_ipc_session(temporary.path(), session.session_id);
+    }
+
+    fn authorized_filesystem_fixture() -> (
+        tempfile::TempDir,
+        AppConfig,
+        Arc<AppRuntime>,
+        ActionExecution,
+        RuntimeActorId,
+        chrono::DateTime<Utc>,
+    ) {
+        let temporary = tempfile::tempdir().expect("temporary action Root");
+        let config = AppConfig::default().with_data_directory(temporary.path());
+        let now = Utc::now();
+        let (contract, attempt) = expired_workflow_fixture(now);
+        let actor = RuntimeActorId::new();
+        let running = {
+            let mut store = SqliteEventStore::open(config.database_path()).expect("action store");
+            store
+                .create_workflow(&contract, &attempt, CorrelationId::new(), now)
+                .expect("create action workflow");
+            store
+                .claim_workflow_attempt(
+                    attempt.attempt_id,
+                    attempt.revision,
+                    attempt.lease_generation,
+                    actor,
+                    now + chrono::Duration::minutes(10),
+                    CorrelationId::new(),
+                    "action-workflow-claim",
+                    now,
+                )
+                .expect("claim action workflow")
+        };
+        let runtime = open(config.clone()).expect("open action Root");
+        let capability_root = temporary.path().join("capability-root");
+        fs::create_dir(&capability_root).expect("create capability root");
+        let action_id = ActionId::new();
+        let operation = GovernedFilesystemOperation::CreateFile {
+            relative_path: "authorized.txt".into(),
+            content_base64: "YXV0aG9yaXplZA==".into(),
+        };
+        let (operation, operation_hash) =
+            governed_filesystem_operation_payload(&operation).expect("operation payload");
+        let (compensation, _) = governed_filesystem_operation_payload(
+            &GovernedFilesystemOperation::RemoveCreatedFile {
+                relative_path: "authorized.txt".into(),
+                expected_sha256: format!("{:x}", Sha256::digest(b"authorized")),
+            },
+        )
+        .expect("compensation payload");
+        let (reconciler, _) =
+            governed_filesystem_operation_payload(&GovernedFilesystemOperation::InspectFile {
+                relative_path: "authorized.txt".into(),
+                max_bytes: ACTION_RUNNER_CONTENT_MAX_BYTES,
+            })
+            .expect("reconciler payload");
+        let authority = governed_filesystem_authority_binding(&GovernedFilesystemAuthority {
+            action_id,
+            actor,
+            capability_root,
+            operation_hash: operation_hash.clone(),
+            effect_class: EffectClass::Reversible,
+            expires_at: now + chrono::Duration::minutes(5),
+        })
+        .expect("authority payload");
+        let envelope = ActionEnvelope {
+            id: action_id,
+            workflow_id: running.workflow_id,
+            attempt_id: running.attempt_id,
+            task_contract: VersionedRef {
+                id: contract.id,
+                version: contract.version,
+                content_hash: task_contract_content_hash(&contract).expect("contract hash"),
+            },
+            actor,
+            authority,
+            elevated_authority: None,
+            expected_versions: vec![],
+            operation,
+            operation_hash,
+            effect_class: EffectClass::Reversible,
+            preconditions: vec![],
+            budget_reservation: workflow_policy("action-budget"),
+            idempotency_key: "authorized-filesystem-create".into(),
+            compensation: Some(compensation),
+            compensates_action: None,
+            reconciler: Some(reconciler),
+            reconciliation_deadline: Some(now + chrono::Duration::minutes(5)),
+            created_at: now,
+        };
+        let execution = ActionExecution {
+            id: ActionExecutionId::new(),
+            action_id,
+            attempt_number: 1,
+            state: ActionExecutionState::Authorized,
+            revision: 1,
+            lease_generation: 0,
+            executor: None,
+            outcome: None,
+            created_at: now,
+            updated_at: now,
+        };
+        runtime
+            .authorize_canonical_action(
+                &envelope,
+                &execution,
+                running.revision,
+                running.lease_generation,
+                CorrelationId::new(),
+                now,
+            )
+            .expect("authorize filesystem action");
+        (temporary, config, runtime, execution, actor, now)
+    }
+
+    #[tokio::test]
+    async fn root_classifies_confirmed_lost_and_prelaunch_filesystem_effects() {
+        for (gateway_outcome, expected_state, effect_exists, expects_reconciliation) in [
+            (
+                GatewayOutcome::Confirmed,
+                ActionExecutionState::EffectConfirmed,
+                true,
+                false,
+            ),
+            (
+                GatewayOutcome::LostAfterEffect,
+                ActionExecutionState::OutcomeUnknown,
+                true,
+                true,
+            ),
+            (
+                GatewayOutcome::LostWithoutEffect,
+                ActionExecutionState::OutcomeUnknown,
+                false,
+                true,
+            ),
+            (
+                GatewayOutcome::LaunchFailed,
+                ActionExecutionState::NoEffectConfirmed,
+                false,
+                false,
+            ),
+        ] {
+            let (temporary, config, runtime, execution, _actor, now) =
+                authorized_filesystem_fixture();
+            let receipt = execute_authorized_filesystem_action(
+                &runtime,
+                &ScriptedActionGateway(gateway_outcome),
+                execution.id,
+                execution.revision,
+                execution.lease_generation,
+                RuntimeActorId::new(),
+                now,
+            )
+            .await
+            .expect("execute governed action");
+            assert_eq!(receipt.execution.state, expected_state);
+            assert_eq!(receipt.reconciliation_job.is_some(), expects_reconciliation);
+            assert_eq!(
+                temporary
+                    .path()
+                    .join("capability-root/authorized.txt")
+                    .exists(),
+                effect_exists
+            );
+            let final_state = if let Some(job) = receipt.reconciliation_job {
+                let reconcile_at = std::cmp::max(Utc::now(), job.next_attempt_at);
+                let reconciled = reconcile_filesystem_action(
+                    &runtime,
+                    &InspectingActionGateway,
+                    job.id,
+                    job.revision,
+                    job.lease_generation,
+                    receipt.execution.revision,
+                    receipt.execution.lease_generation,
+                    RuntimeActorId::new(),
+                    reconcile_at,
+                )
+                .await
+                .expect("reconcile governed action");
+                assert_eq!(
+                    reconciled.resolution.job.state,
+                    mcg_contracts::ReconciliationJobState::Resolved
+                );
+                if effect_exists {
+                    ActionExecutionState::EffectConfirmed
+                } else {
+                    ActionExecutionState::NoEffectConfirmed
+                }
+            } else {
+                expected_state
+            };
+            drop(runtime);
+            let store =
+                SqliteEventStore::open(config.database_path()).expect("reopen action store");
+            assert_eq!(
+                store
+                    .action_execution(execution.id)
+                    .expect("execution query")
+                    .expect("durable execution")
+                    .state,
+                final_state
+            );
+        }
+    }
+
+    #[test]
+    fn root_restart_turns_a_stranded_dispatch_into_reconciliation_without_redispatch() {
+        let (_temporary, config, runtime, execution, _actor, now) = authorized_filesystem_fixture();
+        let dispatched = runtime
+            .dispatch_canonical_action(
+                execution.id,
+                execution.revision,
+                execution.lease_generation,
+                RuntimeActorId::new(),
+                CorrelationId::new(),
+                "root-restart-stranded-dispatch",
+                now,
+            )
+            .expect("persist stranded dispatch");
+        assert_eq!(dispatched.state, ActionExecutionState::Executing);
+        drop(runtime);
+
+        let reopened = open(config).expect("reopen Root after stranded dispatch");
+        let (_, recovered) = reopened
+            .canonical_action_for_execution(execution.id)
+            .expect("load recovered action")
+            .expect("recovered action exists");
+        assert_eq!(recovered.state, ActionExecutionState::OutcomeUnknown);
+        assert_eq!(
+            reopened
+                .due_canonical_reconciliations(Utc::now(), 10)
+                .expect("due recovery jobs")
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn reconciliation_never_claims_changed_owner_content_as_the_original_effect() {
+        let (temporary, _config, runtime, execution, _actor, now) = authorized_filesystem_fixture();
+        let dispatched = execute_authorized_filesystem_action(
+            &runtime,
+            &ScriptedActionGateway(GatewayOutcome::LostAfterEffect),
+            execution.id,
+            execution.revision,
+            execution.lease_generation,
+            RuntimeActorId::new(),
+            now,
+        )
+        .await
+        .expect("execute lost-response action");
+        let job = dispatched.reconciliation_job.expect("reconciliation job");
+        fs::write(
+            temporary.path().join("capability-root/authorized.txt"),
+            b"changed owner content",
+        )
+        .expect("replace with changed content");
+        let reconcile_at = std::cmp::max(Utc::now(), job.next_attempt_at);
+        let reconciled = reconcile_filesystem_action(
+            &runtime,
+            &InspectingActionGateway,
+            job.id,
+            job.revision,
+            job.lease_generation,
+            dispatched.execution.revision,
+            dispatched.execution.lease_generation,
+            RuntimeActorId::new(),
+            reconcile_at,
+        )
+        .await
+        .expect("defer ambiguous reconciliation");
+        assert_eq!(
+            reconciled.resolution.job.state,
+            mcg_contracts::ReconciliationJobState::Pending
+        );
+        assert_eq!(
+            reconciled.resolution.execution.state,
+            ActionExecutionState::OutcomeUnknown
+        );
+        assert_eq!(
+            fs::read(temporary.path().join("capability-root/authorized.txt"))
+                .expect("changed content remains"),
+            b"changed owner content"
+        );
     }
 }

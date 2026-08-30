@@ -62,8 +62,8 @@ pub use backup_secrets::{
 };
 
 pub use actions::{
-    ActionAuthorizationReceipt, ActionCommitReceipt, ReconciliationClaimReceipt,
-    ReconciliationRecoveryReport, ReconciliationResolutionReceipt,
+    ActionAuthorizationReceipt, ActionCommitReceipt, ActionExecutionRecoveryReport,
+    ReconciliationClaimReceipt, ReconciliationRecoveryReport, ReconciliationResolutionReceipt,
 };
 pub use agents::{
     AgentRecoveryReport, AgentTurnCommit, AgentTurnDisposition, ConsumerEvaluationCheckpoint,

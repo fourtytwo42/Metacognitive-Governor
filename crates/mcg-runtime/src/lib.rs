@@ -58,7 +58,9 @@ use mcg_config::{
     UserSettingsRevision,
 };
 use mcg_contracts::{
-    CorrelationId, RuntimeIdentity, WorkflowAttempt, WorkflowCancelRequest, WorkflowId,
+    ActionEnvelope, ActionExecution, ActionExecutionId, ActionReceipt, CorrelationId,
+    EffectOutcome, ReconciliationJob, ReconciliationJobId, ReconciliationObservation,
+    RuntimeActorId, RuntimeIdentity, WorkflowAttempt, WorkflowCancelRequest, WorkflowId,
     WorkflowInspection, WorkflowState,
 };
 use mcg_domain::{
@@ -141,11 +143,13 @@ use mcg_providers::{
     ToolDefinition, clear_provider_credentials, save_provider_credentials,
 };
 use mcg_storage::{
-    AgentRecoveryReport, AgentTurnDisposition, BackupMcpSecret, BackupProviderSecret,
-    BackupSecretSnapshot, DataDirectoryLock, ReconciliationRecoveryReport, RecoveryReport,
-    RootMigrationReceipt, RootOwnership, STORAGE_SCHEMA_VERSION, SqliteEventStore, StorageError,
-    WorkflowRecoveryReport, acquire_data_directory_lock,
-    create_encrypted_backup_bundle_from_snapshot, decrypt_backup_bundle_secrets,
+    ActionAuthorizationReceipt, ActionExecutionRecoveryReport, AgentRecoveryReport,
+    AgentTurnDisposition, BackupMcpSecret, BackupProviderSecret, BackupSecretSnapshot,
+    DataDirectoryLock, ReconciliationClaimReceipt, ReconciliationRecoveryReport,
+    ReconciliationResolutionReceipt, RecoveryReport, RootMigrationReceipt, RootOwnership,
+    STORAGE_SCHEMA_VERSION, SqliteEventStore, StorageError, WorkflowRecoveryReport,
+    acquire_data_directory_lock, create_encrypted_backup_bundle_from_snapshot,
+    decrypt_backup_bundle_secrets,
 };
 pub use mcg_storage::{
     AgentTurnCommit, AutomaticExperimentDisposition, AutomaticExperimentOutcome,
@@ -3442,6 +3446,227 @@ impl AppRuntime {
         Ok(self
             .store()?
             .recover_reconciliation_jobs(CorrelationId::new(), now)?)
+    }
+
+    /// Classifies action dispatches stranded by Root process death without redispatching effects.
+    ///
+    /// # Errors
+    /// Returns a runtime error when authoritative action recovery cannot be committed.
+    pub fn recover_stranded_actions(
+        &self,
+        now: DateTime<Utc>,
+    ) -> Result<ActionExecutionRecoveryReport, RuntimeError> {
+        Ok(self
+            .store()?
+            .recover_stranded_action_executions(CorrelationId::new(), now)?)
+    }
+
+    /// Atomically persists Root-authorized action intent before physical execution.
+    ///
+    /// # Errors
+    /// Returns a runtime error when authorization is stale, substituted, invalid, or cannot be
+    /// committed.
+    #[allow(clippy::too_many_arguments)]
+    pub fn authorize_canonical_action(
+        &self,
+        envelope: &ActionEnvelope,
+        execution: &ActionExecution,
+        expected_workflow_revision: u64,
+        expected_workflow_generation: u64,
+        correlation_id: CorrelationId,
+        now: DateTime<Utc>,
+    ) -> Result<ActionAuthorizationReceipt, RuntimeError> {
+        Ok(self.store()?.authorize_action(
+            envelope,
+            execution,
+            expected_workflow_revision,
+            expected_workflow_generation,
+            correlation_id,
+            now,
+        )?)
+    }
+
+    /// Loads immutable intent and mutable execution for one canonical action attempt.
+    ///
+    /// # Errors
+    /// Returns a runtime error when action state cannot be decoded or read.
+    pub fn canonical_action_for_execution(
+        &self,
+        execution_id: ActionExecutionId,
+    ) -> Result<Option<(ActionEnvelope, ActionExecution)>, RuntimeError> {
+        let store = self.store()?;
+        let Some(execution) = store.action_execution(execution_id)? else {
+            return Ok(None);
+        };
+        let envelope = store
+            .action_envelope(execution.action_id)?
+            .ok_or_else(|| StorageError::InvalidData("action execution has no envelope".into()))?;
+        Ok(Some((envelope, execution)))
+    }
+
+    /// Fences one authorized action as physically dispatched.
+    ///
+    /// # Errors
+    /// Returns a runtime error for stale state, identity substitution, or commit failure.
+    #[allow(clippy::too_many_arguments)]
+    pub fn dispatch_canonical_action(
+        &self,
+        execution_id: ActionExecutionId,
+        expected_revision: u64,
+        expected_generation: u64,
+        executor: RuntimeActorId,
+        correlation_id: CorrelationId,
+        idempotency_key: &str,
+        now: DateTime<Utc>,
+    ) -> Result<ActionExecution, RuntimeError> {
+        Ok(self.store()?.dispatch_action(
+            execution_id,
+            expected_revision,
+            expected_generation,
+            executor,
+            correlation_id,
+            idempotency_key,
+            now,
+        )?)
+    }
+
+    /// Persists one immutable physical observation before effect classification.
+    ///
+    /// # Errors
+    /// Returns a runtime error for stale or substituted evidence and commit failures.
+    #[allow(clippy::too_many_arguments)]
+    pub fn observe_canonical_action(
+        &self,
+        receipt: &ActionReceipt,
+        expected_revision: u64,
+        expected_generation: u64,
+        correlation_id: CorrelationId,
+        idempotency_key: &str,
+        now: DateTime<Utc>,
+    ) -> Result<ActionExecution, RuntimeError> {
+        Ok(self.store()?.observe_action(
+            receipt,
+            expected_revision,
+            expected_generation,
+            correlation_id,
+            idempotency_key,
+            now,
+        )?)
+    }
+
+    /// Classifies one observed or uncertain physical effect and creates reconciliation atomically.
+    ///
+    /// # Errors
+    /// Returns a runtime error for stale state, illegal classification, or commit failure.
+    #[allow(clippy::too_many_arguments)]
+    pub fn classify_canonical_action(
+        &self,
+        execution_id: ActionExecutionId,
+        expected_revision: u64,
+        expected_generation: u64,
+        outcome: EffectOutcome,
+        reconciliation_deadline: Option<DateTime<Utc>>,
+        correlation_id: CorrelationId,
+        idempotency_key: &str,
+        now: DateTime<Utc>,
+    ) -> Result<(ActionExecution, Option<ReconciliationJob>), RuntimeError> {
+        Ok(self.store()?.classify_action_outcome(
+            execution_id,
+            expected_revision,
+            expected_generation,
+            outcome,
+            reconciliation_deadline,
+            correlation_id,
+            idempotency_key,
+            now,
+        )?)
+    }
+
+    /// Returns bounded reconciliation work whose next attempt is due.
+    ///
+    /// # Errors
+    /// Returns a runtime error for invalid bounds or unreadable authoritative state.
+    pub fn due_canonical_reconciliations(
+        &self,
+        now: DateTime<Utc>,
+        limit: usize,
+    ) -> Result<Vec<ReconciliationJob>, RuntimeError> {
+        Ok(self.store()?.due_reconciliation_jobs(now, limit)?)
+    }
+
+    /// Loads one authoritative reconciliation job.
+    ///
+    /// # Errors
+    /// Returns a runtime error when the job cannot be decoded or read.
+    pub fn canonical_reconciliation_job(
+        &self,
+        job_id: ReconciliationJobId,
+    ) -> Result<Option<ReconciliationJob>, RuntimeError> {
+        Ok(self.store()?.reconciliation_job(job_id)?)
+    }
+
+    /// Claims one reconciliation job and atomically fences its action execution.
+    ///
+    /// # Errors
+    /// Returns a runtime error for stale ownership, substitution, expiry, or commit failure.
+    #[allow(clippy::too_many_arguments)]
+    pub fn claim_canonical_reconciliation(
+        &self,
+        job_id: ReconciliationJobId,
+        expected_job_revision: u64,
+        expected_job_generation: u64,
+        expected_execution_revision: u64,
+        expected_execution_generation: u64,
+        worker: RuntimeActorId,
+        lease_expires_at: DateTime<Utc>,
+        correlation_id: CorrelationId,
+        idempotency_key: &str,
+        now: DateTime<Utc>,
+    ) -> Result<ReconciliationClaimReceipt, RuntimeError> {
+        Ok(self.store()?.claim_reconciliation_job(
+            job_id,
+            expected_job_revision,
+            expected_job_generation,
+            expected_execution_revision,
+            expected_execution_generation,
+            worker,
+            lease_expires_at,
+            correlation_id,
+            idempotency_key,
+            now,
+        )?)
+    }
+
+    /// Commits one leased reconciliation observation without redispatching the original action.
+    ///
+    /// # Errors
+    /// Returns a runtime error for stale ownership, substituted evidence, or commit failure.
+    #[allow(clippy::too_many_arguments)]
+    pub fn resolve_canonical_reconciliation(
+        &self,
+        job_id: ReconciliationJobId,
+        expected_job_revision: u64,
+        expected_job_generation: u64,
+        expected_execution_revision: u64,
+        expected_execution_generation: u64,
+        worker: RuntimeActorId,
+        observation: &ReconciliationObservation,
+        correlation_id: CorrelationId,
+        idempotency_key: &str,
+        now: DateTime<Utc>,
+    ) -> Result<ReconciliationResolutionReceipt, RuntimeError> {
+        Ok(self.store()?.resolve_reconciliation_job(
+            job_id,
+            expected_job_revision,
+            expected_job_generation,
+            expected_execution_revision,
+            expected_execution_generation,
+            worker,
+            observation,
+            correlation_id,
+            idempotency_key,
+            now,
+        )?)
     }
 
     /// Lists the latest authoritative attempt for every canonical workflow.
