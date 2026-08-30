@@ -4087,6 +4087,22 @@ export function App() {
       const inspection = await getProtectedRootAction(actionId);
       if (!inspection) throw new Error(`Canonical action ${actionId} was not found.`);
       setActionInspections((current) => ({ ...current, [actionId]: inspection }));
+      const latestExecution = inspection.executions.at(-1);
+      if (latestExecution) {
+        setCanonicalActions((current) => current.some((action) => action.action_id === actionId) ? current : [{
+          action_id: actionId,
+          execution_id: latestExecution.id,
+          workflow_id: inspection.envelope.workflow_id,
+          attempt_id: inspection.envelope.attempt_id,
+          actor: inspection.envelope.actor,
+          effect_class: inspection.envelope.effect_class,
+          state: latestExecution.state,
+          outcome: latestExecution.outcome,
+          revision: latestExecution.revision,
+          lease_generation: latestExecution.lease_generation,
+          updated_at: latestExecution.updated_at
+        }, ...current]);
+      }
     } catch (error) {
       setActionError(errorMessage(error));
     } finally {
@@ -8946,6 +8962,11 @@ export function App() {
                           {inspection.envelope.origin.evidence.map((source) => <li key={`Evidence-${source.source_type}-${source.locator}`}><strong>Evidence</strong> <code>{source.locator}</code> <small>{source.content_hash.digest_hex.slice(0, 12)}…</small></li>)}
                         </ul>
                         {inspection.envelope.origin.conversation && <button className="link-button" type="button" disabled={!conversations.some((conversation) => conversation.id === inspection.envelope.origin?.conversation?.locator)} title={conversations.some((conversation) => conversation.id === inspection.envelope.origin?.conversation?.locator) ? "Open the exact originating conversation" : "The originating conversation has not been projected into this compatibility session yet"} onClick={() => openChat(inspection.envelope.origin!.conversation!.locator)}>Open originating conversation →</button>}
+                      </div>}
+                      {(typeof inspection.envelope.compensates_action === "string" || (inspection.compensation_actions?.length ?? 0) > 0) && <div className="action-compensation-history" aria-label="Compensation history" role="region">
+                        <p><strong>Compensation history</strong> · exact causal action links</p>
+                        {typeof inspection.envelope.compensates_action === "string" && <button className="link-button" type="button" disabled={actionBusy !== null} onClick={() => void inspectCanonicalAction(inspection.envelope.compensates_action as string)}>Inspect compensated action <code>{inspection.envelope.compensates_action}</code> →</button>}
+                        {(inspection.compensation_actions ?? []).map((compensationActionId) => <button className="link-button" type="button" disabled={actionBusy !== null} onClick={() => void inspectCanonicalAction(compensationActionId)} key={compensationActionId}>Inspect compensation <code>{compensationActionId}</code> →</button>)}
                       </div>}
                       {inspection.reconciliation_jobs.length > 0 && <p>Reconciliation: {inspection.reconciliation_jobs.map((job) => job.state.replaceAll("_", " ")).join(", ")}</p>}
                       <button className="link-button" type="button" disabled={workflowBusy !== null} onClick={() => void inspectCanonicalWorkflow(inspection.envelope.workflow_id)}>Load source workflow evidence →</button>

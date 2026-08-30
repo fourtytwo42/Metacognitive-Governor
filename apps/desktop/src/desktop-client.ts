@@ -1282,6 +1282,7 @@ export interface CanonicalActionInspection {
     created_at: string;
     [key: string]: unknown;
   };
+  compensation_actions?: string[];
   executions: Array<{
     id: string;
     action_id: string;

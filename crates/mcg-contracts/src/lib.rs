@@ -845,6 +845,9 @@ pub struct ActionSummary {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActionInspection {
     pub envelope: ActionEnvelope,
+    /// Newer actions that causally compensate this action, in creation order.
+    #[serde(default)]
+    pub compensation_actions: Vec<ActionId>,
     pub executions: Vec<ActionExecution>,
     pub receipts: Vec<ActionReceipt>,
     pub reconciliation_jobs: Vec<ReconciliationJob>,

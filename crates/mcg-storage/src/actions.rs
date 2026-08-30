@@ -297,6 +297,22 @@ impl SqliteEventStore {
         let Some(envelope) = self.action_envelope(action_id)? else {
             return Ok(None);
         };
+        let mut compensation_statement = self.connection.prepare(
+            "SELECT action_id FROM action_envelopes WHERE compensates_action_id = ?1
+             ORDER BY created_at, action_id LIMIT 1001",
+        )?;
+        let compensation_rows = compensation_statement
+            .query_map([action_id.to_string()], |row| row.get::<_, String>(0))?;
+        let compensation_actions = compensation_rows
+            .map(|row| {
+                serde_json::from_value(serde_json::Value::String(row?)).map_err(StorageError::from)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if compensation_actions.len() > 1_000 {
+            return Err(StorageError::InvalidData(
+                "action compensations exceed the bounded inspection limit".into(),
+            ));
+        }
         let executions = query_action_collection::<ActionExecution>(
             &self.connection,
             "SELECT execution_json FROM action_executions WHERE action_id = ?1
@@ -334,6 +350,7 @@ impl SqliteEventStore {
         events.reverse();
         Ok(Some(ActionInspection {
             envelope,
+            compensation_actions,
             executions,
             receipts,
             reconciliation_jobs,
@@ -3112,6 +3129,23 @@ mod tests {
                 .iter()
                 .any(|event| event.type_id.as_str() == ACTION_COMMITTED_TYPE_ID)
         );
+        let original_inspection = store
+            .action_inspection(original_envelope.id, 10)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            original_inspection.compensation_actions,
+            vec![compensation_envelope.id]
+        );
+        let compensation_inspection = store
+            .action_inspection(compensation_envelope.id, 10)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            compensation_inspection.envelope.compensates_action,
+            Some(original_envelope.id)
+        );
+        assert!(compensation_inspection.compensation_actions.is_empty());
 
         let (mut duplicate_compensation, duplicate_execution) =
             action_fixture(&workflow, actor, EffectClass::Reversible);

@@ -1196,6 +1196,7 @@ test("Developer progressively inspects canonical governed-action evidence", asyn
   const payload = { type_id: "mcg.governed_filesystem_operation.v1", schema_version: 1, canonical_encoding: "canonical-cbor-v1", normalization: "canonical-json-v1", bytes: [1, 2, 3] };
   const inspection = {
     envelope: { id: action.action_id, workflow_id: action.workflow_id, attempt_id: action.attempt_id, actor: action.actor, origin: { conversation: { source_type: "mcg.conversation.v1", locator: "00000000-0000-4000-8000-000000000546", content_hash: { algorithm: "blake3-256", domain: "MetaCog.Conversation", digest_hex: "1".repeat(64) } }, invocation: { source_type: "mcg.invocation_manifest.v1", locator: "00000000-0000-4000-8000-000000000547", content_hash: { algorithm: "blake3-256", domain: "MetaCog.Invocation", digest_hex: "2".repeat(64) } }, command: { source_type: "mcg.command_execution.v1", locator: "command-548", content_hash: { algorithm: "blake3-256", domain: "MetaCog.Command", digest_hex: "3".repeat(64) } }, approval: { source_type: "mcg.approval_request.v1", locator: "00000000-0000-4000-8000-000000000549", content_hash: { algorithm: "blake3-256", domain: "MetaCog.Approval", digest_hex: "4".repeat(64) } }, agent: { source_type: "mcg.runtime_actor.v1", locator: action.actor, content_hash: { algorithm: "blake3-256", domain: "MetaCog.Actor", digest_hex: "5".repeat(64) } }, evidence: [{ source_type: "mcg.action_evidence.v1", locator: "artifact-550", content_hash: { algorithm: "blake3-256", domain: "MetaCog.Evidence", digest_hex: "6".repeat(64) } }] }, effect_class: action.effect_class, operation: payload, operation_hash: { algorithm: "blake3-256", domain: "MetaCog.ActionOperation", digest_hex: "d".repeat(64) }, created_at: action.updated_at },
+    compensation_actions: ["00000000-0000-4000-8000-000000000552"],
     executions: [{ id: action.execution_id, action_id: action.action_id, attempt_number: 1, state: action.state, revision: 3, lease_generation: 2, executor: action.actor, outcome: action.outcome, created_at: action.updated_at, updated_at: action.updated_at }],
     receipts: [],
     reconciliation_jobs: [{ id: "00000000-0000-4000-8000-000000000543", action_id: action.action_id, execution_id: action.execution_id, adapter: payload, state: "pending", revision: 1, lease_generation: 0, lease_owner: null, lease_expires_at: null, next_attempt_at: action.updated_at, attempts: 0, deadline: "2026-08-30T13:00:00Z", last_hint: null, created_at: action.updated_at, updated_at: action.updated_at }],
@@ -1203,7 +1204,12 @@ test("Developer progressively inspects canonical governed-action evidence", asyn
   };
   client.getSettings.mockResolvedValue({ schema_version: 1, revision: 1, interface_complexity: "developer", autonomy: "autonomous", shadow_experiments: true, updated_at: action.updated_at });
   client.protectedRootActions.mockResolvedValue([action]);
-  client.protectedRootAction.mockResolvedValue(inspection);
+  client.protectedRootAction.mockImplementation(async (actionId: string) => actionId === action.action_id ? inspection : ({
+    ...inspection,
+    envelope: { ...inspection.envelope, id: actionId },
+    compensation_actions: [],
+    executions: inspection.executions.map((execution) => ({ ...execution, id: "00000000-0000-4000-8000-000000000553", action_id: actionId }))
+  }));
 
   render(<App />);
   fireEvent.click(await screen.findByRole("link", { name: /Agents/ }));
@@ -1215,12 +1221,16 @@ test("Developer progressively inspects canonical governed-action evidence", asyn
   expect(within(actions).getByRole("region", { name: "Bound action origin" })).toHaveTextContent("command-548");
   expect(within(actions).getByRole("region", { name: "Bound action origin" })).toHaveTextContent("artifact-550");
   expect(within(actions).getByRole("button", { name: /Open originating conversation/ })).toBeDisabled();
+  expect(within(actions).getByRole("region", { name: "Compensation history" })).toHaveTextContent("00000000-0000-4000-8000-000000000552");
   expect(within(actions).getByRole("button", { name: "Canonical action evidence" })).toBeInTheDocument();
   fireEvent.click(within(actions).getByRole("button", { name: "Canonical action evidence" }));
   const evidence = within(actions).getByRole("textbox", { name: /Canonical action .* evidence/ });
   expect(evidence).toHaveAttribute("aria-readonly", "true");
   expect(evidence).toHaveTextContent("mcg.action_classified.v1");
   expect(evidence).toHaveTextContent("correlation_id");
+  fireEvent.click(within(actions).getByRole("button", { name: /Inspect compensation/ }));
+  await waitFor(() => expect(client.protectedRootAction).toHaveBeenLastCalledWith("00000000-0000-4000-8000-000000000552"));
+  await waitFor(() => expect(actions.querySelectorAll(".canonical-action-row")).toHaveLength(2));
 });
 
 test("Codex-style sidebar groups project chats, searches them, and persists pins", async () => {
