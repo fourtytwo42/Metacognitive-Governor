@@ -61,6 +61,18 @@ updates before installation.
 
 The complete Apache License 2.0 text is shipped in MCG release packages.
 
+## process-wrap
+
+The governed action parent uses `process-wrap` 10.0.0 to place each action runner and its
+descendants in a POSIX process group or Windows Job Object before execution begins.
+
+- Upstream: <https://github.com/watchexec/process-wrap>
+- License: Apache License 2.0 OR MIT; MCG distributes it under the Apache-2.0 option.
+- Local boundary: the child environment and I/O remain bounded, deadline termination targets
+  the whole process tree, and the parent still waits/reaps before classifying an uncertain effect.
+
+The complete Apache License 2.0 text is shipped in MCG release packages.
+
 ## yaml-rust2
 
 `crates/mcg-projects` uses `yaml-rust2` 0.11.1 to parse bounded Docker Compose

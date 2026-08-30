@@ -16,6 +16,11 @@ use mcg_contracts::{
     ContentHash, EffectClass, PolicyBinding, ReconciliationJob, ReconciliationJobState,
     RuntimeActorId, StableTypeId, VersionedPayload, decode_canonical_cbor_v1,
 };
+#[cfg(windows)]
+use process_wrap::tokio::JobObject;
+#[cfg(unix)]
+use process_wrap::tokio::ProcessGroup;
+use process_wrap::tokio::{ChildWrapper, CommandWrap, KillOnDrop};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use tokio::{
@@ -233,20 +238,27 @@ impl ActionRunnerClient {
             )
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
+            .stderr(Stdio::piped());
+        let mut command = CommandWrap::from(command);
+        command.wrap(KillOnDrop);
+        #[cfg(unix)]
+        command.wrap(ProcessGroup::leader());
+        #[cfg(windows)]
+        command.wrap(JobObject);
         let mut child = command
             .spawn()
             .map_err(|_| ActionRunnerClientError::Launch)?;
-        let (Some(mut stdin), Some(stdout), Some(stderr)) =
-            (child.stdin.take(), child.stdout.take(), child.stderr.take())
-        else {
-            let _ = child.kill().await;
+        let (Some(mut stdin), Some(stdout), Some(stderr)) = (
+            child.stdin().take(),
+            child.stdout().take(),
+            child.stderr().take(),
+        ) else {
+            let _ = Box::into_pin(child.kill()).await;
             let _ = child.wait().await;
             return Err(ActionRunnerClientError::Launch);
         };
-        let stdout_task = tokio::spawn(read_bounded(stdout, ACTION_RUNNER_RESPONSE_MAX_BYTES));
-        let stderr_task = tokio::spawn(read_bounded(stderr, ACTION_RUNNER_STDERR_MAX_BYTES));
+        let mut stdout_task = tokio::spawn(read_bounded(stdout, ACTION_RUNNER_RESPONSE_MAX_BYTES));
+        let mut stderr_task = tokio::spawn(read_bounded(stderr, ACTION_RUNNER_STDERR_MAX_BYTES));
         let deadline = Instant::now() + self.outer_timeout;
         match tokio::time::timeout_at(deadline, async {
             stdin.write_all(&request_bytes).await?;
@@ -257,7 +269,7 @@ impl ActionRunnerClient {
             Ok(Ok(())) => {}
             delivery => {
                 drop(stdin);
-                stop_child(&mut child, stdout_task, stderr_task).await;
+                stop_child(child.as_mut(), &stdout_task, &stderr_task).await;
                 return Err(if delivery.is_err() {
                     ActionRunnerClientError::Timeout
                 } else {
@@ -269,16 +281,32 @@ impl ActionRunnerClient {
         let status = match tokio::time::timeout_at(deadline, child.wait()).await {
             Ok(Ok(status)) => status,
             Ok(Err(_)) => {
-                stop_child(&mut child, stdout_task, stderr_task).await;
+                stop_child(child.as_mut(), &stdout_task, &stderr_task).await;
                 return Err(ActionRunnerClientError::Process);
             }
             Err(_) => {
-                stop_child(&mut child, stdout_task, stderr_task).await;
+                stop_child(child.as_mut(), &stdout_task, &stderr_task).await;
                 return Err(ActionRunnerClientError::Timeout);
             }
         };
-        let (stdout, stdout_overflow) = join_reader(stdout_task).await?;
-        let (stderr, stderr_overflow) = join_reader(stderr_task).await?;
+        let ((stdout, stdout_overflow), (stderr, stderr_overflow)) =
+            match tokio::time::timeout_at(deadline, async {
+                let stdout = join_reader(&mut stdout_task).await?;
+                let stderr = join_reader(&mut stderr_task).await?;
+                Ok::<_, ActionRunnerClientError>((stdout, stderr))
+            })
+            .await
+            {
+                Ok(Ok(output)) => output,
+                Ok(Err(error)) => {
+                    stop_child(child.as_mut(), &stdout_task, &stderr_task).await;
+                    return Err(error);
+                }
+                Err(_) => {
+                    stop_child(child.as_mut(), &stdout_task, &stderr_task).await;
+                    return Err(ActionRunnerClientError::Timeout);
+                }
+            };
         if stdout_overflow || stderr_overflow {
             return Err(ActionRunnerClientError::ResponseTooLarge);
         }
@@ -306,7 +334,7 @@ async fn read_bounded<R: AsyncRead + Unpin>(
 }
 
 async fn join_reader(
-    task: tokio::task::JoinHandle<std::io::Result<(Vec<u8>, bool)>>,
+    task: &mut tokio::task::JoinHandle<std::io::Result<(Vec<u8>, bool)>>,
 ) -> Result<(Vec<u8>, bool), ActionRunnerClientError> {
     task.await
         .map_err(|_| ActionRunnerClientError::Process)?
@@ -314,14 +342,14 @@ async fn join_reader(
 }
 
 async fn stop_child(
-    child: &mut tokio::process::Child,
-    stdout_task: tokio::task::JoinHandle<std::io::Result<(Vec<u8>, bool)>>,
-    stderr_task: tokio::task::JoinHandle<std::io::Result<(Vec<u8>, bool)>>,
+    child: &mut dyn ChildWrapper,
+    stdout_task: &tokio::task::JoinHandle<std::io::Result<(Vec<u8>, bool)>>,
+    stderr_task: &tokio::task::JoinHandle<std::io::Result<(Vec<u8>, bool)>>,
 ) {
-    let _ = child.kill().await;
+    let _ = Box::into_pin(child.kill()).await;
     let _ = child.wait().await;
-    let _ = stdout_task.await;
-    let _ = stderr_task.await;
+    stdout_task.abort();
+    stderr_task.abort();
 }
 
 fn validate_client_response(

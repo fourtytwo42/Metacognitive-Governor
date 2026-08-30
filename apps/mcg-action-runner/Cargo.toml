@@ -14,6 +14,7 @@ base64.workspace = true
 cap-fs-ext = { workspace = true, optional = true }
 cap-std = { workspace = true, optional = true }
 chrono.workspace = true
+process-wrap.workspace = true
 mcg-contracts = { path = "../../crates/mcg-contracts" }
 serde.workspace = true
 serde_json.workspace = true

@@ -270,3 +270,106 @@ async fn timeout_after_effect_is_unknown_and_still_stops_late_work() {
     std::thread::sleep(Duration::from_millis(150));
     assert!(!root.path().join("late-effect.txt").exists());
 }
+
+#[tokio::test]
+async fn bounded_parent_rejects_oversized_or_diagnostic_child_output() {
+    for (mode, expected) in [
+        (
+            "oversized-response",
+            ActionRunnerClientError::ResponseTooLarge,
+        ),
+        (
+            "oversized-diagnostic",
+            ActionRunnerClientError::ResponseTooLarge,
+        ),
+        (
+            "diagnostic-output",
+            ActionRunnerClientError::DiagnosticOutput,
+        ),
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("fault-mode.txt"), mode).unwrap();
+        let client = fault_client(root.path(), Duration::from_secs(2));
+
+        let error = client
+            .invoke(&fixture_request(root.path()))
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            std::mem::discriminant(&error),
+            std::mem::discriminant(&expected)
+        );
+        assert!(error.effect_may_have_occurred());
+    }
+}
+
+#[tokio::test]
+async fn bounded_parent_rejects_malformed_real_child_response() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(root.path().join("fault-mode.txt"), "malformed-response").unwrap();
+    let client = fault_client(root.path(), Duration::from_secs(2));
+
+    let error = client
+        .invoke(&fixture_request(root.path()))
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, ActionRunnerClientError::InvalidResponse));
+    assert!(error.effect_may_have_occurred());
+}
+
+#[tokio::test]
+async fn timeout_terminates_the_entire_child_process_tree() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(
+        root.path().join("fault-mode.txt"),
+        "descendant-then-timeout",
+    )
+    .unwrap();
+    let client = fault_client(root.path(), Duration::from_millis(250));
+
+    let error = client
+        .invoke(&fixture_request(root.path()))
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, ActionRunnerClientError::Timeout));
+    let pid = std::fs::read_to_string(root.path().join("descendant-pid.txt"))
+        .unwrap()
+        .parse::<u32>()
+        .unwrap();
+    assert!(
+        !process_exists(pid),
+        "descendant must leave with its process group"
+    );
+    std::thread::sleep(Duration::from_millis(150));
+    assert!(!root.path().join("descendant-late-effect.txt").exists());
+}
+
+#[tokio::test]
+async fn deadline_still_applies_after_the_process_leader_exits() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::write(
+        root.path().join("fault-mode.txt"),
+        "descendant-outlives-leader",
+    )
+    .unwrap();
+    let client = fault_client(root.path(), Duration::from_millis(250));
+    let started = Instant::now();
+
+    let error = client
+        .invoke(&fixture_request(root.path()))
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, ActionRunnerClientError::Timeout));
+    assert!(started.elapsed() < Duration::from_secs(3));
+    let pid = std::fs::read_to_string(root.path().join("descendant-pid.txt"))
+        .unwrap()
+        .parse::<u32>()
+        .unwrap();
+    assert!(!process_exists(pid), "group wait must include descendants");
+    std::thread::sleep(Duration::from_millis(150));
+    assert!(!root.path().join("descendant-late-effect.txt").exists());
+}

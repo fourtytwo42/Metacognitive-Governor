@@ -79,6 +79,7 @@ blake3 = "1.8.2"
 cap-std = "4.0.2"
 cap-fs-ext = "4.0.2"
 chrono = { version = "0.4.42", features = ["serde"] }
+process-wrap = { version = "10.0.0", features = ["tokio1"] }
 ciborium = "0.2.2"
 chromiumoxide = "0.9.1"
 mcg-browser-contracts = { path = "crates/mcg-browser-contracts" }
