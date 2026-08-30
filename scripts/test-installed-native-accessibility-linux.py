@@ -74,6 +74,20 @@ def accessible_name(node: Any) -> str:
         return ""
 
 
+def accessible_path(node: Any, *, depth: int = 6) -> str:
+    parts: list[str] = []
+    current = node
+    for _ in range(depth):
+        if current is None:
+            break
+        parts.append(f"{role_name(current)}:{accessible_name(current)}")
+        try:
+            current = current.parent
+        except Exception:
+            break
+    return " <- ".join(parts)
+
+
 def has_state(node: Any, state: Any) -> bool:
     try:
         return bool(node.getState().contains(state))
@@ -397,15 +411,19 @@ def main() -> int:
     missing = [name for name, node in required.items() if node is None]
     if missing:
         available_buttons = sorted(
-            {
-                accessible_name(node)
-                for node in nodes
-                if role_name(node) == "push button" and accessible_name(node).strip()
-            }
+            accessible_path(node)
+            for node in nodes
+            if role_name(node) == "push button" and accessible_name(node).strip()
+        )
+        project_nodes = sorted(
+            accessible_path(node)
+            for node in nodes
+            if "project" in accessible_name(node).casefold()
         )
         raise RuntimeError(
             f"AT-SPI is missing required native controls: {', '.join(missing)}; "
-            f"available push buttons: {available_buttons[:100]}"
+            f"available push buttons: {available_buttons[:100]}; "
+            f"project-named nodes: {project_nodes[:100]}"
         )
 
     focusable_required = [
