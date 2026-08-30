@@ -5,8 +5,16 @@ root_executable="${1:-target/debug/mcg-protected-rootd}"
 cli_executable="${2:-target/debug/mcg}"
 port="${3:-17841}"
 repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-root_executable_path="$(realpath "$repository_root/$root_executable")"
-cli_executable_path="$(realpath "$repository_root/$cli_executable")"
+if [[ "$root_executable" = /* ]]; then
+  root_executable_path="$(realpath "$root_executable")"
+else
+  root_executable_path="$(realpath "$repository_root/$root_executable")"
+fi
+if [[ "$cli_executable" = /* ]]; then
+  cli_executable_path="$(realpath "$cli_executable")"
+else
+  cli_executable_path="$(realpath "$repository_root/$cli_executable")"
+fi
 evidence_root="$repository_root/target/stage2-root-e2e"
 mkdir -p "$evidence_root"
 case_root="$(mktemp -d "$evidence_root/unix.XXXXXXXX")"
