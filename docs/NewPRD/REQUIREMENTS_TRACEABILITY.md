@@ -188,4 +188,4 @@ This matrix is updated as implementation lands. `Implemented / cumulative UAT pe
 | Migration + backup/restore receipt | Every schema/ownership change | Schema 50→55 protected-root migration-process and focused schema-54 action-history migration tests pass / packaged backup/restore UAT pending |
 | Golden payload/hash compatibility receipt | Every codec/schema release | TaskContract v1 fixture/hash plus existing canonical-v1 fixtures pass / cross-version package replay pending |
 | Experiment artifact set | Every protected experiment | Planned |
-| Commit/remote parity and artifact manifest | Every verified major stage | Stage 3 through schema-55 action validation/commit/compensation is pushed through `257e108`; cumulative release artifacts remain pending |
+| Commit/remote parity and artifact manifest | Every verified major stage | Stage 3 through the governed filesystem runner and cross-platform package contracts is pushed through `a434064`; cumulative release artifacts remain pending |

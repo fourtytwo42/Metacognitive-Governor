@@ -4,15 +4,15 @@
 
 **Branch:** `codex/v34-updater-version-binding`
 
-**Pushed implementation checkpoint:** `707fbdd` (`Record governed effect checkpoint`), with implementation through `257e108` (`Validate and commit governed effects`)
+**Pushed implementation checkpoint:** `a434064` (`Add governed filesystem action runner`)
 
-**Audit boundary:** pushed schema-54 action-reconciliation base plus the verified schema-55 validation/commit/compensation checkpoint, and the separately identified uncommitted governed-filesystem runner foundation. The concurrent untracked `STAGE_3_DURABLE_WORKFLOW.md` is excluded from this audit's changes and commits.
+**Audit boundary:** pushed schema-54 action reconciliation, schema-55 validation/commit/compensation, and the governed-filesystem runner plus cross-platform package contracts. The concurrent untracked `STAGE_3_DURABLE_WORKFLOW.md` is excluded from this audit's changes and commits.
 
 **Specifications audited:** Adaptive Cognitive Agent Runtime PRD v1.4.2, Cognitive Runtime Implementation Contract v0.1, Cognitive Runtime Experimental Protocol Specification v0.2, the staged implementation plan, ADRs, traceability matrix, current source, tests, and durable repository memory.
 
 ## Executive assessment
 
-The new PRD is **not production-complete**. MetaCog has completed the architectural foundation, the stable contracts, the Protected Root implementation, and a substantial canonical durable-workflow slice. The governed-action ledger is pushed and focused-test green. A standalone governed-filesystem action runner and its cross-platform sidecar/package contracts are implemented and verified locally, but it is not yet connected to Protected Root, exposed through product inspection, rebuilt into release packages, or native cross-platform qualified. The separate runtime-worker, Root-permitted provider/tool pipeline, Protected Evaluator, persistent cognition, bounded improvement, culture, and longitudinal research layers remain to be built.
+The new PRD is **not production-complete**. MetaCog has completed the architectural foundation, the stable contracts, the Protected Root implementation, and a substantial canonical durable-workflow slice. The governed-action ledger, standalone governed-filesystem action runner, and cross-platform sidecar/package contracts are pushed and focused-test green, but the runner is not yet connected to Protected Root, exposed through product inspection, rebuilt into release packages, or native cross-platform qualified. The separate runtime-worker, Root-permitted provider/tool pipeline, Protected Evaluator, persistent cognition, bounded improvement, culture, and longitudinal research layers remain to be built.
 
 The current state is best summarized as:
 
@@ -20,7 +20,7 @@ The current state is best summarized as:
 - **Stage 1:** implementation complete; cumulative packaged compatibility/UAT remains.
 - **Stage 2:** implementation complete; two owner-bound native package lanes and the final cumulative release gate remain.
 - **Stage 3:** canonical kernel, Root IPC/CLI, Desktop projection, and objectively provable dependency/backoff recovery are pushed. The complete recovery/event/process/package gate remains open.
-- **Stage 4:** the schema-55 action/effect ledger, reconciliation kernel, post-effect validation/commit boundary, causal compensation, and explicit elevated authority for irreversible actions are pushed and focused-test green. A standalone governed-filesystem runner plus Windows/Linux/macOS sidecar and package-UAT contracts are locally test-green, but Root lifecycle integration, product inspection, fresh package builds, broad adversarial coverage, and native release qualification remain open.
+- **Stage 4:** the schema-55 action/effect ledger, reconciliation kernel, post-effect validation/commit boundary, causal compensation, explicit elevated authority for irreversible actions, standalone governed-filesystem runner, and Windows/Linux/macOS package contracts are pushed and focused-test green. Root lifecycle integration, product inspection, fresh package builds, broad adversarial coverage, and native release qualification remain open.
 - **Stages 5–13:** not implemented as the new canonical cognitive-runtime architecture. Existing MetaCog capabilities provide useful compatibility foundations, but they do not satisfy these stages' new authority, persistence, reconstruction, evaluation, or experimental requirements.
 
 The traceability ledger is useful as a requirements inventory but is not a completion percentage. This report classifies evidence directly from current source, pushed history, and freshly run tests.
