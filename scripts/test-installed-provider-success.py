@@ -349,14 +349,22 @@ def exercise(args: argparse.Namespace) -> None:
             project,
             evidence_root,
             "provider-success-human",
-            ["complete a provider-backed installed task"],
+            [
+                "In the linked project, create installed-provider-result.txt with "
+                f"the exact UTF-8 content {FIXTURE_TEXT!r} followed by one newline, "
+                "verify its exact bytes, and report completion."
+            ],
             f"{PRIVATE_CONTEXT}\n".encode(),
         )
         captured_results.append(human)
         require_success(human, "provider-success-human")
         human_text = human.stdout.decode("utf-8")
-        assert "Status: completed" in human_text and FIXTURE_TEXT in human_text
+        assert "Status: completed" in human_text
+        assert project.joinpath("installed-provider-result.txt").read_bytes() == (
+            f"{FIXTURE_TEXT}\n".encode()
+        )
         assert PRIVATE_CONTEXT not in human_text
+        assert provider.call_count == 0
 
         structured = invoke_cli(
             cli,
@@ -405,7 +413,7 @@ def exercise(args: argparse.Namespace) -> None:
         assert records[-1]["result"]["task"]["state"] == "completed"
         assert any(record["type"] == "event" for record in records)
 
-        assert provider.call_count == 6
+        assert provider.call_count == 4
         tasks = list_values(
             cli, args.host, token_file, project, evidence_root, "task", "provider-success-tasks"
         )
@@ -420,7 +428,7 @@ def exercise(args: argparse.Namespace) -> None:
         )
         new_tasks = [item for item in tasks if item["id"] not in baseline_task_ids]
         new_projects = [item for item in projects if item["project_id"] not in baseline_project_ids]
-        assert len(new_tasks) == 3
+        assert len(new_tasks) == 2
         assert len(new_projects) == 1
         assert all(item["state"] == "completed" for item in new_tasks)
 

@@ -343,6 +343,13 @@ can independently verify before `report_result`; outer task/request completion,
 report acceptance, integration settlement, and owner delivery are rejected with an
 actionable correction message. Unit coverage includes the exact circular condition
 observed in installed UAT plus concrete accepted conditions and settlement variants.
+Writable Coder threads are pinned to `approvalPolicy=never` with only their isolated
+`workspace-write` sandbox; Tester and read-only Coder threads are pinned to `never`
+plus `read-only`. Internal specialists discard inherited named permission profiles
+and additional writable roots. This means routine sandboxed work cannot deadlock on
+an owner-facing approval, while prohibited operations cannot request an escalation;
+any unexpected approval request is still denied by the runtime. Installed UAT must
+exercise a concrete exact-byte project change and prove only that file is integrated.
 The fixture is disconnected before daemon restart; the second phase requires the
 same task, evaluator, audit, and deterministic side-effect-free replay evidence with
 no provider available. Windows, Linux, and macOS package harnesses share this gate,

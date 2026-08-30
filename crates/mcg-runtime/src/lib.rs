@@ -2680,6 +2680,30 @@ fn codex_preferences(preferences: &ExecutionPreferences) -> CodexExecutionPrefer
     }
 }
 
+fn specialist_codex_preferences(
+    parent: &CodexExecutionPreferences,
+    writable: bool,
+) -> CodexExecutionPreferences {
+    let mut specialist = parent.clone();
+    // A specialist's immutable lease and isolated worktree are its authority boundary. Never
+    // route its routine sandboxed work through an owner-facing approval that the backstage
+    // runtime cannot safely present, and never allow an approval to expand that sandbox.
+    specialist.approval_mode = if writable {
+        CodexApprovalMode::Ask
+    } else {
+        CodexApprovalMode::ReadOnly
+    };
+    specialist.approval_policy = Some(CodexApprovalPolicy::Never);
+    specialist.sandbox_mode = Some(if writable {
+        CodexSandboxMode::WorkspaceWrite
+    } else {
+        CodexSandboxMode::ReadOnly
+    });
+    specialist.permission_profile = None;
+    specialist.writable_roots.clear();
+    specialist
+}
+
 fn codex_config_path(key: &str) -> Result<Vec<String>, StorageError> {
     let mut table = toml::from_str::<toml::Table>(&format!("{key} = 0")).map_err(|error| {
         StorageError::InvalidData(format!("invalid Codex configuration key `{key}`: {error}"))
@@ -5947,10 +5971,12 @@ impl AppRuntime {
                 None
             },
         };
+        let specialist_preferences =
+            specialist_codex_preferences(preferences, !is_tester && !read_only_delegation);
         let coder_thread = codex_harness
             .start_thread_with_instructions(
                 Some(&worktree.root),
-                preferences,
+                &specialist_preferences,
                 !is_tester && !read_only_delegation,
                 Some(&coder_instructions),
             )
@@ -6069,7 +6095,7 @@ impl AppRuntime {
         let coder_turn = codex_harness.start_turn_with_progress(
             &coder_thread,
             &coder_prompt,
-            preferences,
+            &specialist_preferences,
             !is_tester && !read_only_delegation,
             Some(progress_sender),
         );
@@ -27956,6 +27982,32 @@ mod tests {
                 "accepted circular condition: {condition}"
             );
         }
+    }
+
+    #[test]
+    fn specialist_preferences_pin_sandbox_without_interactive_escalation() {
+        let parent = CodexExecutionPreferences {
+            approval_mode: CodexApprovalMode::AutoReview,
+            approval_policy: Some(CodexApprovalPolicy::OnRequest),
+            sandbox_mode: Some(CodexSandboxMode::DangerFullAccess),
+            permission_profile: Some("owner-profile".into()),
+            writable_roots: vec!["C:/outside".into()],
+            ..CodexExecutionPreferences::default()
+        };
+
+        let coder = specialist_codex_preferences(&parent, true);
+        assert_eq!(coder.approval_policy, Some(CodexApprovalPolicy::Never));
+        assert_eq!(coder.sandbox_mode, Some(CodexSandboxMode::WorkspaceWrite));
+        assert_eq!(coder.approval_mode, CodexApprovalMode::Ask);
+        assert!(coder.permission_profile.is_none());
+        assert!(coder.writable_roots.is_empty());
+
+        let tester = specialist_codex_preferences(&parent, false);
+        assert_eq!(tester.approval_policy, Some(CodexApprovalPolicy::Never));
+        assert_eq!(tester.sandbox_mode, Some(CodexSandboxMode::ReadOnly));
+        assert_eq!(tester.approval_mode, CodexApprovalMode::ReadOnly);
+        assert!(tester.permission_profile.is_none());
+        assert!(tester.writable_roots.is_empty());
     }
 
     #[tokio::test]
