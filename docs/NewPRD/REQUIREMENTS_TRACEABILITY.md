@@ -76,10 +76,10 @@ This matrix is updated as implementation lands. `Implemented / cumulative UAT pe
 
 | Requirement | Stage | Automated evidence | E2E/UAT evidence | Status |
 |---|---:|---|---|---|
-| Every material call has a reconstructable `InvocationManifest` | 5 | Manifest completeness tests | CLI reconstruction | Complete bounded DTO, canonical hash fixture, schema-56 immutable persistence, exact replay/substitution, restart reconstruction, and model-run lineage implemented / Runtime producer, Root IPC, CLI, Desktop, and E2E pending |
+| Every material call has a reconstructable `InvocationManifest` | 5 | Manifest completeness tests | CLI reconstruction | Complete bounded DTO, canonical hash fixture, schema-56 immutable persistence, exact replay/substitution, restart reconstruction, model-run lineage, and a separate deterministic Runtime producer process implemented / Protected Root orchestration, Root IPC, CLI, Desktop, and product E2E pending |
 | Exact context refs are captured in `ContextManifest` | 5, 8 | Context tests | Developer inspector | Exact source/perspective/influence/transformation/order/token/selection/expansion contract and content-addressed schema-56 storage implemented / live Runtime capture, Developer inspection, and Stage 8 retrieval integration pending |
 | Remote model calls require Root-bound egress permit | 6 | Permit/policy tests | Unauthorized destination/context attack | Planned |
-| Runtime receives no ambient provider secrets | 6 | Secret scanning/process tests | Compromised Runtime probe | Planned |
+| Runtime receives no ambient provider secrets | 6 | Secret scanning/process tests | Compromised Runtime probe | Deterministic runtime-worker launches with a cleared environment, receives only its short-lived IPC bootstrap over inherited stdin, and has no provider/network/secret dependency / Stage 6 governed real-provider secret-handle path pending |
 | Secret handles resolve only for exact authorized execution | 6 | Gateway tests | Wrong provider/action handle | Planned |
 | Provider retry respects effect and idempotency semantics | 6 | Fake provider fault tests | Dropped/late stream | Planned |
 | Resolved provider/model/config fingerprint is persisted | 5, 6 | Manifest tests | Run inspection | InvocationManifest contract and immutable Root storage bind resolved provider/model, observed fingerprint, configuration, prompts, role, sampling, reasoning, environment, build, and request/response hashes / deterministic Runtime producer and Stage 6 real gateway pending |

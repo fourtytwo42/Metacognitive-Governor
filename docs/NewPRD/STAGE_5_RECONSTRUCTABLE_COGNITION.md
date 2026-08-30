@@ -1,6 +1,6 @@
 # Stage 5 — Runtime Worker and Reconstructable Deterministic Cognition
 
-**Status:** Contract and Root-owned persistence foundation implemented at `83b5629`; separate Runtime process, deterministic Work/Verify dispatch, product inspection, and release qualification remain open
+**Status:** Contract/Root persistence foundation implemented at `83b5629` and separate authenticated deterministic Runtime worker implemented at `522ba92`; Root orchestration, supervision, product inspection, and release qualification remain open
 
 ## Delivered contract boundary
 
@@ -32,9 +32,20 @@ Root storage can reconstruct one invocation with its exact context, manifest has
 
 Schema-50 and schema-54 migration fixtures were extended so they remain genuine historical profiles after schema 56. A focused schema-55→56 test and the real Protected Root interruption/backup/retry/restore process test pass without weakening backup or ownership behavior.
 
+## Separate Runtime worker checkpoint
+
+`mcg-runtime-worker` is now a real dependency-isolated executable. Its dependency tree contains only contracts, the platform IPC boundary, canonical serialization/hashing, async transport, and error/secret-zeroization support; it does not link storage, Protected Root, the legacy runtime implementation, providers, Tools, SQLite, or HTTP clients.
+
+Root-side test orchestration binds the endpoint before launch and passes the unpredictable capability only through inherited stdin. The worker connects back through a reject-remote Windows named pipe or owner-only Unix socket, then proves the exact executable hash, process ID, cognition role, protocol, and generation. Every subsequent frame is canonical, bounded, session/deadline/correlation bound, and authenticated; replay tracking is local to the worker session. Debug output omits the capability and shutdown is explicit.
+
+The deterministic provider path has different Work and Verify semantics. Work produces no verification claim. Verify consumes the exact Work response hash plus bounded criterion evidence and proposes `Satisfied` or `NotSatisfied`; it cannot commit a certificate or Root state. Wrong capabilities and executable substitution terminate without accepted execution. Root production orchestration and persistence of this process path are the next slice.
+
 ## Verification
 
-- `cargo test -p mcg-contracts` — 16/16 passed.
+- `cargo test -p mcg-contracts` — 17/17 passed.
+- `cargo test -p mcg-platform` — 3/3 passed.
+- `cargo test -p mcg-runtime-worker --all-targets -- --test-threads=1` — 6/6 passed, including four real-process/dependency tests.
+- Strict all-target Clippy for contracts, platform, and runtime-worker — passed.
 - `cargo clippy -p mcg-contracts --all-targets -- -D warnings` — passed.
 - `cargo test -p mcg-storage -- --test-threads=1` — 108/108 passed.
 - `cargo test -p mcg-protected-rootd --test migration_process -- --test-threads=1` — 1/1 passed.
@@ -48,13 +59,11 @@ Strict whole-storage Clippy still reaches the repository’s documented pre-exis
 
 Stage 5 is not complete until all of the following are implemented and qualified:
 
-1. Create the separate `runtime-worker` executable with no dependency on Protected Root, storage, evaluator, or effect implementations.
-2. Add bounded, authenticated, versioned Root↔Runtime local IPC and an unpredictable launch-session capability.
-3. Implement deterministic fake Work and independent Verify behavior without Tools or a real model.
-4. Have Root persist planned/dispatched/terminal run state and accept only fenced typed Runtime proposals.
-5. Prove process death, cancellation, timeout, late response, duplicate response, replay, and Root/Runtime restart behavior.
-6. Add authenticated Root IPC, CLI reconstruction, and Simple/Advanced/Developer invocation presentation.
-7. Add the canonical global workflow/invocation browser and reconcile compatible `agents --remote` presentation.
-8. Run deterministic E2E, native GUI UAT, migration, package, and Windows/Linux/macOS release gates.
+1. Add the Protected Root supervisor/client without linking Runtime implementation into Root.
+2. Have Root persist planned/dispatched/terminal run state and accept only attempt/revision/lease/generation-fenced typed Runtime proposals.
+3. Prove process death, cancellation, timeout, late response, duplicate response, replay, and Root/Runtime restart behavior.
+4. Add authenticated Root IPC, CLI reconstruction, and Simple/Advanced/Developer invocation presentation.
+5. Add the canonical global workflow/invocation browser and reconcile compatible `agents --remote` presentation.
+6. Package the worker as an adjacent fixed-identity sidecar and run deterministic E2E, native GUI UAT, migration, and Windows/Linux/macOS release gates.
 
 No real provider is required for this stage’s correctness. Root-bound remote egress permits and secret handles begin in Stage 6.
