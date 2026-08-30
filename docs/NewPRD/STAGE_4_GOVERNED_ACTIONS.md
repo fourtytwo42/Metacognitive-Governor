@@ -52,6 +52,10 @@ revision/generation, actor, operation type, record counts, reconciliation state,
 source-workflow evidence loader. Developer adds the read-only canonical envelope,
 executions, receipts, reconciliation jobs, and ordered event evidence. Switching levels
 does not reload, fork, or mutate the Root action state and never exposes mutation authority.
+Canonical inspection also returns a bounded creation-ordered list of actions that compensate
+the inspected action. Advanced and Developer can traverse both directions of the exact causal
+relationship, including a target outside the current summary window, without manufacturing a
+new effect or receiving compensation authority.
 
 Checkpoint `cccdee0` establishes the canonical prerequisite for exact source navigation.
 The optional, backward-compatible `ActionOrigin` binds conversation, invocation, command,
@@ -103,6 +107,8 @@ deadline; this process boundary is defense in depth, not a filesystem or network
 - Desktop Rust tests: 20 passed.
 - Desktop component tests: 123 passed, including canonical action evidence and read-only
   accessibility semantics.
+- Current governed-action component path: 113/113 passed, including exact causal compensation
+  traversal and materialization of a linked action outside the current summary window.
 - Serialized browser E2E: 30 passed, including Simple → Advanced → Developer → Simple
   action-state preservation and an action-card Axe accessibility scan.
 - Desktop TypeScript, production frontend build, and affected Tauri all-target check: passed.
@@ -130,12 +136,14 @@ Stage 4 is not complete until all of the following pass:
    through packaged-process tests, including the existing changed-target ambiguity case,
    without blind redispatch.
 2. Exact approval-to-source navigation reaches the originating conversation, agent,
-   command, approval, and evidence, and compensation history/controls become owner-visible.
+   command, approval, and evidence, and compensation controls become owner-visible.
    Authenticated local IPC, CLI list/show, and progressive Desktop status/evidence are
    implemented. Immutable source binding and fail-closed origin display are implemented;
    compatibility producers plus exact invocation/command/approval focus remain. The current
-   Desktop source-workflow loader is not the complete navigation contract. Add a Root HTTP/API
-   projection only if a non-local product consumer requires it.
+   Desktop source-workflow loader is not the complete navigation contract. Bounded bidirectional
+   compensation history and exact inspection are implemented; initiating a new separately
+   authorized compensation is not yet exposed. Add a Root HTTP/API projection only if a
+   non-local product consumer requires it.
 3. Semantic path policy, resource budgets beyond bounded I/O/deadlines, network denial, and
    platform sandbox capability reporting pass adversarial Windows, Linux, and macOS tests.
    Windows Job Object/POSIX process-group confinement and focused Windows descendant tests

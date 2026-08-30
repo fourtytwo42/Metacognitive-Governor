@@ -4761,3 +4761,11 @@ When sources conflict, use this order:
 - Commands/tests: Action runner 17/17 serialized; strict runner executor and client-only Clippy; Protected Root 11/11 after `cargo clean -p mcg-protected-root --profile dev` cleared 4.7 GiB of stale debug artifacts; whole-workspace all-target check; docs, packaging, formatting, and diff gates passed.
 - Result: Product checkpoint `fc888a6` terminates/reaps direct children and descendants on deadline, prevents late effects, and prevents a dead leader from holding the client through inherited descendant pipes. The separate fault fixture remains excluded from packaging.
 - Follow-up: Qualify the same tree boundary natively and from packages on Windows/Linux/macOS; close semantic-path, broader resource-budget, network, and OS-sandbox adversarial gates.
+# 2026-08-30 - Owner-visible causal compensation history
+
+- Context: Compensation was durably causal in schema 55, but action inspection and the Desktop did not expose the reverse original-to-compensation relationship.
+- Decision: Add a backward-compatible bounded `compensation_actions` projection to canonical action inspection and let Advanced/Developer traverse exact original/compensation action IDs in either direction. A linked action outside the current summary window is materialized from its Root inspection; navigation remains read-only.
+- Files: `crates/mcg-contracts/src/lib.rs`, `crates/mcg-storage/src/actions.rs`, and `apps/desktop/src/{desktop-client.ts,App.tsx,App.test.tsx}`; Stage 4, traceability, status report, and `MEMORY.md`.
+- Commands/tests: Contracts 12/12; storage 103/103; whole-workspace all-target check; strict contracts Clippy; storage Clippy with only the recorded pre-existing lint classes allowed; Desktop TypeScript; focused causal-navigation component test; full App component suite 113/113; docs, packaging, formatting, and diff gates passed.
+- Result: Product checkpoint `30621ab` makes Root inspection return at most 1,000 creation-ordered compensation action IDs, and the Desktop can inspect both the original and every compensation without granting mutation authority.
+- Follow-up: Expose a separately authorized owner-facing compensation initiation path, then qualify a real reversible effect and compensation through packaged Windows/Linux/macOS UAT.
