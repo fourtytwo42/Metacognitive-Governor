@@ -2683,6 +2683,7 @@ fn codex_preferences(preferences: &ExecutionPreferences) -> CodexExecutionPrefer
 fn specialist_codex_preferences(
     parent: &CodexExecutionPreferences,
     writable: bool,
+    workspace_root: &str,
 ) -> CodexExecutionPreferences {
     let mut specialist = parent.clone();
     // A specialist's immutable lease and isolated worktree are its authority boundary. Never
@@ -2700,7 +2701,11 @@ fn specialist_codex_preferences(
         CodexSandboxMode::ReadOnly
     });
     specialist.permission_profile = None;
-    specialist.writable_roots.clear();
+    specialist.writable_roots = if writable {
+        vec![workspace_root.to_owned()]
+    } else {
+        Vec::new()
+    };
     specialist
 }
 
@@ -5971,8 +5976,11 @@ impl AppRuntime {
                 None
             },
         };
-        let specialist_preferences =
-            specialist_codex_preferences(preferences, !is_tester && !read_only_delegation);
+        let specialist_preferences = specialist_codex_preferences(
+            preferences,
+            !is_tester && !read_only_delegation,
+            &worktree.root,
+        );
         let coder_thread = codex_harness
             .start_thread_with_instructions(
                 Some(&worktree.root),
@@ -27995,14 +28003,14 @@ mod tests {
             ..CodexExecutionPreferences::default()
         };
 
-        let coder = specialist_codex_preferences(&parent, true);
+        let coder = specialist_codex_preferences(&parent, true, "C:/isolated-worktree");
         assert_eq!(coder.approval_policy, Some(CodexApprovalPolicy::Never));
         assert_eq!(coder.sandbox_mode, Some(CodexSandboxMode::WorkspaceWrite));
         assert_eq!(coder.approval_mode, CodexApprovalMode::Ask);
         assert!(coder.permission_profile.is_none());
-        assert!(coder.writable_roots.is_empty());
+        assert_eq!(coder.writable_roots, ["C:/isolated-worktree"]);
 
-        let tester = specialist_codex_preferences(&parent, false);
+        let tester = specialist_codex_preferences(&parent, false, "C:/isolated-worktree");
         assert_eq!(tester.approval_policy, Some(CodexApprovalPolicy::Never));
         assert_eq!(tester.sandbox_mode, Some(CodexSandboxMode::ReadOnly));
         assert_eq!(tester.approval_mode, CodexApprovalMode::ReadOnly);
