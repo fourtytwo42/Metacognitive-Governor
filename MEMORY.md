@@ -2,6 +2,15 @@
 
 Durable project context lives here. Update this file whenever information should survive chat context compression or future agent handoff.
 
+### 2026-08-30 - Progressive governed-action Desktop inspection
+
+- Context: Root IPC and CLI exposed canonical governed actions, but the Desktop had no projection and Stage 4 could not satisfy the three-interface contract.
+- Decision: Consume one bounded Root action state in all modes. Simple presents owner-facing identity/state; Advanced adds practical effect, revision/generation, actor, operation, reconciliation, and source-workflow evidence; Developer adds read-only exact canonical evidence without mutation authority.
+- Files: `apps/desktop/src-tauri/src/lib.rs`; `apps/desktop/src/{desktop-client.ts,App.tsx,styles.css,App.test.tsx}`; `tests/e2e/desktop-smoke.spec.ts`; `docs/NewPRD/{STAGE_4_GOVERNED_ACTIONS.md,REQUIREMENTS_TRACEABILITY.md,IMPLEMENTATION_STATUS_REPORT_2026-08-30.md}`.
+- Commands/tests: Desktop typecheck/build; Vitest 123/123; serialized Playwright 30/30 including scoped Axe; Desktop Rust 20/20; whole-workspace all-target check; packaging/docs/format/diff checks pass. Strict transitive Desktop Clippy still stops before changed paths in the documented 97-finding `mcg-codex-app-server` and Desktop build-script backlog.
+- Result: Product checkpoint `9b881dd` provides authenticated Tauri action list/show and deterministic Simple → Advanced → Developer → Simple evidence with unchanged Root state. Local/remote parity was exact after push.
+- Follow-up: Implement exact approval-to-conversation/agent/command/evidence navigation and compensation history/controls; add forced real-process fault/adversarial E2E and matched native package UAT.
+
 ### 2026-08-30 - New PRD completion report reconciled through action inspection
 
 - Context: The owner requested a current complete-versus-remaining NewPRD report while another agent owns the untracked Stage 3 document.

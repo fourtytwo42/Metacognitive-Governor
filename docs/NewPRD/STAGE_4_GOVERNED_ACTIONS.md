@@ -1,6 +1,6 @@
 # Stage 4 — Governed Actions, Side Effects, and Reconciliation
 
-**Status:** Authoritative ledger, filesystem runner, Root dispatch, reconciliation, and restart recovery implemented; product and release qualification remain open
+**Status:** Authoritative ledger, filesystem runner, Root dispatch, reconciliation, restart recovery, and progressive Desktop inspection implemented; release qualification and exact source navigation remain open
 
 **Last verified:** 2026-08-30
 
@@ -45,6 +45,13 @@ receipts and reconciliation jobs, plus the newest bounded event window in canoni
 `mcg action list` presents safe state metadata, while human `mcg action show` omits raw
 authority payloads and the explicit `--json` path exposes the full Developer contract.
 
+The Desktop consumes the same bounded Root projections through Tauri. Simple shows an
+owner-facing action identity and plain-language outcome only. Advanced adds effect class,
+revision/generation, actor, operation type, record counts, reconciliation state, and a
+source-workflow evidence loader. Developer adds the read-only canonical envelope,
+executions, receipts, reconciliation jobs, and ordered event evidence. Switching levels
+does not reload, fork, or mutate the Root action state and never exposes mutation authority.
+
 ## Authority boundary
 
 The runner is an effect executor, not an authorization service. Its request identifiers
@@ -73,6 +80,11 @@ OS sandboxing, process-tree confinement, or the action ledger.
 - Strict client-only runner Clippy and dependency-shape checks: passed; `cap-fs-ext` and
   `cap-std` are absent from the Root-linked feature graph.
 - Desktop Rust tests: 20 passed.
+- Desktop component tests: 123 passed, including canonical action evidence and read-only
+  accessibility semantics.
+- Serialized browser E2E: 30 passed, including Simple → Advanced → Developer → Simple
+  action-state preservation and an action-card Axe accessibility scan.
+- Desktop TypeScript, production frontend build, and affected Tauri all-target check: passed.
 - Whole workspace all-target compile: passed.
 - Windows debug sidecar preparation and copied-sidecar qualification: passed.
 - Windows PowerShell AST parsing and Git Bash syntax parsing for the modified package
@@ -91,9 +103,11 @@ Stage 4 is not complete until all of the following pass:
 
 1. Lost response, crash-before-effect, crash-after-effect, timeout, late response, and
    killed-process cases pass real process injection without blind redispatch.
-2. Root HTTP/API and Simple/Advanced/Developer Desktop projections expose safe action
-   status, source navigation, evidence, reconciliation, and compensation. Authenticated
-   local IPC and CLI list/show are implemented.
+2. Exact approval-to-source navigation reaches the originating conversation, agent,
+   command, approval, and evidence, and compensation history/controls become owner-visible.
+   Authenticated local IPC, CLI list/show, and progressive Desktop status/evidence are
+   implemented; the current Desktop source-workflow loader is not the complete navigation
+   contract. Add a Root HTTP/API projection only if a non-local product consumer requires it.
 3. Semantic path policy, resource budgets, process-tree confinement, and platform sandbox
    capability reporting pass adversarial Windows, Linux, and macOS tests.
 4. Fresh Windows installer/portable, Linux Debian/AppImage, and macOS app/DMG builds pass
