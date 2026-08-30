@@ -32,6 +32,7 @@ use mcg_agents::{
     RoleDefinition, RoleKind, RoleRelationship, ShadowExecutionReceipt, SuccessCondition,
     SupervisionObservation, TaskComplexity, TrustedOrganizationPublisher,
 };
+pub use mcg_codex_app_server::CodexHookStateUpdate;
 use mcg_config::{AutonomyPreset, CliTuiPreferences, UserSettings, UserSettingsRevision};
 use mcg_domain::{
     AgentDelegationId, ApprovalId, BlackboardEntryId, BlackboardEntryKind, CloudDiffApply,
@@ -1780,12 +1781,21 @@ fn router_with_shutdown(runtime: Arc<AppRuntime>, shutdown: Option<watch::Sender
                 .delete(release_conversation_codex_transport),
         )
         .route(
+            "/api/v1/conversations/{conversation_id}/codex-hook-trust-bypass",
+            axum::routing::put(bind_conversation_codex_hook_trust_bypass)
+                .delete(release_conversation_codex_hook_trust_bypass),
+        )
+        .route(
             "/api/v1/conversations/{conversation_id}/codex/models",
             get(conversation_codex_models),
         )
         .route(
             "/api/v1/conversations/{conversation_id}/codex/discovery",
             post(conversation_codex_discovery),
+        )
+        .route(
+            "/api/v1/conversations/{conversation_id}/codex/hooks/state",
+            post(update_conversation_codex_hook_state),
         )
         .route(
             "/api/v1/conversations/{conversation_id}/codex/configuration",
@@ -1883,6 +1893,7 @@ fn router_with_shutdown(runtime: Arc<AppRuntime>, shutdown: Option<watch::Sender
         .route("/api/v1/codex/rate-limits", get(codex_rate_limits))
         .route("/api/v1/codex/account/usage", get(codex_account_usage))
         .route("/api/v1/codex/discovery", post(codex_stable_discovery))
+        .route("/api/v1/codex/hooks/state", post(update_codex_hook_state))
         .route(
             "/api/v1/codex/configuration",
             get(codex_configuration_status),
@@ -4818,6 +4829,32 @@ async fn release_conversation_codex_transport(
     Ok(Json(serde_json::json!({ "released": released })))
 }
 
+async fn bind_conversation_codex_hook_trust_bypass(
+    State(state): State<ApiState>,
+    Path(conversation_id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let conversation_id = parse_conversation_id(&conversation_id)?;
+    let bound = state
+        .runtime
+        .bind_invocation_hook_trust_bypass(conversation_id)
+        .await
+        .map_err(map_runtime_error)?;
+    Ok(Json(serde_json::json!({ "bound": bound })))
+}
+
+async fn release_conversation_codex_hook_trust_bypass(
+    State(state): State<ApiState>,
+    Path(conversation_id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let conversation_id = parse_conversation_id(&conversation_id)?;
+    let released = state
+        .runtime
+        .release_invocation_hook_trust_bypass(conversation_id)
+        .await
+        .map_err(map_runtime_error)?;
+    Ok(Json(serde_json::json!({ "released": released })))
+}
+
 async fn conversation_codex_models(
     State(state): State<ApiState>,
     Path(conversation_id): Path<String>,
@@ -4846,6 +4883,21 @@ async fn conversation_codex_discovery(
                 &request.cwds,
                 request.force_reload,
             )
+            .await
+            .map_err(map_runtime_error)?,
+    ))
+}
+
+async fn update_conversation_codex_hook_state(
+    State(state): State<ApiState>,
+    Path(conversation_id): Path<String>,
+    Json(request): Json<CodexHookStateUpdate>,
+) -> Result<Json<mcg_codex_app_server::CodexStableDiscovery>, ApiError> {
+    let conversation_id = parse_conversation_id(&conversation_id)?;
+    Ok(Json(
+        state
+            .runtime
+            .update_codex_hook_state_for_conversation(conversation_id, &request)
             .await
             .map_err(map_runtime_error)?,
     ))
@@ -4985,6 +5037,19 @@ async fn codex_stable_discovery(
         state
             .runtime
             .codex_stable_discovery(&request.cwds, request.force_reload)
+            .await
+            .map_err(map_runtime_error)?,
+    ))
+}
+
+async fn update_codex_hook_state(
+    State(state): State<ApiState>,
+    Json(request): Json<CodexHookStateUpdate>,
+) -> Result<Json<mcg_codex_app_server::CodexStableDiscovery>, ApiError> {
+    Ok(Json(
+        state
+            .runtime
+            .update_codex_hook_state(&request)
             .await
             .map_err(map_runtime_error)?,
     ))
@@ -8058,6 +8123,57 @@ mod tests {
             .expect("release response");
         assert_eq!(release.status(), StatusCode::OK);
         assert_eq!(response_json(release).await["released"], false);
+    }
+
+    #[tokio::test]
+    async fn invocation_hook_trust_bypass_route_binds_and_releases_without_persistence() {
+        let runtime = test_runtime();
+        let conversation = runtime
+            .create_conversation(
+                Some("Invocation hook trust".into()),
+                None,
+                ExecutionPreferences::default(),
+                ConversationInteractionKind::Interactive,
+            )
+            .expect("conversation");
+        let app = router(runtime.clone());
+        let bind = app
+            .clone()
+            .oneshot(
+                authorized(Request::put(format!(
+                    "/api/v1/conversations/{}/codex-hook-trust-bypass",
+                    conversation.id
+                )))
+                .body(Body::empty())
+                .expect("bind request"),
+            )
+            .await
+            .expect("bind response");
+        assert_eq!(bind.status(), StatusCode::OK);
+        assert_eq!(response_json(bind).await["bound"], true);
+        assert!(
+            runtime
+                .conversation(conversation.id)
+                .expect("conversation after bind")
+                .conversation
+                .execution_preferences
+                .codex_config_overrides
+                .is_empty()
+        );
+
+        let release = app
+            .oneshot(
+                authorized(Request::delete(format!(
+                    "/api/v1/conversations/{}/codex-hook-trust-bypass",
+                    conversation.id
+                )))
+                .body(Body::empty())
+                .expect("release request"),
+            )
+            .await
+            .expect("release response");
+        assert_eq!(release.status(), StatusCode::OK);
+        assert_eq!(response_json(release).await["released"], true);
     }
 
     #[tokio::test]

@@ -26,7 +26,7 @@ is no usable equivalent. MetaCog-only operations remain under `/mcg` or
 | Background work | `!`, `/ps`, `/stop`/`/clean` | Native | Cycle 1 makes stop/clean settle all conversation-owned commands. |
 | Context | `/skills`, `/apps`, `/plugins`, `/mcp`, `/memories`, `/agent`, `/subagents` | Partial | `/apps` matches current picker/insertion behavior. `/agent` and `/subagents` now provide a searchable live-thread picker, replace the transcript viewport, and route replies through the selected governed session. Several other context commands still print discovery data, and approval-source thread jumping remains. |
 | Preferences | `/keymap`, `/vim`, `/statusline`, `/title`, `/theme`, `/pets`/`/pet`, `/debug-config` | Partial | Keymap, status/title, theme, and pets are limited implementations. |
-| Integration | `/ide`, `/init`, `/import`, `/hooks`, `/logout`, `/app`, `/feedback` | Partial | Init/logout and `/app` workspace/conversation handoff work. Direct desktop deep-linking to the active conversation, IDE context, and import remain; hooks/feedback are informational. |
+| Integration | `/ide`, `/init`, `/import`, `/hooks`, `/logout`, `/app`, `/feedback` | Partial | `/hooks` now provides project-aware exact-hash review, trust, enable, and disable controls backed by the pinned Codex hook engine; Advanced Desktop Settings exposes the same governed browser and durable hook activity. Init/logout and `/app` workspace/conversation handoff work. Direct desktop deep-linking to the active conversation, IDE context, import, and feedback remain. |
 | Windows | `/setup-default-sandbox`, `/sandbox-add-read-dir` | Native | The setup command is shown only when the pinned Codex readiness contract says configuration is required; both mutations are blocked while any conversation has active work. Advanced Settings exposes the same setup, project, permission-profile, and canonical read-directory flow. |
 | Experimental | `/experimental` | Missing | Requires discovered capabilities and durable feature configuration. |
 
@@ -38,13 +38,13 @@ Environment variables alone are not capability discovery.
 | Codex family | State | Notes |
 | --- | --- | --- |
 | `codex` TUI / prompt | Native | `mcg` launches the TUI and accepts a consumer prompt. Root and session-local `--remote`/`--remote-auth-token-env` overrides support authenticated WebSockets plus Unix sockets on Unix without persisting endpoint or credential state. |
-| `exec` / `e` | Partial | Cycles 2-18 add the compatible top-level alias, stdin prompts, global model selection, independent global `-a/--ask-for-approval` and `-s/--sandbox` controls including durable read-only execution, repeatable `--add-dir`, ordered session-local `--enable`/`--disable`, repeatable typed `-c/--config`, named `-p/--profile` layering, global `--search`, native `--strict-config` preflight, initial image references, bounded `--output-schema` for initial and resumed work, output-last-message, ephemeral cleanup, Git checks, and durable exec resume. Cycle 25 matches the pinned Codex 0.150.1 JSONL lifecycle, item, error, and usage envelopes over the replayable conversation stream. Cycle 27 adds exact `--oss`/`--local-provider` selection and readiness behavior. Hook/rules flags remain. |
+| `exec` / `e` | Partial | Cycles 2-18 add the compatible top-level alias, stdin prompts, global model selection, independent global `-a/--ask-for-approval` and `-s/--sandbox` controls including durable read-only execution, repeatable `--add-dir`, ordered session-local `--enable`/`--disable`, repeatable typed `-c/--config`, named `-p/--profile` layering, global `--search`, native `--strict-config` preflight, initial image references, bounded `--output-schema` for initial and resumed work, output-last-message, ephemeral cleanup, Git checks, and durable exec resume. Cycle 25 matches the pinned Codex 0.150.1 JSONL lifecycle, item, error, and usage envelopes over the replayable conversation stream. Cycle 27 adds exact `--oss`/`--local-provider` selection and readiness behavior. Cycle 29 adds the visibly warned, invocation-only `--dangerously-bypass-hook-trust`; it is never persisted or exposed as a GUI preference. Remaining rules overrides need alignment. |
 | `doctor` | MetaCog | MetaCog has a broader diagnostic command with a different report contract. |
 | `mcp`, `plugin` | MetaCog | Governed management exists; exact syntax and marketplace operations remain incomplete. |
 | `archive`, `unarchive`, `delete` | Native | IDs take precedence over exact names; deletion previews descendants, prompts by default, restricts forced deletion to UUIDs, and uses the existing transactional safety gate. |
 | `completion` | Native | Bash, Zsh, Fish, PowerShell (`power-shell`), and Elvish completions include both Codex-compatible and MetaCog-native commands and work without the daemon. |
 | `resume`, `fork` | Native | IDs, exact names, project-scoped `--last`, `--all`, durable forks, searchable terminal selection, and terminal reopening work. `resume --include-non-interactive` includes durably classified exec/consumer sessions while explicit IDs and names always remain addressable. Different roots prompt in an interactive terminal unless `tui.resume_cwd` decides; explicit `-C` wins. |
-| `review` | Partial | Uncommitted, base branch, commit/title, stdin, custom-instruction, and local-provider targets use the native read-only review API and render only the final human-readable finding instead of protocol JSON. Remaining hook/rules overrides need exact alignment. |
+| `review` | Partial | Uncommitted, base branch, commit/title, stdin, custom-instruction, local-provider targets, and the invocation-only hook-trust bypass use the native read-only review API and render only the final human-readable finding instead of protocol JSON. Remaining rules overrides need exact alignment. |
 | `login`, `logout` | Native | Browser OAuth, device-code login, API-key stdin, access-token stdin, status, and device-wide logout use the shared Codex account. Secrets are accepted only through standard input or a transient desktop credential field, zeroized after use, and never persisted by MetaCog. |
 | `app` | Partial | `mcg app [PATH]` is daemon-free, validates the workspace, prints the canonical Windows handoff path, and launches MetaCog by path on macOS. Direct Windows desktop launch/deep-linking to the active conversation remains. |
 | `features` | Native | `list`, `enable`, and `disable` match Codex output and use the pinned app-server's shared configuration. Ordered global `--enable`/`--disable` and `-c features.*=bool` create session-local overrides without mutating that configuration. |
@@ -235,8 +235,10 @@ the previous installation, and removes only its private staged files. Unsigned
 development builds and incomplete installations fail closed. The Desktop update
 layout and workflow are unchanged; they consume the same shared trust contract.
 
-Codex-compatible support remains incomplete for hook trust, the global agent
-browser, and approval-source navigation. Current Codex 0.150.1
+Codex-compatible support remains incomplete for the global agent browser and
+approval-source navigation. Hook execution, exact-definition trust and
+enablement, lifecycle activity, and the invocation-only compatibility bypass
+are governed through the pinned Codex engine. Current Codex 0.150.1
 documents `--permission-profile` only for the
 Windows `sandbox` command; that exact contract is already Native rather than a
 missing global non-sandbox flag. These

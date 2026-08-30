@@ -222,6 +222,7 @@ import {
   grantWindowsSandboxReadDirectory,
   getCodexPendingRequests,
   getCodexStableDiscovery,
+  updateCodexHookState,
   reconcileOwnedCodexThread,
   forkOwnedCodexThread,
   compactOwnedCodexThread,
@@ -303,6 +304,8 @@ import {
   type CodexConfigurationStatus,
   type CodexPendingRequest,
   type CodexStableDiscovery,
+  type CodexHookMetadata,
+  type CodexHooksListEntry,
   type CodexAppInfo,
   type CodexLoginStart,
   type ReasoningEffort,
@@ -1492,6 +1495,7 @@ function conversationActivityPresentation(activity: ConversationActivity): [stri
     mcp_call: ["⌘", "Used a tool"], collaboration_call: ["⌘", "Delegated work"], web_search: ["⌕", "Searched the web"],
     image_view: ["▧", "Viewed an image"], approval: ["!", "Approval"], elicitation: ["?", "Input requested"],
     context_compaction: ["≡", activity.state === "running" ? "Context automatically compacting" : "Context automatically compacted"],
+    hook: ["⌁", activity.state === "running" ? "Running lifecycle hook" : "Lifecycle hook"],
     usage: ["◔", "Usage updated"], recovery: ["↻", "Recovering"], interruption: ["■", "Interrupted"],
     failure: ["!", "Failed"], completion: ["✓", "Completed"]
   };
@@ -2657,6 +2661,8 @@ export function App() {
   const [codexConfigurationStatus, setCodexConfigurationStatus] = useState<CodexConfigurationStatus | null>(null);
   const [codexPendingRequests, setCodexPendingRequests] = useState<CodexPendingRequest[]>([]);
   const [codexStableDiscovery, setCodexStableDiscovery] = useState<CodexStableDiscovery | null>(null);
+  const [codexHookBusy, setCodexHookBusy] = useState<string | null>(null);
+  const [codexHookError, setCodexHookError] = useState<string | null>(null);
   const [codexRecoveryBusy, setCodexRecoveryBusy] = useState(false);
   const [codexReviewBusy, setCodexReviewBusy] = useState(false);
   const [draftThreadId, setDraftThreadId] = useState(() => crypto.randomUUID());
@@ -2903,6 +2909,10 @@ export function App() {
   useEffect(() => {
     window.localStorage.setItem("mcg.unread-chat-ids", JSON.stringify(unreadChatIds));
   }, [unreadChatIds]);
+
+  useEffect(() => {
+    if (!advanced && settingsTab === "hooks") setSettingsTab("general");
+  }, [advanced, settingsTab]);
 
   useEffect(() => {
     const inside = (target: Element | null, name: string) => Boolean(target?.closest(`[data-transient-popover-root="${name}"]`));
@@ -4649,6 +4659,39 @@ export function App() {
       setModelDiscoveryError(`Could not load the Codex account catalog. ${errorMessage(error)}`);
     } finally {
       setModelDiscoveryBusy(false);
+    }
+  }
+
+  async function refreshCodexHooks(forceReload = true) {
+    setCodexHookError(null);
+    setCodexHookBusy("refresh");
+    try {
+      const root = currentWorkspaceProject()?.root;
+      setCodexStableDiscovery(await getCodexStableDiscovery(root ? [root] : [], forceReload));
+    } catch (error) {
+      setCodexHookError(errorMessage(error));
+    } finally {
+      setCodexHookBusy(null);
+    }
+  }
+
+  async function changeCodexHook(entry: CodexHooksListEntry, hook: CodexHookMetadata, action: "trust" | "enable" | "disable") {
+    if (hook.isManaged) return;
+    if (action === "trust" && !window.confirm(`Trust the current ${hook.eventName} hook definition from ${hook.sourcePath}? Future changes will require review again.`)) return;
+    setCodexHookError(null);
+    setCodexHookBusy(hook.key);
+    try {
+      setCodexStableDiscovery(await updateCodexHookState({
+        cwd: entry.cwd,
+        key: hook.key,
+        expectedCurrentHash: hook.currentHash,
+        enabled: action === "enable" ? true : action === "disable" ? false : undefined,
+        trustCurrentDefinition: action === "trust"
+      }));
+    } catch (error) {
+      setCodexHookError(errorMessage(error));
+    } finally {
+      setCodexHookBusy(null);
     }
   }
 
@@ -7691,6 +7734,7 @@ export function App() {
   const workspaceProjectId = visibleConversation?.conversation.project_id ?? workspaceConversation?.project_id ?? workspaceTask?.project_id;
   const workspaceProject = projects.find((project) => project.project_id === workspaceProjectId) ?? (selectedChatId ? undefined : selectedProject ?? undefined);
   const workspaceProjectName = workspaceProject?.root.split(/[\\/]/).filter(Boolean).at(-1) ?? "No project selected";
+  const discoveredHookCount = codexStableDiscovery?.hooks.reduce((total, entry) => total + entry.hooks.length, 0) ?? 0;
   const selectedCommandLocalProvider = newChatRunPreferences.model_provider
     ? codexConfigurationStatus?.local_providers?.providers.find((provider) => provider.id === newChatRunPreferences.model_provider)
     : undefined;
@@ -8656,7 +8700,7 @@ export function App() {
                     <div className="subsystem-row"><span className={`health-dot health-${codexHarnessStatus.unsupported_requests === 0 ? "healthy" : "unhealthy"}`} aria-hidden="true" /><span><strong>Protocol requests</strong><small>{codexPendingRequests.length} pending · {codexHarnessStatus.unsupported_requests} unsupported{codexHarnessStatus.last_unsupported_request ? ` · ${codexHarnessStatus.last_unsupported_request}` : ""}</small></span><em>{codexHarnessStatus.unsupported_requests === 0 ? "compatible" : "attention"}</em></div>
                     <div className="subsystem-row"><span className={`health-dot health-${codexConfigurationStatus ? "healthy" : "degraded"}`} aria-hidden="true" /><span><strong>Configuration and sandbox</strong><small>{codexHarnessStatus.configuration_state} · Windows sandbox {codexHarnessStatus.windows_sandbox_state}</small></span><em>{codexConfigurationStatus ? "loaded" : "checking"}</em></div>
                     <div className="subsystem-row"><span className={`health-dot health-${codexHarnessStatus.recovery_state === "healthy" ? "healthy" : "degraded"}`} aria-hidden="true" /><span><strong>MCP bridge and recovery</strong><small>MCP {codexHarnessStatus.mcp_bridge_state} · {codexHarnessStatus.last_notification ?? codexHarnessStatus.last_event ?? "No events yet"}</small></span><em>{codexHarnessStatus.recovery_state}</em></div>
-                    <div className="subsystem-row"><span className={`health-dot health-${codexStableDiscovery ? "healthy" : "degraded"}`} aria-hidden="true" /><span><strong>Stable Codex capabilities</strong><small>{codexStableDiscovery ? `${codexStableDiscovery.skills.length} skills · ${codexStableDiscovery.hooks.length} hooks · ${codexStableDiscovery.apps.length} apps` : "Discovery unavailable"}{codexStableDiscovery?.appsUnavailableReason ? ` · ${codexStableDiscovery.appsUnavailableReason}` : ""}</small></span><em>{codexStableDiscovery ? "loaded" : "checking"}</em></div>
+                    <div className="subsystem-row"><span className={`health-dot health-${codexStableDiscovery ? "healthy" : "degraded"}`} aria-hidden="true" /><span><strong>Stable Codex capabilities</strong><small>{codexStableDiscovery ? `${codexStableDiscovery.skills.length} skills · ${discoveredHookCount} hooks · ${codexStableDiscovery.apps.length} apps` : "Discovery unavailable"}{codexStableDiscovery?.appsUnavailableReason ? ` · ${codexStableDiscovery.appsUnavailableReason}` : ""}</small></span><em>{codexStableDiscovery ? "loaded" : "checking"}</em></div>
                     <div className="subsystem-row"><span className="health-dot health-healthy" aria-hidden="true" /><span><strong>Harness lifecycle</strong><small>{codexHarnessStatus.last_unknown_notification ? `Unknown notification retained: ${codexHarnessStatus.last_unknown_notification}` : "Unknown notifications are retained for diagnostics"}</small></span><em>{codexHarnessStatus.restart_count} starts</em></div>
                   </>}
                 </div>
@@ -9945,8 +9989,8 @@ export function App() {
             <div className="settings-nav-shell">
             <nav className="settings-nav" aria-label="Settings sections">
               {settingsGroups.map((group) => {
-                const items = group.items.filter((item) => !normalizedSettingsSearch || item.label.toLocaleLowerCase().includes(normalizedSettingsSearch));
-                return items.length > 0 && <section key={group.label}><h3>{group.label}</h3>{items.map((item) => <button className={settingsTab === item.id ? "active" : ""} type="button" aria-current={settingsTab === item.id ? "page" : undefined} onClick={() => { setSettingsTab(item.id); window.scrollTo({ top: 0, behavior: "auto" }); }} key={item.id}><span aria-hidden="true">{item.glyph}</span>{item.label}</button>)}</section>;
+                const items = group.items.filter((item) => (advanced || item.id !== "hooks") && (!normalizedSettingsSearch || item.label.toLocaleLowerCase().includes(normalizedSettingsSearch)));
+                return items.length > 0 && <section key={group.label}><h3>{group.label}</h3>{items.map((item) => <button className={settingsTab === item.id ? "active" : ""} type="button" aria-current={settingsTab === item.id ? "page" : undefined} onClick={() => { setSettingsTab(item.id); if (item.id === "hooks") void refreshCodexHooks(); window.scrollTo({ top: 0, behavior: "auto" }); }} key={item.id}><span aria-hidden="true">{item.glyph}</span>{item.label}</button>)}</section>;
               })}
               {settingsGroups.every((group) => group.items.every((item) => normalizedSettingsSearch && !item.label.toLocaleLowerCase().includes(normalizedSettingsSearch))) && <p className="settings-no-results">No settings found.</p>}
             </nav>
@@ -10397,7 +10441,43 @@ export function App() {
                 <div className="settings-section-heading"><strong>Always-allowed apps</strong></div>
                 <div className="settings-empty-card"><p>None yet</p></div>
               </div>
-              <div className="settings-pane settings-summary-pane" data-settings-pane="hooks"><h2>Hooks</h2><div className="settings-card"><div><strong>No hooks configured</strong><p>Hook management will appear here when the typed, governed hook runtime is implemented.</p></div></div></div>
+              <div className="settings-pane settings-summary-pane" data-settings-pane="hooks">
+                <div className="settings-page-heading settings-page-heading-actions">
+                  <div><h2>Hooks</h2><p>Review lifecycle automations before they run. MetaCog trusts only the exact definition shown here; any later change requires another review.</p></div>
+                  <button className="secondary" type="button" disabled={codexHookBusy !== null} onClick={() => void refreshCodexHooks()}><RotateCw aria-hidden="true" />{codexHookBusy === "refresh" ? "Refreshing…" : "Refresh"}</button>
+                </div>
+                {codexHookError && <p className="error-message" role="alert">{codexHookError}</p>}
+                {(codexStableDiscovery?.hooks ?? []).flatMap((entry) => entry.warnings.map((warning) => <div className="warning-box" role="status" key={`${entry.cwd}-warning-${warning}`}><strong>Hook warning</strong><span>{warning}</span></div>))}
+                {(codexStableDiscovery?.hooks ?? []).flatMap((entry) => entry.errors.map((error) => <div className="warning-box" role="alert" key={`${entry.cwd}-error-${error.path}-${error.message}`}><strong>Could not load hooks from {error.path}</strong><span>{error.message}</span></div>))}
+                {discoveredHookCount === 0
+                  ? <div className="settings-empty-card"><Workflow aria-hidden="true" /><strong>No hooks configured</strong><p>{workspaceProject ? `No user, project, plugin, or managed hooks were found for ${workspaceProjectName}.` : "Choose a project to include its project hooks, or add a user hook in Codex configuration."}</p></div>
+                  : <div className="codex-hook-list" aria-label="Configured Codex hooks">{(codexStableDiscovery?.hooks ?? []).flatMap((entry) => entry.hooks.map((hook) => {
+                    const trusted = hook.trustStatus === "trusted" || hook.trustStatus === "managed";
+                    const handler = hook.handlerType === "command" ? hook.command ?? "Command hook" : hook.handlerType === "mcpTool" ? `${hook.server ?? "MCP"} / ${hook.tool ?? "tool"}` : hook.handlerType;
+                    const action: "trust" | "enable" | "disable" = !trusted ? "trust" : hook.enabled ? "disable" : "enable";
+                    return <article className={`codex-hook-row trust-${hook.trustStatus}`} key={`${entry.cwd}-${hook.key}`}>
+                      <span className="settings-feature-icon" aria-hidden="true"><Workflow /></span>
+                      <div className="codex-hook-copy">
+                        <span className="codex-hook-title"><strong>{hook.eventName}</strong><span className={`count-badge hook-trust-${hook.trustStatus}`}>{hook.trustStatus}</span>{!hook.enabled && <span className="count-badge">disabled</span>}{hook.isManaged && <span className="count-badge">managed</span>}</span>
+                        <small>{handler}</small>
+                        <small>{hook.source} · {hook.matcher ?? "all matching events"}</small>
+                        <TechnicalDetails title="Technical details" summary={hook.sourcePath}>
+                          <dl className="hook-property-grid">
+                            <div><dt>Source</dt><dd>{hook.sourcePath}</dd></div>
+                            <div><dt>Handler</dt><dd>{hook.handlerType}</dd></div>
+                            <div><dt>Timeout</dt><dd>{hook.timeoutSec}s</dd></div>
+                            <div><dt>Async</dt><dd>{hook.async ? "Yes" : "No"}</dd></div>
+                            <div><dt>Definition hash</dt><dd><code>{hook.currentHash}</code></dd></div>
+                            <div><dt>Hook key</dt><dd><code>{hook.key}</code></dd></div>
+                          </dl>
+                        </TechnicalDetails>
+                      </div>
+                      {hook.isManaged
+                        ? <span className="count-badge">Policy controlled</span>
+                        : <button className={action === "trust" ? "primary" : "secondary"} type="button" disabled={codexHookBusy !== null} onClick={() => void changeCodexHook(entry, hook, action)}>{codexHookBusy === hook.key ? "Updating…" : action === "trust" ? "Review and trust" : action === "enable" ? "Enable" : "Disable"}</button>}
+                    </article>;
+                  }))}</div>}
+              </div>
               <div className="settings-pane settings-summary-pane" data-settings-pane="connections"><h2>Connections</h2><div className="settings-card"><div><strong>Providers and tools</strong><p>Manage model providers, ChatGPT subscription access, MCP servers, and remote hosts.</p></div><div className="settings-card-actions"><button className="secondary" type="button" onClick={() => navigateSurface("providers")}>Providers</button><button className="secondary" type="button" onClick={() => navigateSurface("mcp")}>Tools</button><button className="secondary" type="button" onClick={() => navigateSurface("ssh")}>SSH</button></div></div></div>
               <div className="settings-pane settings-summary-pane" data-settings-pane="git">
                 <div className="settings-page-heading"><h2>Git</h2><p>Choose defaults for governed repository workflows.</p></div>

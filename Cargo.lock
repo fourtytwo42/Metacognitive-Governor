@@ -3858,7 +3858,7 @@ checksum = "4facc753ae494aeb6e3c22f839b158aebd4f9270f55cd3c79906c45476c47ab4"
 
 [[package]]
 name = "mcg-agent-mcp"
-version = "0.4.65"
+version = "0.4.66"
 dependencies = [
  "chrono",
  "reqwest",
@@ -3870,7 +3870,7 @@ dependencies = [
 
 [[package]]
 name = "mcg-agents"
-version = "0.4.65"
+version = "0.4.66"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -3890,7 +3890,7 @@ dependencies = [
 
 [[package]]
 name = "mcg-api"
-version = "0.4.65"
+version = "0.4.66"
 dependencies = [
  "async-tungstenite",
  "axum",
@@ -3927,7 +3927,7 @@ dependencies = [
 
 [[package]]
 name = "mcg-browser-contracts"
-version = "0.4.65"
+version = "0.4.66"
 dependencies = [
  "serde",
  "serde_json",
@@ -3936,7 +3936,7 @@ dependencies = [
 
 [[package]]
 name = "mcg-cli"
-version = "0.4.65"
+version = "0.4.66"
 dependencies = [
  "arboard",
  "axum",
@@ -3977,7 +3977,7 @@ dependencies = [
 
 [[package]]
 name = "mcg-codex-app-server"
-version = "0.4.65"
+version = "0.4.66"
 dependencies = [
  "async-tungstenite",
  "chrono",
@@ -3998,7 +3998,7 @@ dependencies = [
 
 [[package]]
 name = "mcg-config"
-version = "0.4.65"
+version = "0.4.66"
 dependencies = [
  "chrono",
  "serde",
@@ -4006,7 +4006,7 @@ dependencies = [
 
 [[package]]
 name = "mcg-daemon"
-version = "0.4.65"
+version = "0.4.66"
 dependencies = [
  "chrono",
  "mcg-api",
@@ -4022,7 +4022,7 @@ dependencies = [
 
 [[package]]
 name = "mcg-desktop"
-version = "0.4.65"
+version = "0.4.66"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -4057,7 +4057,7 @@ dependencies = [
 
 [[package]]
 name = "mcg-domain"
-version = "0.4.65"
+version = "0.4.66"
 dependencies = [
  "chrono",
  "mcg-plugin-protocol",
@@ -4069,7 +4069,7 @@ dependencies = [
 
 [[package]]
 name = "mcg-events"
-version = "0.4.65"
+version = "0.4.66"
 dependencies = [
  "chrono",
  "mcg-domain",
@@ -4080,7 +4080,7 @@ dependencies = [
 
 [[package]]
 name = "mcg-mcp"
-version = "0.4.65"
+version = "0.4.66"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -4097,7 +4097,7 @@ dependencies = [
 
 [[package]]
 name = "mcg-plugin-protocol"
-version = "0.4.65"
+version = "0.4.66"
 dependencies = [
  "serde",
  "serde_json",
@@ -4106,7 +4106,7 @@ dependencies = [
 
 [[package]]
 name = "mcg-plugin-runner"
-version = "0.4.65"
+version = "0.4.66"
 dependencies = [
  "base64 0.22.1",
  "mcg-plugin-protocol",
@@ -4120,7 +4120,7 @@ dependencies = [
 
 [[package]]
 name = "mcg-plugin-trust"
-version = "0.4.65"
+version = "0.4.66"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -4135,7 +4135,7 @@ dependencies = [
 
 [[package]]
 name = "mcg-plugins"
-version = "0.4.65"
+version = "0.4.66"
 dependencies = [
  "mcg-plugin-protocol",
  "serde_json",
@@ -4146,7 +4146,7 @@ dependencies = [
 
 [[package]]
 name = "mcg-policy"
-version = "0.4.65"
+version = "0.4.66"
 dependencies = [
  "mcg-config",
  "mcg-domain",
@@ -4155,7 +4155,7 @@ dependencies = [
 
 [[package]]
 name = "mcg-projects"
-version = "0.4.65"
+version = "0.4.66"
 dependencies = [
  "chrono",
  "mcg-domain",
@@ -4172,7 +4172,7 @@ dependencies = [
 
 [[package]]
 name = "mcg-providers"
-version = "0.4.65"
+version = "0.4.66"
 dependencies = [
  "async-trait",
  "axum",
@@ -4196,7 +4196,7 @@ dependencies = [
 
 [[package]]
 name = "mcg-runtime"
-version = "0.4.65"
+version = "0.4.66"
 dependencies = [
  "async-trait",
  "axum",
@@ -4234,7 +4234,7 @@ dependencies = [
 
 [[package]]
 name = "mcg-shadow-runner"
-version = "0.4.65"
+version = "0.4.66"
 dependencies = [
  "chromiumoxide",
  "futures-util",
@@ -4250,7 +4250,7 @@ dependencies = [
 
 [[package]]
 name = "mcg-storage"
-version = "0.4.65"
+version = "0.4.66"
 dependencies = [
  "argon2",
  "base64 0.22.1",
@@ -4282,7 +4282,7 @@ dependencies = [
 
 [[package]]
 name = "mcg-tools"
-version = "0.4.65"
+version = "0.4.66"
 dependencies = [
  "async-trait",
  "axum",
@@ -4312,7 +4312,7 @@ dependencies = [
 
 [[package]]
 name = "mcg-updater"
-version = "0.4.65"
+version = "0.4.66"
 dependencies = [
  "base64 0.22.1",
  "chrono",

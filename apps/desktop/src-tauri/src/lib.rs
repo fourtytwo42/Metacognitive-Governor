@@ -1272,11 +1272,23 @@ async fn codex_account_usage() -> Result<serde_json::Value, String> {
 async fn codex_stable_discovery(
     cwds: Vec<String>,
     force_reload: bool,
-) -> Result<serde_json::Value, String> {
+) -> Result<mcg_codex_app_server::CodexStableDiscovery, String> {
     daemon_json(
         reqwest::Client::new().post(format!("{LOCAL_DAEMON}/api/v1/codex/discovery")),
         Some(&serde_json::json!({ "cwds": cwds, "force_reload": force_reload })),
         "Codex stable discovery",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn update_codex_hook_state(
+    request: mcg_codex_app_server::CodexHookStateUpdate,
+) -> Result<mcg_codex_app_server::CodexStableDiscovery, String> {
+    daemon_json(
+        reqwest::Client::new().post(format!("{LOCAL_DAEMON}/api/v1/codex/hooks/state")),
+        Some(&request),
+        "Codex hook state update",
     )
     .await
 }
@@ -4089,6 +4101,7 @@ pub fn run() {
             codex_harness_status,
             codex_account_usage,
             codex_stable_discovery,
+            update_codex_hook_state,
             codex_configuration_status,
             setup_windows_sandbox,
             grant_windows_sandbox_read_directory,

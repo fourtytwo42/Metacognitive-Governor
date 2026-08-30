@@ -367,7 +367,13 @@ pub const SLASH_COMMANDS: &[SlashCommandSpec] = &[
         Immediate,
         Experimental
     ),
-    command!("hooks", "Inspect configured hooks", None, Immediate, Always),
+    command!(
+        "hooks",
+        "Review, trust, enable, or disable configured hooks",
+        Picker,
+        Immediate,
+        Always
+    ),
     command!(
         "logout",
         "Disconnect MetaCog from Codex after confirmation",

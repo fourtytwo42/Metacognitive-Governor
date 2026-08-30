@@ -166,12 +166,71 @@ pub enum CodexResumeCwd {
 #[serde(rename_all = "camelCase")]
 pub struct CodexStableDiscovery {
     pub skills: Vec<Value>,
-    pub hooks: Vec<Value>,
+    pub hooks: Vec<CodexHooksListEntry>,
     #[serde(default)]
     pub apps: Vec<Value>,
     pub apps_available: bool,
     pub apps_unavailable_reason: Option<String>,
     pub refreshed_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexHooksListEntry {
+    pub cwd: String,
+    #[serde(default)]
+    pub hooks: Vec<CodexHookMetadata>,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+    #[serde(default)]
+    pub errors: Vec<CodexHookError>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexHookError {
+    pub path: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexHookMetadata {
+    pub key: String,
+    pub event_name: String,
+    pub handler_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub r#async: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool: Option<String>,
+    pub matcher: Option<String>,
+    pub timeout_sec: u64,
+    pub status_message: Option<String>,
+    pub additional_context_limit: Option<usize>,
+    pub source_path: String,
+    pub source: String,
+    pub plugin_id: Option<String>,
+    pub display_order: i64,
+    pub enabled: bool,
+    pub is_managed: bool,
+    pub current_hash: String,
+    pub trust_status: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexHookStateUpdate {
+    pub cwd: String,
+    pub key: String,
+    pub expected_current_hash: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    #[serde(default)]
+    pub trust_current_definition: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -953,6 +1012,30 @@ fn validate_profile_name(profile: &str) -> Result<(), CodexHarnessError> {
     {
         return Err(CodexHarnessError::Protocol(
             "Codex profile must use 1-128 letters, numbers, dashes, underscores, or dots".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_hook_state_update(update: &CodexHookStateUpdate) -> Result<(), CodexHarnessError> {
+    if update.cwd.is_empty() || update.cwd.len() > 4_096 || update.cwd.contains('\0') {
+        return Err(CodexHarnessError::InvalidRequest(
+            "hook cwd must be a non-empty bounded path".into(),
+        ));
+    }
+    if update.key.is_empty() || update.key.len() > 2_048 || update.key.contains('\0') {
+        return Err(CodexHarnessError::InvalidRequest(
+            "hook key must be non-empty and at most 2,048 bytes".into(),
+        ));
+    }
+    let Some(digest) = update.expected_current_hash.strip_prefix("sha256:") else {
+        return Err(CodexHarnessError::InvalidRequest(
+            "hook current hash must use Codex's sha256:<64 hex> identity".into(),
+        ));
+    };
+    if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(CodexHarnessError::InvalidRequest(
+            "hook current hash must use Codex's sha256:<64 hex> identity".into(),
         ));
     }
     Ok(())
@@ -3579,16 +3662,100 @@ impl CodexAppServerHarness {
                 .and_then(Value::as_array)
                 .cloned()
                 .unwrap_or_default(),
-            hooks: hooks
-                .get("data")
-                .and_then(Value::as_array)
-                .cloned()
-                .unwrap_or_default(),
+            hooks: serde_json::from_value(
+                hooks
+                    .get("data")
+                    .cloned()
+                    .unwrap_or_else(|| Value::Array(Vec::new())),
+            )
+            .map_err(|error| {
+                CodexHarnessError::Protocol(format!("invalid hooks/list response: {error}"))
+            })?,
             apps,
             apps_available: true,
             apps_unavailable_reason: None,
             refreshed_at: Utc::now(),
         })
+    }
+
+    /// Applies an exact-definition hook trust or enablement update and returns refreshed discovery.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the request is malformed, the discovered hook or hash changed, a
+    /// managed hook is targeted, trust is insufficient for enablement, or Codex rejects the write.
+    pub async fn update_hook_state(
+        &self,
+        update: &CodexHookStateUpdate,
+    ) -> Result<CodexStableDiscovery, CodexHarnessError> {
+        validate_hook_state_update(update)?;
+        let discovery =
+            Box::pin(self.stable_discovery(std::slice::from_ref(&update.cwd), true)).await?;
+        let entry = discovery
+            .hooks
+            .iter()
+            .find(|entry| entry.cwd == update.cwd)
+            .ok_or_else(|| {
+                CodexHarnessError::InvalidRequest(format!(
+                    "Codex did not return hook discovery for {:?}",
+                    update.cwd
+                ))
+            })?;
+        let hook = entry
+            .hooks
+            .iter()
+            .find(|hook| hook.key == update.key)
+            .ok_or_else(|| {
+                CodexHarnessError::InvalidRequest("hook is not present in current discovery".into())
+            })?;
+        if hook.is_managed {
+            return Err(CodexHarnessError::InvalidRequest(
+                "managed hooks are controlled by policy and cannot be changed".into(),
+            ));
+        }
+        let current_hash = hook.current_hash.as_str();
+        if current_hash != update.expected_current_hash {
+            return Err(CodexHarnessError::InvalidRequest(
+                "hook definition changed; refresh and review the new definition".into(),
+            ));
+        }
+        let trust_status = hook.trust_status.as_str();
+        if update.enabled == Some(true)
+            && !update.trust_current_definition
+            && !matches!(trust_status, "trusted" | "managed")
+        {
+            return Err(CodexHarnessError::InvalidRequest(
+                "review and trust this exact hook definition before enabling it".into(),
+            ));
+        }
+
+        let mut state = serde_json::Map::new();
+        if let Some(enabled) = update.enabled {
+            state.insert("enabled".into(), Value::Bool(enabled));
+        }
+        if update.trust_current_definition {
+            state.insert("trusted_hash".into(), Value::String(current_hash.into()));
+        }
+        if state.is_empty() {
+            return Err(CodexHarnessError::InvalidRequest(
+                "hook update must change enablement or trust the current definition".into(),
+            ));
+        }
+        self.request(
+            "config/batchWrite",
+            json!({
+                "edits": [{
+                    "keyPath": "hooks.state",
+                    "value": { (update.key.clone()): Value::Object(state) },
+                    "mergeStrategy": "upsert"
+                }],
+                "filePath": null,
+                "expectedVersion": null,
+                "reloadUserConfig": true
+            }),
+        )
+        .await?;
+        Box::pin(self.stable_discovery(std::slice::from_ref(&update.cwd), true)).await
     }
 
     pub async fn start_review(
@@ -4096,6 +4263,8 @@ fn is_visible_turn_notification(method: &str) -> bool {
             | "item/reasoning/summaryPartAdded"
             | "thread/tokenUsage/updated"
             | "thread/compacted"
+            | "hook/started"
+            | "hook/completed"
             | "warning"
             | "guardianWarning"
             | "model/rerouted"
@@ -4269,6 +4438,46 @@ mod tests {
         assert!(validate_login_credential(&"x".repeat(16_385), "access token").is_err());
     }
 
+    #[test]
+    fn hook_state_updates_require_exact_bounded_identity() {
+        let valid = CodexHookStateUpdate {
+            cwd: "C:\\workspace".into(),
+            key: "project:preToolUse:0".into(),
+            expected_current_hash: format!("sha256:{}", "a".repeat(64)),
+            enabled: Some(false),
+            trust_current_definition: false,
+        };
+        assert!(validate_hook_state_update(&valid).is_ok());
+        assert!(
+            validate_hook_state_update(&CodexHookStateUpdate {
+                expected_current_hash: "a".repeat(64),
+                ..valid.clone()
+            })
+            .is_err()
+        );
+        assert!(
+            validate_hook_state_update(&CodexHookStateUpdate {
+                expected_current_hash: "short".into(),
+                ..valid.clone()
+            })
+            .is_err()
+        );
+        assert!(
+            validate_hook_state_update(&CodexHookStateUpdate {
+                key: String::new(),
+                ..valid.clone()
+            })
+            .is_err()
+        );
+        assert!(
+            validate_hook_state_update(&CodexHookStateUpdate {
+                cwd: "bad\0cwd".into(),
+                ..valid
+            })
+            .is_err()
+        );
+    }
+
     #[tokio::test]
     async fn remote_websocket_initializes_and_serves_account_requests() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -4389,6 +4598,124 @@ mod tests {
             CodexTransportConfig::remote(endpoint, None)
         );
         server.await.expect("fixture server completion");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn hook_state_update_writes_exact_state_and_refreshes_discovery() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind hook websocket fixture");
+        let address = listener.local_addr().expect("hook fixture address");
+        let (batch_tx, batch_rx) = oneshot::channel();
+        let current_hash = format!("sha256:{}", "a".repeat(64));
+        let fixture_hash = current_hash.clone();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.expect("accept hook fixture client");
+            let mut socket = async_tungstenite::tokio::accept_async(socket)
+                .await
+                .expect("upgrade hook fixture websocket");
+            let mut hook_requests = 0_usize;
+            let mut completed_requests = 0_usize;
+            let mut batch_tx = Some(batch_tx);
+            while let Some(message) = socket.next().await {
+                let Message::Text(text) = message.expect("hook fixture websocket message") else {
+                    continue;
+                };
+                let request: Value =
+                    serde_json::from_str(&text).expect("hook fixture JSON-RPC request");
+                let Some(id) = request.get("id").cloned() else {
+                    continue;
+                };
+                let method = request
+                    .get("method")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let result = match method {
+                    "skills/list" | "app/list" => json!({"data": [], "nextCursor": null}),
+                    "hooks/list" => {
+                        hook_requests += 1;
+                        json!({"data": [{
+                            "cwd": "C:\\workspace",
+                            "hooks": [{
+                                "key": "project:preToolUse:0",
+                                "eventName": "preToolUse",
+                                "handlerType": "command",
+                                "command": "cargo check",
+                                "async": false,
+                                "timeoutSec": 30,
+                                "sourcePath": "C:\\workspace\\.codex\\hooks.json",
+                                "source": "project",
+                                "displayOrder": 0,
+                                "enabled": hook_requests > 1,
+                                "isManaged": false,
+                                "currentHash": fixture_hash,
+                                "trustStatus": if hook_requests > 1 { "trusted" } else { "untrusted" }
+                            }],
+                            "warnings": [],
+                            "errors": []
+                        }]})
+                    }
+                    "config/batchWrite" => {
+                        if let Some(sender) = batch_tx.take() {
+                            let _ = sender.send(request["params"].clone());
+                        }
+                        json!({})
+                    }
+                    _ => json!({}),
+                };
+                socket
+                    .send(Message::Text(
+                        json!({"id": id, "result": result}).to_string().into(),
+                    ))
+                    .await
+                    .expect("send hook fixture response");
+                if matches!(
+                    method,
+                    "skills/list" | "hooks/list" | "app/list" | "config/batchWrite"
+                ) {
+                    completed_requests += 1;
+                    if completed_requests == 7 {
+                        break;
+                    }
+                }
+            }
+        });
+        let harness = CodexAppServerHarness::new_with_transport(
+            "unused",
+            CodexTransportConfig::remote(format!("ws://{address}/"), None),
+        );
+        let discovery = Box::pin(harness.update_hook_state(&CodexHookStateUpdate {
+            cwd: "C:\\workspace".into(),
+            key: "project:preToolUse:0".into(),
+            expected_current_hash: current_hash.clone(),
+            enabled: Some(true),
+            trust_current_definition: true,
+        }))
+        .await
+        .expect("update hook state");
+        assert_eq!(
+            batch_rx.await.expect("batch write capture"),
+            json!({
+                "edits": [{
+                    "keyPath": "hooks.state",
+                    "value": {
+                        "project:preToolUse:0": {
+                            "enabled": true,
+                            "trusted_hash": current_hash
+                        }
+                    },
+                    "mergeStrategy": "upsert"
+                }],
+                "filePath": null,
+                "expectedVersion": null,
+                "reloadUserConfig": true
+            })
+        );
+        let hook = &discovery.hooks[0].hooks[0];
+        assert!(hook.enabled);
+        assert_eq!(hook.trust_status, "trusted");
+        server.await.expect("hook fixture server completion");
     }
 
     #[cfg(unix)]

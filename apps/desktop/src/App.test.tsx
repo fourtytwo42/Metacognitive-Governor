@@ -75,6 +75,7 @@ const client = vi.hoisted(() => ({
   grantWindowsSandboxReadDirectory: vi.fn(),
   getCodexPendingRequests: vi.fn(),
   getCodexStableDiscovery: vi.fn(),
+  updateCodexHookState: vi.fn(),
   reconcileOwnedCodexThread: vi.fn(),
   forkOwnedCodexThread: vi.fn(),
   compactOwnedCodexThread: vi.fn(),
@@ -277,6 +278,7 @@ vi.mock("./desktop-client", () => ({
   grantWindowsSandboxReadDirectory: client.grantWindowsSandboxReadDirectory,
   getCodexPendingRequests: client.getCodexPendingRequests,
   getCodexStableDiscovery: client.getCodexStableDiscovery,
+  updateCodexHookState: client.updateCodexHookState,
   reconcileOwnedCodexThread: client.reconcileOwnedCodexThread,
   forkOwnedCodexThread: client.forkOwnedCodexThread,
   compactOwnedCodexThread: client.compactOwnedCodexThread,
@@ -493,6 +495,7 @@ beforeEach(() => {
   client.grantWindowsSandboxReadDirectory.mockReset();
   client.getCodexPendingRequests.mockReset();
   client.getCodexStableDiscovery.mockReset();
+  client.updateCodexHookState.mockReset();
   client.reconcileOwnedCodexThread.mockReset();
   client.forkOwnedCodexThread.mockReset();
   client.compactOwnedCodexThread.mockReset();
@@ -751,6 +754,7 @@ beforeEach(() => {
     appsAvailable: true,
     refreshedAt: "2026-08-22T00:00:00Z"
   });
+  client.updateCodexHookState.mockImplementation(async () => client.getCodexStableDiscovery());
   client.reconcileOwnedCodexThread.mockResolvedValue({});
   client.forkOwnedCodexThread.mockResolvedValue({});
   client.compactOwnedCodexThread.mockResolvedValue({});
@@ -3185,6 +3189,7 @@ test("integration and coding settings expose sectioned Codex-style controls", as
   fireEvent.click(screen.getByRole("button", { name: /Local owner/ }));
   fireEvent.click(within(screen.getByLabelText("Owner menu")).getByRole("button", { name: /Settings/ }));
   const settingsNavigation = screen.getByRole("navigation", { name: "Settings sections" });
+  expect(within(settingsNavigation).queryByRole("button", { name: "Hooks" })).not.toBeInTheDocument();
 
   fireEvent.click(within(settingsNavigation).getByRole("button", { name: "Plugins" }));
   expect(screen.getByRole("tablist", { name: "Plugin categories" })).toBeInTheDocument();
@@ -3198,6 +3203,60 @@ test("integration and coding settings expose sectioned Codex-style controls", as
   expect(screen.getByText("Branch prefix")).toBeInTheDocument();
   expect(screen.getByText("codex/")).toBeInTheDocument();
   expect(await screen.findByText("Local Git by default")).toBeInTheDocument();
+});
+
+test("advanced Hooks reviews exact definitions and trusts through the shared contract", async () => {
+  const untrustedDiscovery = {
+    skills: [],
+    hooks: [{
+      cwd: "C:\\workspace",
+      warnings: [],
+      errors: [],
+      hooks: [{
+        key: "project:preToolUse:0",
+        eventName: "preToolUse",
+        handlerType: "command",
+        command: "cargo check",
+        async: false,
+        matcher: "Bash",
+        timeoutSec: 30,
+        sourcePath: "C:\\workspace\\.codex\\hooks.json",
+        source: "project",
+        displayOrder: 0,
+        enabled: true,
+        isManaged: false,
+        currentHash: `sha256:${"a".repeat(64)}`,
+        trustStatus: "untrusted"
+      }]
+    }],
+    apps: [],
+    appsAvailable: true,
+    refreshedAt: "2026-08-29T00:00:00Z"
+  };
+  const trustedDiscovery = {
+    ...untrustedDiscovery,
+    hooks: [{ ...untrustedDiscovery.hooks[0], hooks: [{ ...untrustedDiscovery.hooks[0].hooks[0], trustStatus: "trusted" }] }]
+  };
+  client.getCodexStableDiscovery.mockResolvedValue(untrustedDiscovery);
+  client.updateCodexHookState.mockResolvedValue(trustedDiscovery);
+  vi.spyOn(window, "confirm").mockReturnValue(true);
+  render(<App />);
+  await enableAdvancedMode();
+  fireEvent.click(screen.getByRole("button", { name: /Local owner/ }));
+  fireEvent.click(within(screen.getByLabelText("Owner menu")).getByRole("button", { name: /Settings/ }));
+  fireEvent.click(within(screen.getByRole("navigation", { name: "Settings sections" })).getByRole("button", { name: "Hooks" }));
+
+  expect(await screen.findByText("preToolUse")).toBeInTheDocument();
+  expect(screen.getByText("cargo check")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Review and trust" }));
+  await waitFor(() => expect(client.updateCodexHookState).toHaveBeenCalledWith({
+    cwd: "C:\\workspace",
+    key: "project:preToolUse:0",
+    expectedCurrentHash: `sha256:${"a".repeat(64)}`,
+    enabled: undefined,
+    trustCurrentDefinition: true
+  }));
+  expect(await screen.findByRole("button", { name: "Disable" })).toBeInTheDocument();
 });
 
 test("advanced configuration exposes searchable Codex feature flags and persists toggles", async () => {

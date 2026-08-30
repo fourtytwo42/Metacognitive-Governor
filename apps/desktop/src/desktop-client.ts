@@ -429,7 +429,7 @@ export interface ConversationTurn {
 export type ConversationActivityKind =
   | "working" | "waiting" | "reasoning_summary" | "plan" | "command" | "file_change"
   | "mcp_call" | "collaboration_call" | "web_search" | "image_view" | "approval"
-  | "elicitation" | "context_compaction" | "usage" | "recovery" | "interruption"
+  | "elicitation" | "context_compaction" | "hook" | "usage" | "recovery" | "interruption"
   | "failure" | "completion";
 export type ConversationActivityState = "running" | "completed" | "failed" | "declined";
 
@@ -750,11 +750,47 @@ export interface CodexAppInfo {
 
 export interface CodexStableDiscovery {
   skills: unknown[];
-  hooks: unknown[];
+  hooks: CodexHooksListEntry[];
   apps: CodexAppInfo[];
   appsAvailable: boolean;
   appsUnavailableReason?: string;
   refreshedAt: string;
+}
+
+export interface CodexHookError { path: string; message: string; }
+export interface CodexHookMetadata {
+  key: string;
+  eventName: string;
+  handlerType: string;
+  command?: string;
+  async?: boolean;
+  server?: string;
+  tool?: string;
+  matcher?: string;
+  timeoutSec: number;
+  statusMessage?: string;
+  additionalContextLimit?: number;
+  sourcePath: string;
+  source: string;
+  pluginId?: string;
+  displayOrder: number;
+  enabled: boolean;
+  isManaged: boolean;
+  currentHash: string;
+  trustStatus: "managed" | "untrusted" | "trusted" | "modified" | string;
+}
+export interface CodexHooksListEntry {
+  cwd: string;
+  hooks: CodexHookMetadata[];
+  warnings: string[];
+  errors: CodexHookError[];
+}
+export interface CodexHookStateUpdate {
+  cwd: string;
+  key: string;
+  expectedCurrentHash: string;
+  enabled?: boolean;
+  trustCurrentDefinition: boolean;
 }
 
 export type CodexReviewTarget =
@@ -2096,6 +2132,7 @@ export function getCodexRateLimits(): Promise<CodexRateLimits> { return invoke("
 export function getCodexHarnessStatus(): Promise<CodexHarnessStatus> { return invoke("codex_harness_status"); }
 export function getCodexAccountUsage(): Promise<unknown> { return invoke("codex_account_usage"); }
 export function getCodexStableDiscovery(cwds: string[] = [], forceReload = false): Promise<CodexStableDiscovery> { return invoke("codex_stable_discovery", { cwds, forceReload }); }
+export function updateCodexHookState(request: CodexHookStateUpdate): Promise<CodexStableDiscovery> { return invoke("update_codex_hook_state", { request }); }
 export function getCodexConfigurationStatus(): Promise<CodexConfigurationStatus> { return invoke("codex_configuration_status"); }
 export function setupWindowsSandbox(mode: CodexWindowsSandboxSetupMode, projectId?: string): Promise<CodexWindowsSandboxSetupResult> { return invoke("setup_windows_sandbox", { mode, projectId }); }
 export function grantWindowsSandboxReadDirectory(projectId: string, path: string, permissionProfile?: string): Promise<CodexWindowsSandboxReadGrant> { return invoke("grant_windows_sandbox_read_directory", { projectId, path, permissionProfile }); }

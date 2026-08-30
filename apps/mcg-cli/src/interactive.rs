@@ -1295,6 +1295,7 @@ impl TuiModel {
                 ConversationActivityKind::ReasoningSummary => "◇",
                 ConversationActivityKind::Command => ">_",
                 ConversationActivityKind::FileChange => "✎",
+                ConversationActivityKind::Hook => "⌁",
                 ConversationActivityKind::Approval => "!",
                 ConversationActivityKind::Failure => "×",
                 ConversationActivityKind::Completion => "✓",
@@ -1747,6 +1748,7 @@ fn activity_kind_label(kind: ConversationActivityKind) -> &'static str {
         ConversationActivityKind::Approval => "Approval",
         ConversationActivityKind::Elicitation => "Question",
         ConversationActivityKind::ContextCompaction => "Compaction",
+        ConversationActivityKind::Hook => "Hook",
         ConversationActivityKind::Usage => "Usage",
         ConversationActivityKind::Recovery => "Recovery",
         ConversationActivityKind::Interruption => "Interrupted",
@@ -1982,6 +1984,7 @@ impl EditorState {
                     "statusline",
                     "title",
                     "apps",
+                    "hooks",
                 ]
                 .contains(&command)
                 {
@@ -2222,6 +2225,15 @@ mod tests {
                 kind: PaletteKind::CommandOption,
                 query: "ter".into(),
                 command: Some("model".into()),
+            })
+        );
+        state.replace_all("/hooks ".into());
+        assert_eq!(
+            state.palette_request(),
+            Some(PaletteRequest {
+                kind: PaletteKind::CommandOption,
+                query: String::new(),
+                command: Some("hooks".into()),
             })
         );
         state.replace_all("email@example.com".into());

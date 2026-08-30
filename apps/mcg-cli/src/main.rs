@@ -3,7 +3,7 @@ use std::{
     ffi::OsString,
     fs::OpenOptions,
     io::{IsTerminal, Read, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Command as ProcessCommand, Stdio},
     str::FromStr,
 };
@@ -64,7 +64,10 @@ use mcg_api::{
     UpdateSiteRequest, UpdateSshHostRequest, UpdateUserSettingsRequest,
     UserSettingsHistoryResponse, WakeScheduleRequest, WorktreeMutationRequest,
 };
-use mcg_codex_app_server::{CodexConfigurationStatus, CodexResumeCwd};
+use mcg_codex_app_server::{
+    CodexConfigurationStatus, CodexHookMetadata, CodexHookStateUpdate, CodexHooksListEntry,
+    CodexResumeCwd, CodexStableDiscovery,
+};
 use mcg_config::{AppConfig, AutonomyPreset, CliTuiPreferences, UserSettings};
 use mcg_domain::{
     AgentWakeState, ApprovalMode, CloudDiffApply, CodexConfigOverride, ComposerMentionInput,
@@ -137,6 +140,50 @@ struct ProxyConversationListResponse {
     conversations: Vec<ProxyConversation>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+struct HookSelectionToken {
+    cwd: String,
+    key: String,
+    current_hash: String,
+}
+
+fn encode_hook_selection(entry: &CodexHooksListEntry, hook: &CodexHookMetadata) -> String {
+    STANDARD.encode(
+        serde_json::to_vec(&HookSelectionToken {
+            cwd: entry.cwd.clone(),
+            key: hook.key.clone(),
+            current_hash: hook.current_hash.clone(),
+        })
+        .expect("hook selection token is serializable"),
+    )
+}
+
+fn decode_hook_selection(value: &str) -> Result<HookSelectionToken, String> {
+    let bytes = STANDARD
+        .decode(value)
+        .map_err(|_| "the hook selection token is invalid; reopen /hooks".to_owned())?;
+    serde_json::from_slice(&bytes)
+        .map_err(|_| "the hook selection token is invalid; reopen /hooks".to_owned())
+}
+
+fn hook_handler_summary(hook: &CodexHookMetadata) -> String {
+    match hook.handler_type.as_str() {
+        "command" => hook
+            .command
+            .as_deref()
+            .unwrap_or("command")
+            .chars()
+            .take(96)
+            .collect(),
+        "mcpTool" => format!(
+            "{} / {}",
+            hook.server.as_deref().unwrap_or("MCP"),
+            hook.tool.as_deref().unwrap_or("tool")
+        ),
+        value => value.to_owned(),
+    }
+}
+
 #[derive(Serialize)]
 struct McpConfigurePayload {
     connection: McpConnection,
@@ -198,6 +245,9 @@ struct Cli {
     /// Disable both approval prompts and sandboxing for this new session.
     #[arg(long, alias = "yolo", global = true)]
     dangerously_bypass_approvals_and_sandbox: bool,
+    /// Run enabled hooks without reviewing their current definitions for this invocation only.
+    #[arg(long = "dangerously-bypass-hook-trust", global = true)]
+    dangerously_bypass_hook_trust: bool,
     /// Attach image files to the first prompt or interactive draft.
     #[arg(short = 'i', long = "image", value_name = "FILE", global = true)]
     images: Vec<PathBuf>,
@@ -397,6 +447,8 @@ struct CodexCompatCli {
     approve_for_me: bool,
     #[arg(long, alias = "yolo", global = true)]
     dangerously_bypass_approvals_and_sandbox: bool,
+    #[arg(long = "dangerously-bypass-hook-trust", global = true)]
+    dangerously_bypass_hook_trust: bool,
     #[arg(short = 'i', long = "image", value_name = "FILE", global = true)]
     images: Vec<PathBuf>,
     #[arg(long = "add-dir", value_name = "DIR", global = true)]
@@ -940,6 +992,55 @@ async fn release_invocation_remote(
         .unwrap_or(false))
 }
 
+async fn bind_invocation_hook_trust_bypass(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+    conversation_id: ConversationId,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let _: serde_json::Value = decode_api_response(
+        client
+            .put(format!(
+                "{host}/api/v1/conversations/{conversation_id}/codex-hook-trust-bypass"
+            ))
+            .bearer_auth(token)
+            .send()
+            .await?,
+        "enable invocation-only hook trust bypass",
+    )
+    .await?;
+    Ok(())
+}
+
+fn warn_hook_trust_bypass() {
+    eprintln!(
+        "Warning: `--dangerously-bypass-hook-trust` is enabled. Enabled hooks may run without review for this invocation."
+    );
+}
+
+async fn release_invocation_hook_trust_bypass(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+    conversation_id: ConversationId,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    let response: serde_json::Value = decode_api_response(
+        client
+            .delete(format!(
+                "{host}/api/v1/conversations/{conversation_id}/codex-hook-trust-bypass"
+            ))
+            .bearer_auth(token)
+            .send()
+            .await?,
+        "release invocation-only hook trust bypass",
+    )
+    .await?;
+    Ok(response
+        .get("released")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false))
+}
+
 async fn finish_invocation_remote_binding<T>(
     client: &reqwest::Client,
     host: &str,
@@ -969,20 +1070,121 @@ async fn finish_invocation_remote_binding<T>(
     }
 }
 
-async fn transfer_invocation_remote(
+async fn finish_invocation_hook_trust_binding<T>(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+    conversation_id: ConversationId,
+    was_bound: bool,
+    result: Result<T, Box<dyn std::error::Error>>,
+) -> Result<T, Box<dyn std::error::Error>> {
+    let release = if was_bound {
+        Some(release_invocation_hook_trust_bypass(client, host, token, conversation_id).await)
+    } else {
+        None
+    };
+    match result {
+        Ok(value) => {
+            if let Some(release) = release {
+                let _ = release?;
+            }
+            Ok(value)
+        }
+        Err(error) => {
+            let _ = release;
+            Err(error)
+        }
+    }
+}
+
+async fn bind_invocation_bindings(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+    conversation_id: ConversationId,
+    remote: Option<&InvocationRemote>,
+    bypass_hook_trust: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(remote) = remote {
+        bind_invocation_remote(client, host, token, conversation_id, remote).await?;
+    }
+    if bypass_hook_trust
+        && let Err(error) =
+            bind_invocation_hook_trust_bypass(client, host, token, conversation_id).await
+    {
+        if remote.is_some() {
+            let _ = release_invocation_remote(client, host, token, conversation_id).await;
+        }
+        return Err(error);
+    }
+    Ok(())
+}
+
+async fn finish_invocation_bindings<T>(
+    client: &reqwest::Client,
+    host: &str,
+    token: &str,
+    conversation_id: ConversationId,
+    remote_bound: bool,
+    hook_trust_bound: bool,
+    result: Result<T, Box<dyn std::error::Error>>,
+) -> Result<T, Box<dyn std::error::Error>> {
+    let remote_release = if remote_bound {
+        Some(release_invocation_remote(client, host, token, conversation_id).await)
+    } else {
+        None
+    };
+    let hook_release = if hook_trust_bound {
+        Some(release_invocation_hook_trust_bypass(client, host, token, conversation_id).await)
+    } else {
+        None
+    };
+    match result {
+        Ok(value) => {
+            if let Some(release) = remote_release {
+                let _ = release?;
+            }
+            if let Some(release) = hook_release {
+                let _ = release?;
+            }
+            Ok(value)
+        }
+        Err(error) => {
+            let _ = remote_release;
+            let _ = hook_release;
+            Err(error)
+        }
+    }
+}
+
+async fn transfer_invocation_bindings(
     client: &reqwest::Client,
     host: &str,
     token: &str,
     from: ConversationId,
     to: ConversationId,
     remote: Option<&InvocationRemote>,
+    bypass_hook_trust: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if from == to {
         return Ok(());
     }
-    if let Some(remote) = remote {
-        bind_invocation_remote(client, host, token, to, remote).await?;
-        let _ = release_invocation_remote(client, host, token, from).await?;
+    bind_invocation_bindings(client, host, token, to, remote, bypass_hook_trust).await?;
+    let remote_release = if remote.is_some() {
+        Some(release_invocation_remote(client, host, token, from).await)
+    } else {
+        None
+    };
+    let hook_release = if bypass_hook_trust {
+        Some(release_invocation_hook_trust_bypass(client, host, token, from).await)
+    } else {
+        None
+    };
+    if let Some(release) = remote_release {
+        let _ = release?;
+    }
+    if let Some(release) = hook_release {
+        let _ = release?;
     }
     Ok(())
 }
@@ -2524,6 +2726,17 @@ async fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
     let strict_config = native_overrides.strict_config;
     let no_alt_screen = native_overrides.no_alt_screen;
     let cli = Cli::parse_from(native_arguments);
+    if cli.dangerously_bypass_hook_trust
+        && !matches!(
+            &cli.command,
+            None | Some(Command::Prompt(_)) | Some(Command::Run { command: None, .. })
+        )
+    {
+        return Err(
+            "`--dangerously-bypass-hook-trust` is supported only for interactive or consumer conversation work"
+                .into(),
+        );
+    }
     let root_is_interactive = cli.command.is_none() && std::io::stdin().is_terminal();
     if !root_is_interactive {
         reject_invocation_remote_for_subcommand(
@@ -2638,6 +2851,7 @@ async fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
     let approval_policy = cli.approval_policy;
     let approve_for_me = cli.approve_for_me;
     let dangerously_bypass_approvals_and_sandbox = cli.dangerously_bypass_approvals_and_sandbox;
+    let dangerously_bypass_hook_trust = cli.dangerously_bypass_hook_trust;
     let images = cli.images;
     let host = host.as_str();
 
@@ -2710,6 +2924,7 @@ async fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
                 || approval_policy.is_some()
                 || approve_for_me
                 || dangerously_bypass_approvals_and_sandbox
+                || dangerously_bypass_hook_trust
                 || !goal.is_empty()
             {
                 return Err(
@@ -2760,6 +2975,7 @@ async fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
                 &mentions,
                 None,
                 false,
+                dangerously_bypass_hook_trust,
             )
             .await?;
         }
@@ -2794,6 +3010,7 @@ async fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
                 &mentions,
                 None,
                 false,
+                dangerously_bypass_hook_trust,
             )
             .await?;
         }
@@ -2824,6 +3041,7 @@ async fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
                 mentions,
                 no_alt_screen,
                 invocation_remote.as_ref(),
+                dangerously_bypass_hook_trust,
             )
             .await?;
         }
@@ -2857,6 +3075,7 @@ async fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
                 &mentions,
                 None,
                 false,
+                dangerously_bypass_hook_trust,
             )
             .await?;
         }
@@ -3408,6 +3627,20 @@ async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
         cli.config.is_empty(),
         "native config flags are extracted before parsing"
     );
+    if cli.dangerously_bypass_hook_trust
+        && !matches!(
+            &cli.command,
+            CodexCompatCommand::Exec(_)
+                | CodexCompatCommand::Resume(_)
+                | CodexCompatCommand::Fork(_)
+                | CodexCompatCommand::Review(_)
+        )
+    {
+        return Err(
+            "`--dangerously-bypass-hook-trust` is supported only for exec, resume, fork, and review invocations"
+                .into(),
+        );
+    }
     let remote_supported = matches!(
         &cli.command,
         CodexCompatCommand::Resume(_)
@@ -3482,6 +3715,7 @@ async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
     let approval_policy = cli.approval_policy;
     let approve_for_me = cli.approve_for_me;
     let dangerously_bypass_approvals_and_sandbox = cli.dangerously_bypass_approvals_and_sandbox;
+    let dangerously_bypass_hook_trust = cli.dangerously_bypass_hook_trust;
     let images = cli.images;
     let mut add_dirs = cli.add_dirs;
     add_dirs.extend(native_overrides.add_dirs);
@@ -3604,6 +3838,7 @@ async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
                 approval_policy,
                 approve_for_me,
                 dangerously_bypass_approvals_and_sandbox,
+                dangerously_bypass_hook_trust,
                 &additional_writable_roots,
                 &feature_overrides,
                 &config_overrides,
@@ -3686,6 +3921,7 @@ async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
                 mentions,
                 no_alt_screen,
                 invocation_remote.as_ref(),
+                dangerously_bypass_hook_trust,
             ))
             .await?;
         }
@@ -3785,8 +4021,17 @@ async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
                 no_alt_screen,
             )
             .await?;
-            if let Some(remote) = invocation_remote.as_ref() {
-                bind_invocation_remote(&client, host, token, source.id, remote).await?;
+            bind_invocation_bindings(
+                &client,
+                host,
+                token,
+                source.id,
+                invocation_remote.as_ref(),
+                dangerously_bypass_hook_trust,
+            )
+            .await?;
+            if dangerously_bypass_hook_trust {
+                warn_hook_trust_bypass();
             }
             let fork_result: Result<_, Box<dyn std::error::Error>> = async {
                 let use_current_directory = should_resume_in_current_directory(
@@ -3832,12 +4077,13 @@ async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
                 Ok((fork, use_current_directory, preferences))
             }
             .await;
-            let (mut fork, use_current_directory, preferences) = finish_invocation_remote_binding(
+            let (mut fork, use_current_directory, preferences) = finish_invocation_bindings(
                 &client,
                 host,
                 token,
                 source.id,
                 invocation_remote.is_some(),
+                dangerously_bypass_hook_trust,
                 fork_result,
             )
             .await?;
@@ -3856,6 +4102,11 @@ async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
                         if invocation_remote.is_some() {
                             let _ = release_invocation_remote(&client, host, token, fork.id).await;
                         }
+                        if dangerously_bypass_hook_trust {
+                            let _ =
+                                release_invocation_hook_trust_bypass(&client, host, token, fork.id)
+                                    .await;
+                        }
                         return Err(error);
                     }
                 }
@@ -3871,6 +4122,7 @@ async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
                 mentions,
                 no_alt_screen,
                 invocation_remote.as_ref(),
+                dangerously_bypass_hook_trust,
             ))
             .await?;
         }
@@ -3999,6 +4251,7 @@ async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
                 title,
                 prompt,
                 preferences,
+                dangerously_bypass_hook_trust,
             ))
             .await?;
         }
@@ -5097,6 +5350,7 @@ async fn run_interactive(
     initial_mentions: Vec<String>,
     no_alt_screen: bool,
     remote: Option<&InvocationRemote>,
+    bypass_hook_trust: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (mut conversation, mut project_id, mut project_root, root, mut preferences) =
         if let Some(conversation) = initial_conversation {
@@ -5149,8 +5403,17 @@ async fn run_interactive(
             .await?;
             (conversation, project_id, project_root, root, preferences)
         };
-    if let Some(remote) = remote {
-        bind_invocation_remote(client, host, token, conversation.id, remote).await?;
+    bind_invocation_bindings(
+        client,
+        host,
+        token,
+        conversation.id,
+        remote,
+        bypass_hook_trust,
+    )
+    .await?;
+    if bypass_hook_trust {
+        warn_hook_trust_bypass();
     }
     let result: Result<(), Box<dyn std::error::Error>> = async {
         let mut pending_mentions = initial_mentions;
@@ -5197,13 +5460,14 @@ async fn run_interactive(
                     {
                         Ok(Some(view)) => {
                             let changed_conversation = view.conversation.id != conversation.id;
-                            transfer_invocation_remote(
+                            transfer_invocation_bindings(
                                 client,
                                 host,
                                 token,
                                 conversation.id,
                                 view.conversation.id,
                                 remote,
+                                bypass_hook_trust,
                             )
                             .await?;
                             conversation = view.conversation.clone();
@@ -5239,6 +5503,7 @@ async fn run_interactive(
                     token,
                     conversation.id,
                     project_id,
+                    project_root.as_deref(),
                     &preferences,
                     &plugins,
                     request,
@@ -5356,13 +5621,14 @@ async fn run_interactive(
                     {
                         model.set_status(format!("Fork failed: {error}"));
                     } else if conversation.id != previous_conversation_id {
-                        transfer_invocation_remote(
+                        transfer_invocation_bindings(
                             client,
                             host,
                             token,
                             previous_conversation_id,
                             conversation.id,
                             remote,
+                            bypass_hook_trust,
                         )
                         .await?;
                         let view =
@@ -5429,13 +5695,14 @@ async fn run_interactive(
                                         Ok(Some(view)) => {
                                             let changed_conversation =
                                                 view.conversation.id != conversation.id;
-                                            transfer_invocation_remote(
+                                            transfer_invocation_bindings(
                                                 client,
                                                 host,
                                                 token,
                                                 conversation.id,
                                                 view.conversation.id,
                                                 remote,
+                                                bypass_hook_trust,
                                             )
                                             .await?;
                                             conversation = view.conversation.clone();
@@ -5495,13 +5762,14 @@ async fn run_interactive(
                     {
                         Ok(Some(view)) => {
                             let changed_conversation = view.conversation.id != conversation.id;
-                            transfer_invocation_remote(
+                            transfer_invocation_bindings(
                                 client,
                                 host,
                                 token,
                                 conversation.id,
                                 view.conversation.id,
                                 remote,
+                                bypass_hook_trust,
                             )
                             .await?;
                             conversation = view.conversation.clone();
@@ -5542,13 +5810,16 @@ async fn run_interactive(
         Ok(())
     }
     .await;
-    if remote.is_some() {
-        let release = release_invocation_remote(client, host, token, conversation.id).await;
-        if result.is_ok() {
-            let _ = release?;
-        }
-    }
-    result
+    finish_invocation_bindings(
+        client,
+        host,
+        token,
+        conversation.id,
+        remote.is_some(),
+        bypass_hook_trust,
+        result,
+    )
+    .await
 }
 
 async fn answer_interactive_input(
@@ -5895,6 +6166,7 @@ async fn interactive_palette_candidates(
     token: &str,
     conversation_id: ConversationId,
     project_id: Option<ProjectId>,
+    project_root: Option<&Path>,
     preferences: &ExecutionPreferences,
     plugins: &[MentionCandidate],
     request: PaletteRequest,
@@ -5922,15 +6194,22 @@ async fn interactive_palette_candidates(
             .collect();
     }
     if request.kind == PaletteKind::CommandOption {
-        return interactive_command_options(client, host, token, conversation_id, &request)
-            .await
-            .into_iter()
-            .map(|(value, label, detail)| PaletteCandidate::Choice {
-                value,
-                label,
-                detail,
-            })
-            .collect();
+        return interactive_command_options(
+            client,
+            host,
+            token,
+            conversation_id,
+            project_root,
+            &request,
+        )
+        .await
+        .into_iter()
+        .map(|(value, label, detail)| PaletteCandidate::Choice {
+            value,
+            label,
+            detail,
+        })
+        .collect();
     }
     if request.kind == PaletteKind::Dollar {
         let discovery = client
@@ -6041,6 +6320,7 @@ async fn interactive_command_options(
     host: &str,
     token: &str,
     conversation_id: ConversationId,
+    project_root: Option<&Path>,
     request: &PaletteRequest,
 ) -> Vec<(String, String, String)> {
     let command = request.command.as_deref().unwrap_or_default();
@@ -6359,6 +6639,55 @@ async fn interactive_command_options(
                 }
             }
             apps
+        }
+        "hooks" => {
+            let cwd = project_root
+                .map(|path| path.display().to_string())
+                .or_else(|| {
+                    std::env::current_dir()
+                        .ok()
+                        .map(|path| path.display().to_string())
+                });
+            let cwds = cwd.into_iter().collect::<Vec<_>>();
+            let mut hooks = Vec::new();
+            if let Ok(response) = client
+                .post(format!(
+                    "{host}/api/v1/conversations/{conversation_id}/codex/discovery"
+                ))
+                .bearer_auth(token)
+                .json(&serde_json::json!({ "cwds": cwds, "force_reload": false }))
+                .send()
+                .await
+                .and_then(reqwest::Response::error_for_status)
+                && let Ok(discovery) = response.json::<CodexStableDiscovery>().await
+            {
+                for entry in discovery.hooks {
+                    for hook in &entry.hooks {
+                        let (action, action_label) = if hook.is_managed {
+                            ("inspect", "Inspect managed")
+                        } else {
+                            match (hook.trust_status.as_str(), hook.enabled) {
+                                ("trusted", true) => ("disable", "Disable"),
+                                ("trusted", false) => ("enable", "Enable"),
+                                _ => ("trust", "Review and trust"),
+                            }
+                        };
+                        let token = encode_hook_selection(&entry, hook);
+                        let matcher = hook.matcher.as_deref().unwrap_or("all matching events");
+                        hooks.push((
+                            format!("{action} {token}"),
+                            format!("{action_label} · {}", hook.event_name),
+                            format!(
+                                "{} · {} · {} · {matcher}",
+                                hook.source,
+                                hook.trust_status,
+                                hook_handler_summary(hook)
+                            ),
+                        ));
+                    }
+                }
+            }
+            hooks
         }
         _ => Vec::new(),
     };
@@ -7635,7 +7964,7 @@ async fn run_interactive_slash(
                 |root| root.display().to_string()
             )
         ),
-        "skills" | "hooks" | "apps" => {
+        "skills" | "apps" => {
             let discovery: serde_json::Value = decode_api_response(
                 client
                     .post(format!(
@@ -7661,6 +7990,155 @@ async fn run_interactive_slash(
                         .unwrap_or(&serde_json::Value::Array(Vec::new()))
                 )?
             );
+        }
+        "hooks" => {
+            let cwd = project_root
+                .as_deref()
+                .map(|path| path.display().to_string())
+                .or_else(|| {
+                    std::env::current_dir()
+                        .ok()
+                        .map(|path| path.display().to_string())
+                })
+                .ok_or("cannot resolve a working directory for hook discovery")?;
+            if argument.trim().is_empty() {
+                let discovery: CodexStableDiscovery = decode_api_response(
+                    client
+                        .post(format!(
+                            "{host}/api/v1/conversations/{}/codex/discovery",
+                            conversation.id
+                        ))
+                        .bearer_auth(token)
+                        .json(&serde_json::json!({
+                            "cwds": [cwd],
+                            "force_reload": true,
+                        }))
+                        .send()
+                        .await?,
+                    "discover Codex hooks",
+                )
+                .await?;
+                let mut total = 0usize;
+                for entry in discovery.hooks {
+                    for warning in &entry.warnings {
+                        println!("Warning · {warning}");
+                    }
+                    for error in &entry.errors {
+                        println!("Error · {} · {}", error.path, error.message);
+                    }
+                    for hook in entry.hooks {
+                        total += 1;
+                        println!(
+                            "{} · {} · {} · {}\n  {}\n  {}",
+                            hook.event_name,
+                            if hook.enabled { "enabled" } else { "disabled" },
+                            hook.trust_status,
+                            hook.source,
+                            hook_handler_summary(&hook),
+                            hook.source_path,
+                        );
+                    }
+                }
+                if total == 0 {
+                    println!("No hooks configured for {cwd}.");
+                } else {
+                    println!("Type /hooks and choose an exact hook action from the picker.");
+                }
+            } else {
+                let mut parts = argument.split_whitespace();
+                let action = parts.next().ok_or("choose a hook action from /hooks")?;
+                let selection_token = parts.next().ok_or("choose a hook from /hooks")?;
+                if parts.next().is_some() {
+                    return Err("hook actions accept exactly one selected hook".into());
+                }
+                let selected = decode_hook_selection(selection_token)?;
+                if action == "inspect" {
+                    let discovery: CodexStableDiscovery = decode_api_response(
+                        client
+                            .post(format!(
+                                "{host}/api/v1/conversations/{}/codex/discovery",
+                                conversation.id
+                            ))
+                            .bearer_auth(token)
+                            .json(&serde_json::json!({
+                                "cwds": [selected.cwd],
+                                "force_reload": true,
+                            }))
+                            .send()
+                            .await?,
+                        "refresh selected hook",
+                    )
+                    .await?;
+                    let hook = discovery
+                        .hooks
+                        .iter()
+                        .flat_map(|entry| &entry.hooks)
+                        .find(|hook| hook.key == selected.key)
+                        .ok_or("the selected hook no longer exists; reopen /hooks")?;
+                    println!(
+                        "{} · {} · {} · {}\nHandler: {}\nMatcher: {}\nTimeout: {}s\nSource: {}\nHash: {}",
+                        hook.event_name,
+                        if hook.enabled { "enabled" } else { "disabled" },
+                        hook.trust_status,
+                        hook.source,
+                        hook_handler_summary(hook),
+                        hook.matcher.as_deref().unwrap_or("all matching events"),
+                        hook.timeout_sec,
+                        hook.source_path,
+                        hook.current_hash,
+                    );
+                } else {
+                    let update = match action {
+                        "trust" => CodexHookStateUpdate {
+                            cwd: selected.cwd,
+                            key: selected.key,
+                            expected_current_hash: selected.current_hash,
+                            enabled: None,
+                            trust_current_definition: true,
+                        },
+                        "enable" => CodexHookStateUpdate {
+                            cwd: selected.cwd,
+                            key: selected.key,
+                            expected_current_hash: selected.current_hash,
+                            enabled: Some(true),
+                            trust_current_definition: false,
+                        },
+                        "disable" => CodexHookStateUpdate {
+                            cwd: selected.cwd,
+                            key: selected.key,
+                            expected_current_hash: selected.current_hash,
+                            enabled: Some(false),
+                            trust_current_definition: false,
+                        },
+                        _ => return Err("unknown hook action; reopen /hooks".into()),
+                    };
+                    let refreshed: CodexStableDiscovery = decode_api_response(
+                        client
+                            .post(format!(
+                                "{host}/api/v1/conversations/{}/codex/hooks/state",
+                                conversation.id
+                            ))
+                            .bearer_auth(token)
+                            .json(&update)
+                            .send()
+                            .await?,
+                        "update selected hook",
+                    )
+                    .await?;
+                    let hook = refreshed
+                        .hooks
+                        .iter()
+                        .flat_map(|entry| &entry.hooks)
+                        .find(|hook| hook.key == update.key)
+                        .ok_or("the selected hook disappeared after the update")?;
+                    println!(
+                        "Hook {} · {} · {}",
+                        hook.event_name,
+                        if hook.enabled { "enabled" } else { "disabled" },
+                        hook.trust_status,
+                    );
+                }
+            }
         }
         "plugins" => {
             let response: PluginListResponse =
@@ -7991,6 +8469,7 @@ async fn run_codex_compatible_exec(
     approval_policy: Option<CodexApprovalPolicyArg>,
     approve_for_me: bool,
     dangerously_bypass_approvals_and_sandbox: bool,
+    dangerously_bypass_hook_trust: bool,
     additional_writable_roots: &[String],
     feature_overrides: &BTreeMap<String, bool>,
     config_overrides: &[CodexConfigOverride],
@@ -8042,6 +8521,7 @@ async fn run_codex_compatible_exec(
                 &mentions,
                 output_last_message.as_deref(),
                 ephemeral,
+                dangerously_bypass_hook_trust,
             )
             .await
         }
@@ -8068,101 +8548,118 @@ async fn run_codex_compatible_exec(
                 false,
             )
             .await?;
-            if let Some(path) = output_schema.as_deref() {
-                preferences.output_schema = Some(read_output_schema(path)?);
+            if dangerously_bypass_hook_trust {
+                bind_invocation_hook_trust_bypass(client, host, token, conversation.id).await?;
+                warn_hook_trust_bypass();
             }
-            let content = codex_exec_prompt(&follow_up)?;
-            let (content, mentions) =
-                resolve_cli_mentions(client, host, token, content, &mentions).await?;
-            let mut view: ConversationView = decode_api_response(
-                client
-                    .post(format!(
-                        "{host}/api/v1/conversations/{}/messages",
-                        conversation.id
-                    ))
-                    .bearer_auth(token)
-                    .json(&SendConversationMessageRequest {
-                        content,
-                        execution_preferences: Some(preferences),
-                        mentions,
-                    })
-                    .send()
-                    .await?,
-                "resume non-interactive conversation",
-            )
-            .await?;
-            let turn_id = view
-                .messages
-                .iter()
-                .rev()
-                .find(|message| message.role == ConversationRole::User)
-                .map(|message| message.turn_id)
-                .ok_or("resumed conversation did not contain the submitted turn")?;
-            if json {
-                emit_exec_jsonl(&ExecJsonlEvent::ThreadStarted {
-                    thread_id: conversation.id.to_string(),
-                })?;
-                emit_exec_jsonl(&ExecJsonlEvent::TurnStarted {})?;
-            }
-            let mut projector = ExecJsonlProjector::new(turn_id);
-            view = if json {
-                match wait_for_conversation_jsonl(
-                    client,
-                    host,
-                    token,
-                    view,
-                    turn_id,
-                    &mut projector,
-                    3_600,
+            let result: Result<(), Box<dyn std::error::Error>> = async {
+                if let Some(path) = output_schema.as_deref() {
+                    preferences.output_schema = Some(read_output_schema(path)?);
+                }
+                let content = codex_exec_prompt(&follow_up)?;
+                let (content, mentions) =
+                    resolve_cli_mentions(client, host, token, content, &mentions).await?;
+                let mut view: ConversationView = decode_api_response(
+                    client
+                        .post(format!(
+                            "{host}/api/v1/conversations/{}/messages",
+                            conversation.id
+                        ))
+                        .bearer_auth(token)
+                        .json(&SendConversationMessageRequest {
+                            content,
+                            execution_preferences: Some(preferences),
+                            mentions,
+                        })
+                        .send()
+                        .await?,
+                    "resume non-interactive conversation",
                 )
-                .await
-                {
-                    Ok(view) => view,
-                    Err(error) => {
-                        emit_exec_jsonl(&ExecJsonlEvent::Error {
-                            message: error.to_string(),
-                        })?;
+                .await?;
+                let turn_id = view
+                    .messages
+                    .iter()
+                    .rev()
+                    .find(|message| message.role == ConversationRole::User)
+                    .map(|message| message.turn_id)
+                    .ok_or("resumed conversation did not contain the submitted turn")?;
+                if json {
+                    emit_exec_jsonl(&ExecJsonlEvent::ThreadStarted {
+                        thread_id: conversation.id.to_string(),
+                    })?;
+                    emit_exec_jsonl(&ExecJsonlEvent::TurnStarted {})?;
+                }
+                let mut projector = ExecJsonlProjector::new(turn_id);
+                view = if json {
+                    match wait_for_conversation_jsonl(
+                        client,
+                        host,
+                        token,
+                        view,
+                        turn_id,
+                        &mut projector,
+                        3_600,
+                    )
+                    .await
+                    {
+                        Ok(view) => view,
+                        Err(error) => {
+                            emit_exec_jsonl(&ExecJsonlEvent::Error {
+                                message: error.to_string(),
+                            })?;
+                            emit_exec_jsonl(&ExecJsonlProjector::failed(error.to_string()))?;
+                            return Err(error);
+                        }
+                    }
+                } else {
+                    wait_for_conversation(
+                        client,
+                        host,
+                        token,
+                        &conversation.id.to_string(),
+                        turn_id,
+                        3_600,
+                        2,
+                    )
+                    .await?
+                };
+                let final_message = view
+                    .messages
+                    .iter()
+                    .rev()
+                    .find(|message| {
+                        message.turn_id == turn_id && message.role == ConversationRole::Assistant
+                    })
+                    .map(|message| message.content.as_str())
+                    .unwrap_or_default();
+                if let Some(path) = output_last_message.as_deref() {
+                    std::fs::write(path, final_message)?;
+                }
+                if json {
+                    for event in projector.finalize_items(&view) {
+                        emit_exec_jsonl(&event)?;
+                    }
+                    if let Err(error) = ensure_governed_consumer_success(&view, turn_id) {
                         emit_exec_jsonl(&ExecJsonlProjector::failed(error.to_string()))?;
                         return Err(error);
                     }
+                    emit_exec_jsonl(&projector.completed())?;
+                } else {
+                    println!("{final_message}");
+                    ensure_governed_consumer_success(&view, turn_id)?;
                 }
-            } else {
-                wait_for_conversation(
-                    client,
-                    host,
-                    token,
-                    &conversation.id.to_string(),
-                    turn_id,
-                    3_600,
-                    2,
-                )
-                .await?
-            };
-            let final_message = view
-                .messages
-                .iter()
-                .rev()
-                .find(|message| {
-                    message.turn_id == turn_id && message.role == ConversationRole::Assistant
-                })
-                .map(|message| message.content.as_str())
-                .unwrap_or_default();
-            if let Some(path) = output_last_message.as_deref() {
-                std::fs::write(path, final_message)?;
+                Ok(())
             }
-            if json {
-                for event in projector.finalize_items(&view) {
-                    emit_exec_jsonl(&event)?;
-                }
-                if let Err(error) = ensure_governed_consumer_success(&view, turn_id) {
-                    emit_exec_jsonl(&ExecJsonlProjector::failed(error.to_string()))?;
-                    return Err(error);
-                }
-                emit_exec_jsonl(&projector.completed())?;
-            } else {
-                println!("{final_message}");
-                ensure_governed_consumer_success(&view, turn_id)?;
-            }
+            .await;
+            finish_invocation_hook_trust_binding(
+                client,
+                host,
+                token,
+                conversation.id,
+                dangerously_bypass_hook_trust,
+                result,
+            )
+            .await?;
             if ephemeral {
                 let _ = delete_cli_conversation_by_id(client, host, token, conversation.id).await?;
             }
@@ -8182,6 +8679,7 @@ async fn run_codex_compatible_review(
     title: Option<String>,
     prompt: Vec<String>,
     preferences: ExecutionPreferences,
+    bypass_hook_trust: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     require_git_repository(project)?;
     let canonical_root = std::fs::canonicalize(project)?;
@@ -8210,23 +8708,56 @@ async fn run_codex_compatible_review(
         "MetaCog CLI review",
     )
     .await?;
-    let result: mcg_codex_app_server::CodexReviewResult = decode_api_response(
-        client
-            .post(format!(
-                "{host}/api/v1/codex/owned-threads/{}/review",
-                conversation.id
-            ))
-            .bearer_auth(token)
-            .json(&mcg_api::CodexReviewRequest {
-                target,
-                delivery: mcg_codex_app_server::CodexReviewDelivery::Inline,
-            })
-            .send()
-            .await?,
-        "run native read-only review",
+    if bypass_hook_trust {
+        if let Err(error) =
+            bind_invocation_hook_trust_bypass(client, host, token, conversation.id).await
+        {
+            let _ = decode_api_response::<Conversation>(
+                client
+                    .post(format!(
+                        "{host}/api/v1/conversations/{}/archive",
+                        conversation.id
+                    ))
+                    .bearer_auth(token)
+                    .json(&ArchiveConversationRequest { archived: true })
+                    .send()
+                    .await?,
+                "archive failed review control conversation",
+            )
+            .await;
+            return Err(error);
+        }
+        warn_hook_trust_bypass();
+    }
+    let result: Result<String, Box<dyn std::error::Error>> = async {
+        let result: mcg_codex_app_server::CodexReviewResult = decode_api_response(
+            client
+                .post(format!(
+                    "{host}/api/v1/codex/owned-threads/{}/review",
+                    conversation.id
+                ))
+                .bearer_auth(token)
+                .json(&mcg_api::CodexReviewRequest {
+                    target,
+                    delivery: mcg_codex_app_server::CodexReviewDelivery::Inline,
+                })
+                .send()
+                .await?,
+            "run native read-only review",
+        )
+        .await?;
+        render_codex_review_turn(&result.turn)
+    }
+    .await;
+    let rendered = finish_invocation_hook_trust_binding(
+        client,
+        host,
+        token,
+        conversation.id,
+        bypass_hook_trust,
+        result,
     )
-    .await?;
-    let rendered = render_codex_review_turn(&result.turn);
+    .await;
     let _: Conversation = decode_api_response(
         client
             .post(format!(
@@ -8282,6 +8813,7 @@ async fn run_consumer_submission(
     mention_specs: &[String],
     output_last_message: Option<&std::path::Path>,
     ephemeral: bool,
+    bypass_hook_trust: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let canonical_root = std::fs::canonicalize(project_root)?;
     let root = canonical_root
@@ -8305,113 +8837,136 @@ async fn run_consumer_submission(
     )
     .await?;
 
-    let content = if let Some(input) = supplemental_input {
-        format!("{goal}\n\nOwner-supplied standard input (untrusted data):\n{input}")
-    } else {
-        goal.to_owned()
-    };
-    let (content, mentions) =
-        resolve_cli_mentions(client, host, token, content, mention_specs).await?;
-    let mut view: ConversationView = decode_api_response(
-        client
-            .post(format!(
-                "{host}/api/v1/conversations/{}/messages",
-                conversation.id
-            ))
-            .bearer_auth(token)
-            .json(&SendConversationMessageRequest {
-                content,
-                execution_preferences: Some(preferences),
-                mentions,
-            })
-            .send()
-            .await?,
-        "submit governed consumer request",
-    )
-    .await?;
-    let origin_turn_id = view
-        .messages
-        .iter()
-        .rev()
-        .find(|message| message.role == ConversationRole::User)
-        .map(|message| message.turn_id)
-        .ok_or("governed consumer response did not contain the owner turn")?;
-
-    if output == ConsumerOutput::StreamJson {
-        emit_exec_jsonl(&ExecJsonlEvent::ThreadStarted {
-            thread_id: conversation.id.to_string(),
-        })?;
-        emit_exec_jsonl(&ExecJsonlEvent::TurnStarted {})?;
-    }
-    let mut projector = ExecJsonlProjector::new(origin_turn_id);
-    view = if output == ConsumerOutput::StreamJson {
-        match wait_for_conversation_jsonl(
-            client,
-            host,
-            token,
-            view,
-            origin_turn_id,
-            &mut projector,
-            3_600,
-        )
-        .await
+    if bypass_hook_trust {
+        if let Err(error) =
+            bind_invocation_hook_trust_bypass(client, host, token, conversation.id).await
         {
-            Ok(view) => view,
-            Err(error) => {
-                emit_exec_jsonl(&ExecJsonlEvent::Error {
-                    message: error.to_string(),
-                })?;
+            let _ = delete_cli_conversation_by_id(client, host, token, conversation.id).await;
+            return Err(error);
+        }
+        warn_hook_trust_bypass();
+    }
+
+    let result: Result<(), Box<dyn std::error::Error>> = async {
+        let content = if let Some(input) = supplemental_input {
+            format!("{goal}\n\nOwner-supplied standard input (untrusted data):\n{input}")
+        } else {
+            goal.to_owned()
+        };
+        let (content, mentions) =
+            resolve_cli_mentions(client, host, token, content, mention_specs).await?;
+        let mut view: ConversationView = decode_api_response(
+            client
+                .post(format!(
+                    "{host}/api/v1/conversations/{}/messages",
+                    conversation.id
+                ))
+                .bearer_auth(token)
+                .json(&SendConversationMessageRequest {
+                    content,
+                    execution_preferences: Some(preferences),
+                    mentions,
+                })
+                .send()
+                .await?,
+            "submit governed consumer request",
+        )
+        .await?;
+        let origin_turn_id = view
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.role == ConversationRole::User)
+            .map(|message| message.turn_id)
+            .ok_or("governed consumer response did not contain the owner turn")?;
+
+        if output == ConsumerOutput::StreamJson {
+            emit_exec_jsonl(&ExecJsonlEvent::ThreadStarted {
+                thread_id: conversation.id.to_string(),
+            })?;
+            emit_exec_jsonl(&ExecJsonlEvent::TurnStarted {})?;
+        }
+        let mut projector = ExecJsonlProjector::new(origin_turn_id);
+        view = if output == ConsumerOutput::StreamJson {
+            match wait_for_conversation_jsonl(
+                client,
+                host,
+                token,
+                view,
+                origin_turn_id,
+                &mut projector,
+                3_600,
+            )
+            .await
+            {
+                Ok(view) => view,
+                Err(error) => {
+                    emit_exec_jsonl(&ExecJsonlEvent::Error {
+                        message: error.to_string(),
+                    })?;
+                    emit_exec_jsonl(&ExecJsonlProjector::failed(error.to_string()))?;
+                    return Err(error);
+                }
+            }
+        } else {
+            wait_for_conversation(
+                client,
+                host,
+                token,
+                &conversation.id.to_string(),
+                origin_turn_id,
+                3_600,
+                2,
+            )
+            .await?
+        };
+        let final_message = view
+            .messages
+            .iter()
+            .rev()
+            .find(|message| {
+                message.turn_id == origin_turn_id && message.role == ConversationRole::Assistant
+            })
+            .map(|message| message.content.clone());
+        if let Some(path) = output_last_message {
+            std::fs::write(path, final_message.as_deref().unwrap_or_default())?;
+        }
+        if output == ConsumerOutput::Json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&conversation_receipt(&view, Some(origin_turn_id))?)?
+            );
+        } else if output == ConsumerOutput::StreamJson {
+            for event in projector.finalize_items(&view) {
+                emit_exec_jsonl(&event)?;
+            }
+            if let Err(error) = ensure_governed_consumer_success(&view, origin_turn_id) {
                 emit_exec_jsonl(&ExecJsonlProjector::failed(error.to_string()))?;
                 return Err(error);
             }
+            emit_exec_jsonl(&projector.completed())?;
+        } else {
+            println!("Project: {}", project.project.root);
+            println!("Conversation: {}", conversation.id);
+            if let Some(text) = final_message.as_deref() {
+                println!("\n{text}");
+            }
         }
-    } else {
-        wait_for_conversation(
-            client,
-            host,
-            token,
-            &conversation.id.to_string(),
-            origin_turn_id,
-            3_600,
-            2,
-        )
-        .await?
-    };
-    let final_message = view
-        .messages
-        .iter()
-        .rev()
-        .find(|message| {
-            message.turn_id == origin_turn_id && message.role == ConversationRole::Assistant
-        })
-        .map(|message| message.content.clone());
-    if let Some(path) = output_last_message {
-        std::fs::write(path, final_message.as_deref().unwrap_or_default())?;
+        if output != ConsumerOutput::StreamJson {
+            ensure_governed_consumer_success(&view, origin_turn_id)?;
+        }
+        Ok(())
     }
-    if output == ConsumerOutput::Json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&conversation_receipt(&view, Some(origin_turn_id))?)?
-        );
-    } else if output == ConsumerOutput::StreamJson {
-        for event in projector.finalize_items(&view) {
-            emit_exec_jsonl(&event)?;
-        }
-        if let Err(error) = ensure_governed_consumer_success(&view, origin_turn_id) {
-            emit_exec_jsonl(&ExecJsonlProjector::failed(error.to_string()))?;
-            return Err(error);
-        }
-        emit_exec_jsonl(&projector.completed())?;
-    } else {
-        println!("Project: {}", project.project.root);
-        println!("Conversation: {}", conversation.id);
-        if let Some(text) = final_message.as_deref() {
-            println!("\n{text}");
-        }
-    }
-    if output != ConsumerOutput::StreamJson {
-        ensure_governed_consumer_success(&view, origin_turn_id)?;
-    }
+    .await;
+    finish_invocation_hook_trust_binding(
+        client,
+        host,
+        token,
+        conversation.id,
+        bypass_hook_trust,
+        result,
+    )
+    .await?;
     if ephemeral {
         let _ = delete_cli_conversation_by_id(client, host, token, conversation.id).await?;
     }
@@ -13808,6 +14363,70 @@ async fn resolve_approval(
 mod tests {
     use super::*;
     use mcg_storage::{BackupBundleEntry, BackupBundleManifest};
+
+    #[test]
+    fn hook_selection_tokens_round_trip_exact_identity() {
+        let entry = CodexHooksListEntry {
+            cwd: "C:\\workspace with unicode Ω".into(),
+            hooks: Vec::new(),
+            warnings: Vec::new(),
+            errors: Vec::new(),
+        };
+        let hook = CodexHookMetadata {
+            key: "project:preToolUse:0".into(),
+            event_name: "preToolUse".into(),
+            handler_type: "command".into(),
+            command: Some("cargo check".into()),
+            r#async: Some(false),
+            server: None,
+            tool: None,
+            matcher: Some("Bash".into()),
+            timeout_sec: 30,
+            status_message: None,
+            additional_context_limit: None,
+            source_path: "C:\\workspace\\.codex\\hooks.json".into(),
+            source: "project".into(),
+            plugin_id: None,
+            display_order: 0,
+            enabled: true,
+            is_managed: false,
+            current_hash: format!("sha256:{}", "a".repeat(64)),
+            trust_status: "untrusted".into(),
+        };
+        let decoded = decode_hook_selection(&encode_hook_selection(&entry, &hook))
+            .expect("valid hook selection");
+        assert_eq!(decoded.cwd, entry.cwd);
+        assert_eq!(decoded.key, hook.key);
+        assert_eq!(decoded.current_hash, hook.current_hash);
+        assert!(decode_hook_selection("not-base64!").is_err());
+    }
+
+    #[test]
+    fn hook_trust_bypass_flag_parses_for_interactive_and_session_work() {
+        let interactive = Cli::try_parse_from(["mcg", "--dangerously-bypass-hook-trust"])
+            .expect("interactive hook bypass flag");
+        assert!(interactive.dangerously_bypass_hook_trust);
+
+        let exec = CodexCompatCli::try_parse_from([
+            "mcg",
+            "exec",
+            "--dangerously-bypass-hook-trust",
+            "check hooks",
+        ])
+        .expect("exec hook bypass flag");
+        assert!(exec.dangerously_bypass_hook_trust);
+        assert!(matches!(exec.command, CodexCompatCommand::Exec(_)));
+
+        let resume = CodexCompatCli::try_parse_from([
+            "mcg",
+            "--dangerously-bypass-hook-trust",
+            "resume",
+            "conversation",
+        ])
+        .expect("resume hook bypass flag");
+        assert!(resume.dangerously_bypass_hook_trust);
+        assert!(matches!(resume.command, CodexCompatCommand::Resume(_)));
+    }
 
     #[test]
     fn invocation_remote_flags_parse_at_root_and_supported_session_commands() {

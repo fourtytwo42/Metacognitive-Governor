@@ -2069,6 +2069,7 @@ pub enum ConversationActivityKind {
     Approval,
     Elicitation,
     ContextCompaction,
+    Hook,
     Usage,
     Recovery,
     Interruption,
@@ -2173,7 +2174,7 @@ pub struct CodexConfigOverride {
 pub struct ExecutionPreferences {
     /// Optional Codex model-provider override. Only dedicated, validated
     /// provider selection may populate this value; raw configuration cannot
-    /// replace MetaCog's provider or authentication boundary.
+    /// replace `MetaCog`'s provider or authentication boundary.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_provider: Option<String>,
     #[serde(default)]
