@@ -52,6 +52,15 @@ source-workflow evidence loader. Developer adds the read-only canonical envelope
 executions, receipts, reconciliation jobs, and ordered event evidence. Switching levels
 does not reload, fork, or mutate the Root action state and never exposes mutation authority.
 
+Checkpoint `cccdee0` establishes the canonical prerequisite for exact source navigation.
+The optional, backward-compatible `ActionOrigin` binds conversation, invocation, command,
+approval, agent, and evidence `SourceRef` values into immutable action intent. Root rejects
+empty, oversized, duplicate, malformed-hash, and idempotently substituted origins. Advanced
+shows the bound locators and short hashes and enables the originating-conversation control
+only when that exact conversation is already present; Developer raw evidence includes the
+complete binding. Compatibility producers and deeper invocation/command/approval focus are
+still required before approval-source navigation is complete.
+
 ## Authority boundary
 
 The runner is an effect executor, not an authorization service. Its request identifiers
@@ -68,7 +77,8 @@ OS sandboxing, process-tree confinement, or the action ledger.
 ## Verification completed
 
 - Runner unit and separate-process tests: 9 passed.
-- Storage action/recovery suite within 102 passing storage tests.
+- Storage action/recovery suite within 103 passing storage tests, including backward-compatible
+  origin decoding, bounds validation, canonical inspection, and replay-substitution rejection.
 - Protected Root tests: 10 passed, including confirmed/lost/pre-launch classification,
   occurred/not-occurred/ambiguous reconciliation, real-store reopen, and stranded dispatch
   restart recovery, plus authenticated bounded action list/show IPC.
@@ -106,8 +116,10 @@ Stage 4 is not complete until all of the following pass:
 2. Exact approval-to-source navigation reaches the originating conversation, agent,
    command, approval, and evidence, and compensation history/controls become owner-visible.
    Authenticated local IPC, CLI list/show, and progressive Desktop status/evidence are
-   implemented; the current Desktop source-workflow loader is not the complete navigation
-   contract. Add a Root HTTP/API projection only if a non-local product consumer requires it.
+   implemented. Immutable source binding and fail-closed origin display are implemented;
+   compatibility producers plus exact invocation/command/approval focus remain. The current
+   Desktop source-workflow loader is not the complete navigation contract. Add a Root HTTP/API
+   projection only if a non-local product consumer requires it.
 3. Semantic path policy, resource budgets, process-tree confinement, and platform sandbox
    capability reporting pass adversarial Windows, Linux, and macOS tests.
 4. Fresh Windows installer/portable, Linux Debian/AppImage, and macOS app/DMG builds pass

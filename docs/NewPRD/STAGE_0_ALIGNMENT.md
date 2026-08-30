@@ -205,6 +205,7 @@ Current user settings persist an `advanced_mode` Boolean. The target presentatio
 | ADR-012 | Promotion transaction, candidate rebase, monitoring, semantic rollback | Stage 7/10 |
 | ADR-013 | Agent-to-invocation migration and global activity browser semantics | Stage 5 |
 | ADR-014 | Research crate/dependency isolation and evaluator-only measurement retention | Stage 7 |
+| ADR-015 | Immutable action source binding and fail-closed navigation | Stage 4 |
 
 ## 9. Stage 0 Exit Checklist
 
@@ -215,7 +216,7 @@ Current user settings persist an `advanced_mode` Boolean. The target presentatio
 - [x] Provisional current-to-target component map exists.
 - [ ] Source-precedence decision is recorded in durable repository memory.
 - [ ] Requirements traceability matrix covers every normative contract area and experiment phase gate.
-- [x] ADR-001 through ADR-014 have accepted decisions.
+- [x] ADR-001 through ADR-015 have accepted decisions.
 - [ ] Representative existing database backup/restore is verified on the clean baseline.
 - [ ] Existing full automated and native smoke gates pass on the clean baseline.
 - [ ] No unresolved ownership ambiguity blocks stable contract implementation.

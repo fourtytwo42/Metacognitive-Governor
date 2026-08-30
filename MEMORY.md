@@ -2,6 +2,15 @@
 
 Durable project context lives here. Update this file whenever information should survive chat context compression or future agent handoff.
 
+### 2026-08-30 - Immutable governed-action source binding foundation
+
+- Context: Exact approval-source navigation could not be implemented honestly because canonical actions carried workflow/actor/operation identity but no conversation, invocation, command, approval, agent, or evidence bindings.
+- Decision: Add backward-compatible optional `ActionOrigin` refs to immutable action intent. Every present source carries a stable type, bounded locator, and exact content hash; malformed/duplicate/empty origins and idempotent replay substitution fail closed. Never guess a missing compatibility source.
+- Files: `crates/mcg-{contracts,storage}`; action-runner/Protected Root fixtures; Desktop client/UI/tests; browser E2E; `docs/NewPRD/decisions/0015-action-source-binding.md`; Stage 0/4, traceability, and status report.
+- Commands/tests: Contracts 12/12; storage 103/103; runner 9/9; Protected Root 10/10; runtime 108 pass plus two explicit Windows Sandbox ignores; Desktop focused and complete 123/123; serialized Playwright 30/30; TypeScript/build; workspace all-target check; strict contracts Clippy; docs/packaging/format/diff checks pass. One concurrent component run timed out two unrelated legacy tests under CPU contention; both passed alone and the subsequent standalone complete suite passed 123/123. Strict storage Clippy still stops in the documented pre-existing 62-finding backlog without a changed-path finding.
+- Result: Product checkpoint `cccdee0` persists and exposes source refs, preserves legacy action JSON, and disables unavailable conversation navigation rather than searching heuristically. This is a prerequisite, not completion, of exact approval-source navigation.
+- Follow-up: Populate `ActionOrigin` from the compatibility/runtime action producers, then add exact conversation/invocation/command/approval/evidence focus and tamper/process/native UAT.
+
 ### 2026-08-30 - Progressive governed-action Desktop inspection
 
 - Context: Root IPC and CLI exposed canonical governed actions, but the Desktop had no projection and Stage 4 could not satisfy the three-interface contract.

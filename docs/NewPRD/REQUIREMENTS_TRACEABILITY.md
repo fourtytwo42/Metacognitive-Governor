@@ -69,6 +69,7 @@ This matrix is updated as implementation lands. `Implemented / cumulative UAT pe
 | Reconciliation resolves or escalates ambiguity | 4 | Reconciler tests | Restart and confirm existing file | Root claims exact jobs, derives authority-bound inspection requests, confirms occurred/not-occurred, preserves changed owner content as still unknown, safely defers, recovers leases, escalates deadlines, and exposes bounded job/event evidence through IPC/CLI/Desktop / packaged process UAT pending |
 | Compensation is a new causal action | 4 | Ledger tests | Revert visible in history | Schema 55 binds one separately authorized compensation envelope to the exact committed original plan; the original becomes Compensated only atomically after the causal action commits, and both immutable histories remain / real reversible-write UAT pending |
 | Irreversible actions receive stronger authority treatment | 4 | Policy tests | Approval UAT | Irreversible authorization requires a separately hash-bound elevated-authority policy and exact reconciler/deadline / policy-engine threshold, explicit UI, and native approval UAT pending |
+| Action and approval sources are immutable and navigable | 4 | Source-binding/replay tests | Open exact originating records | Backward-compatible `ActionOrigin` binds conversation, invocation, command, approval, agent, and evidence locators plus hashes; malformed/duplicate origins and replay substitution fail; Advanced/Developer expose read-only bound sources and unavailable conversations fail closed / compatibility producers and exact invocation/command/approval focus pending |
 | Read-only operations cannot mutate state | 4 | Snapshot/security tests | Governed read attack | Bounded regular-file read/inspect runner path, Root-bound observational no-effect classification, normalized relative paths, and link/reparse rejection implemented / adversarial snapshots and native package attack pending |
 
 ## 6. Model Invocation, Context, and Data Egress
@@ -179,7 +180,7 @@ This matrix is updated as implementation lands. `Implemented / cumulative UAT pe
 
 | Evidence | Required frequency | Status |
 |---|---|---|
-| Unit/property/integration test receipt | Every implementation change | Contracts 12/12, storage 102/102, runtime 108 passed plus two explicit Windows Sandbox ignores, Protected Root 10/10, protected-root migration process 1/1, action runner 9/9, CLI 67 unit plus 10 integration, Desktop Rust 20/20, Desktop component 123/123, and whole-workspace all-target check pass locally; cumulative release-package receipt pending |
+| Unit/property/integration test receipt | Every implementation change | Contracts 12/12, storage 103/103, runtime 108 passed plus two explicit Windows Sandbox ignores, Protected Root 10/10, protected-root migration process 1/1, action runner 9/9, CLI 67 unit plus 10 integration, Desktop Rust 20/20, Desktop component 123/123, and whole-workspace all-target check pass locally; cumulative release-package receipt pending |
 | Crash and process-boundary receipt | Every affected durable boundary | Root open/startup recovery integration passes; forced-kill package matrix pending |
 | Security/adversarial receipt | Every affected trust/capability boundary | Planned |
 | Desktop deterministic E2E receipt | Every visible workflow change | Complete Desktop Vitest 123/123 and serialized Playwright 30/30 pass, including Simple/Advanced/Developer workflow and governed-action projection, revision/generation-fenced cancellation, and action-card accessibility |
@@ -188,4 +189,4 @@ This matrix is updated as implementation lands. `Implemented / cumulative UAT pe
 | Migration + backup/restore receipt | Every schema/ownership change | Schema 50→55 protected-root migration-process and focused schema-54 action-history migration tests pass / packaged backup/restore UAT pending |
 | Golden payload/hash compatibility receipt | Every codec/schema release | TaskContract v1 fixture/hash plus existing canonical-v1 fixtures pass / cross-version package replay pending |
 | Experiment artifact set | Every protected experiment | Planned |
-| Commit/remote parity and artifact manifest | Every verified major stage | Stage 3 through progressive governed-action Desktop inspection is pushed through `9b881dd`; cumulative release artifacts remain pending |
+| Commit/remote parity and artifact manifest | Every verified major stage | Stage 3 through immutable governed-action source binding is pushed through `cccdee0`; cumulative release artifacts remain pending |
