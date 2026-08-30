@@ -119,7 +119,7 @@ async fn old_profile_survives_interruption_retry_and_verified_backup_restore() {
              DROP TABLE task_contract_heads;
              DROP TABLE task_contract_versions;
              DROP TABLE root_ownership;
-             DELETE FROM mcg_schema WHERE version IN (51, 52, 53, 54);",
+             DELETE FROM mcg_schema WHERE version IN (51, 52, 53, 54, 55);",
         )
         .expect("create representative schema-50 fixture");
     let before = inspect_database_before_root(&database).expect("inspect schema-50 fixture");

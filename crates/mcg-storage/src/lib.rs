@@ -62,8 +62,8 @@ pub use backup_secrets::{
 };
 
 pub use actions::{
-    ActionAuthorizationReceipt, ReconciliationClaimReceipt, ReconciliationRecoveryReport,
-    ReconciliationResolutionReceipt,
+    ActionAuthorizationReceipt, ActionCommitReceipt, ReconciliationClaimReceipt,
+    ReconciliationRecoveryReport, ReconciliationResolutionReceipt,
 };
 pub use agents::{
     AgentRecoveryReport, AgentTurnCommit, AgentTurnDisposition, ConsumerEvaluationCheckpoint,
@@ -79,7 +79,7 @@ pub use shadow_workspaces::ShadowWorkspaceMutation;
 pub use workflows::{TaskContractHead, WorkflowRecoveryReport, task_contract_content_hash};
 
 type EventRow = (i64, String, i64, String, Option<String>, String, String);
-pub const STORAGE_SCHEMA_VERSION: i64 = 54;
+pub const STORAGE_SCHEMA_VERSION: i64 = 55;
 
 const MIGRATION_1: &str = r"
 CREATE TABLE IF NOT EXISTS events (
@@ -1918,6 +1918,14 @@ BEFORE DELETE ON action_events BEGIN
 END;
 ";
 
+const MIGRATION_55: &str = r"
+ALTER TABLE action_envelopes ADD COLUMN compensates_action_id TEXT
+    REFERENCES action_envelopes(action_id);
+CREATE UNIQUE INDEX action_envelopes_one_compensation
+    ON action_envelopes(compensates_action_id)
+    WHERE compensates_action_id IS NOT NULL;
+";
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RootOwnership {
     pub runtime_identity: RuntimeIdentity,
@@ -2188,6 +2196,7 @@ impl SqliteEventStore {
             (52_i64, MIGRATION_52),
             (53_i64, MIGRATION_53),
             (54_i64, MIGRATION_54),
+            (55_i64, MIGRATION_55),
         ] {
             let applied = self.connection.query_row(
                 "SELECT EXISTS(SELECT 1 FROM mcg_schema WHERE version = ?1)",
@@ -5970,7 +5979,7 @@ mod tests {
                      DROP TABLE task_contract_heads;
                      DROP TABLE task_contract_versions;
                      DROP TABLE root_ownership;
-                     DELETE FROM mcg_schema WHERE version IN (51, 52, 53, 54);",
+                     DELETE FROM mcg_schema WHERE version IN (51, 52, 53, 54, 55);",
                 )
                 .expect("downgrade fixture to schema 50");
         }

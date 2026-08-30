@@ -30,7 +30,7 @@ This matrix is updated as implementation lands. `Implemented / cumulative UAT pe
 | Root and Evaluator maintain separate canonical histories | 7 | Cross-store reference tests | Disclosed-summary inspection | Planned |
 | Large immutable artifacts use verified atomic content-addressed storage | 2, 7 | Temp/flush/hash/rename tests | Crash during artifact creation | Planned |
 | Derived indexes are rebuildable and non-authoritative | 8 | Delete/rebuild equivalence | Search before/after rebuild | Planned |
-| Existing MetaCog data migrates into a default runtime lineage | 2 | Migration fixtures | Packaged upgrade UAT | Schema 50→54, interruption retry, verified restore, data preservation, stable Root identity, and current migration-process tests pass / current-source packaged UAT pending |
+| Existing MetaCog data migrates into a default runtime lineage | 2 | Migration fixtures | Packaged upgrade UAT | Schema 50→55, interruption retry, verified restore, data preservation, stable Root identity, and current migration-process tests pass / current-source packaged UAT pending |
 | Unsafe downgrade fails clearly | 2 | Version downgrade tests | Old package against new data copy | Newer schema refusal implemented / old-package UAT pending |
 
 ## 3. IPC and Process Security
@@ -67,8 +67,8 @@ This matrix is updated as implementation lands. `Implemented / cumulative UAT pe
 | `NO_EFFECT`, `EFFECT_CONFIRMED`, and `OUTCOME_UNKNOWN` are explicit | 4 | Outcome classification tests | Native reconciliation display | Typed outcomes and legal execution transitions implemented / Root IPC/CLI/Desktop projection pending |
 | Consequential unknown effects are not blindly retried | 4 | Crash/property tests | Effect succeeds, receipt lost | Dispatch is legal only from Authorized; unknown/reconciling states reject dispatch; late reconciler generations are fenced; restart requeues reconciliation only / actual exactly-once filesystem E2E pending |
 | Reconciliation resolves or escalates ambiguity | 4 | Reconciler tests | Restart and confirm existing file | Due discovery, generation-fenced claim, confirmed occurred/not-occurred, safe defer, real-store reopen recovery, deadline escalation, immutable receipts/events, and cancellation settlement implemented / filesystem reconciler process and native presentation pending |
-| Compensation is a new causal action | 4 | Ledger tests | Revert visible in history | Planned |
-| Irreversible actions receive stronger authority treatment | 4 | Policy tests | Approval UAT | Planned |
+| Compensation is a new causal action | 4 | Ledger tests | Revert visible in history | Schema 55 binds one separately authorized compensation envelope to the exact committed original plan; the original becomes Compensated only atomically after the causal action commits, and both immutable histories remain / real reversible-write UAT pending |
+| Irreversible actions receive stronger authority treatment | 4 | Policy tests | Approval UAT | Irreversible authorization requires a separately hash-bound elevated-authority policy and exact reconciler/deadline / policy-engine threshold, explicit UI, and native approval UAT pending |
 | Read-only operations cannot mutate state | 4 | Snapshot/security tests | Governed read attack | Planned |
 
 ## 6. Model Invocation, Context, and Data Egress
@@ -179,13 +179,13 @@ This matrix is updated as implementation lands. `Implemented / cumulative UAT pe
 
 | Evidence | Required frequency | Status |
 |---|---|---|
-| Unit/property/integration test receipt | Every implementation change | Contracts 12/12, storage 97/97, runtime 108 passed plus two explicit Windows Sandbox ignores, Protected Root 6/6, protected-root migration process 1/1, and affected all-target checks pass locally; cumulative workspace/package receipt pending |
+| Unit/property/integration test receipt | Every implementation change | Contracts 12/12, storage 100/100, runtime 108 passed plus two explicit Windows Sandbox ignores, Protected Root 6/6, protected-root migration process 1/1, and affected all-target checks pass locally; cumulative workspace/package receipt pending |
 | Crash and process-boundary receipt | Every affected durable boundary | Root open/startup recovery integration passes; forced-kill package matrix pending |
 | Security/adversarial receipt | Every affected trust/capability boundary | Planned |
 | Desktop deterministic E2E receipt | Every visible workflow change | Complete Desktop Vitest 122/122 and Playwright 29/29 pass, including Simple/Advanced/Developer canonical projection and revision/generation-fenced cancellation |
 | Native Simple/Advanced/Developer UAT | Every meaningful interface stage | Windows portable and Linux AppImage Stage 2 slices pass; current-source Windows installer and macOS remain open |
 | Windows/macOS/Linux package receipt | Every process/package identity change and final candidate | Exact `cea1e07` Linux clean manifest/scan and AppImage native UAT pass; Debian install/remove plus current-source Windows/macOS remain open |
-| Migration + backup/restore receipt | Every schema/ownership change | Schema 50→54 protected-root migration-process test passes / packaged backup/restore UAT pending |
+| Migration + backup/restore receipt | Every schema/ownership change | Schema 50→55 protected-root migration-process and focused schema-54 action-history migration tests pass / packaged backup/restore UAT pending |
 | Golden payload/hash compatibility receipt | Every codec/schema release | TaskContract v1 fixture/hash plus existing canonical-v1 fixtures pass / cross-version package replay pending |
 | Experiment artifact set | Every protected experiment | Planned |
-| Commit/remote parity and artifact manifest | Every verified major stage | Stage 3 kernel, TaskContract head CAS, Root IPC/CLI, Desktop projection, objective wait recovery, and schema-54 action reconciliation are pushed through `f7ef0ee`; cumulative release artifacts remain pending |
+| Commit/remote parity and artifact manifest | Every verified major stage | Stage 3 through schema-54 action reconciliation is pushed through `b353896`; schema-55 validation/commit/compensation is locally verified pending checkpoint, and cumulative release artifacts remain pending |

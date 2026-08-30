@@ -1,9 +1,10 @@
 use chrono::{DateTime, Utc};
 use mcg_contracts::{
     ActionEnvelope, ActionEvent, ActionExecution, ActionExecutionId, ActionExecutionState,
-    ActionReceipt, CorrelationId, EffectClass, EffectOutcome, EventId, ReconciliationJob,
-    ReconciliationJobId, ReconciliationJobState, ReconciliationObservation, RuntimeActorId,
-    StableTypeId, VersionedPayload, WorkflowAttempt, WorkflowState, decode_canonical_cbor_v1,
+    ActionReceipt, ActionValidation, CorrelationId, EffectClass, EffectOutcome, EventId,
+    ReconciliationJob, ReconciliationJobId, ReconciliationJobState, ReconciliationObservation,
+    RuntimeActorId, StableTypeId, VersionedPayload, WorkflowAttempt, WorkflowState,
+    decode_canonical_cbor_v1,
 };
 use rusqlite::{OptionalExtension, Transaction, params};
 
@@ -14,6 +15,9 @@ const ACTION_DISPATCHED_TYPE_ID: &str = "mcg.action_dispatched.v1";
 const ACTION_OBSERVED_TYPE_ID: &str = "mcg.action_observed.v1";
 const ACTION_CLASSIFIED_TYPE_ID: &str = "mcg.action_classified.v1";
 const ACTION_CANCEL_FENCED_TYPE_ID: &str = "mcg.action_cancel_fenced.v1";
+const ACTION_VALIDATED_TYPE_ID: &str = "mcg.action_validated.v1";
+const ACTION_COMMITTED_TYPE_ID: &str = "mcg.action_committed.v1";
+const ACTION_COMPENSATED_TYPE_ID: &str = "mcg.action_compensated.v1";
 const RECONCILIATION_CLAIMED_TYPE_ID: &str = "mcg.reconciliation_claimed.v1";
 const RECONCILIATION_RESOLVED_TYPE_ID: &str = "mcg.reconciliation_resolved.v1";
 const RECONCILIATION_DEFERRED_TYPE_ID: &str = "mcg.reconciliation_deferred.v1";
@@ -35,6 +39,13 @@ pub struct ActionAuthorizationReceipt {
     pub envelope: ActionEnvelope,
     pub execution: ActionExecution,
     pub event: ActionEvent,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActionCommitReceipt {
+    pub execution: ActionExecution,
+    pub event: ActionEvent,
+    pub compensated_execution: Option<ActionExecution>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -134,6 +145,7 @@ impl SqliteEventStore {
                     .into(),
             ));
         }
+        validate_compensation_authorization(&transaction, envelope)?;
 
         insert_action_envelope(&transaction, envelope)?;
         insert_action_execution(&transaction, execution)?;
@@ -481,6 +493,245 @@ impl SqliteEventStore {
         insert_action_event(&transaction, &event)?;
         transaction.commit()?;
         Ok((execution, job))
+    }
+
+    /// Persists exact post-effect validation evidence before authoritative commit.
+    ///
+    /// # Errors
+    /// Returns a conflict for stale state or substituted evidence, and an invalid-data error for
+    /// malformed validation postconditions.
+    #[allow(clippy::too_many_arguments)]
+    pub fn validate_action_effect(
+        &mut self,
+        execution_id: ActionExecutionId,
+        expected_revision: u64,
+        expected_generation: u64,
+        validation: &ActionValidation,
+        correlation_id: CorrelationId,
+        idempotency_key: &str,
+        now: DateTime<Utc>,
+    ) -> Result<ActionExecution, StorageError> {
+        if idempotency_key.trim().is_empty() {
+            return Err(StorageError::InvalidData(
+                "action validation idempotency key cannot be empty".into(),
+            ));
+        }
+        let transaction = self.connection.transaction()?;
+        let mut execution = load_action_execution(&transaction, execution_id)?
+            .ok_or_else(|| StorageError::Conflict("action execution was not found".into()))?;
+        if let Some(event) =
+            load_action_event_by_idempotency(&transaction, execution.action_id, idempotency_key)?
+        {
+            let original_execution = action_event_execution(&event)?;
+            let original_validation = action_event_validation(&event)?;
+            if event.type_id.as_str() != ACTION_VALIDATED_TYPE_ID
+                || original_validation != *validation
+            {
+                return Err(StorageError::Conflict(
+                    "action validation idempotency key was replayed with different evidence".into(),
+                ));
+            }
+            transaction.commit()?;
+            return Ok(original_execution);
+        }
+        ensure_action_expected(&execution, expected_revision, expected_generation)?;
+        if execution.state != ActionExecutionState::EffectConfirmed
+            || !matches!(
+                execution.outcome,
+                Some(EffectOutcome::EffectConfirmed { .. })
+            )
+            || validation.action_id != execution.action_id
+            || validation.execution_id != execution.id
+            || validation.validated_at != now
+        {
+            return Err(StorageError::Conflict(
+                "validation does not bind the current confirmed action effect".into(),
+            ));
+        }
+        for postcondition in &validation.postconditions {
+            decode_canonical_cbor_v1(&postcondition.bytes)
+                .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        }
+        execution.state = ActionExecutionState::Validated;
+        execution.revision = increment(execution.revision, "action revision")?;
+        execution.lease_generation = increment(execution.lease_generation, "action generation")?;
+        execution.executor = None;
+        execution.updated_at = now;
+        update_action_execution_cas(
+            &transaction,
+            &execution,
+            expected_revision,
+            expected_generation,
+        )?;
+        let (sequence, cause) = next_action_event_position(&transaction, execution.action_id)?;
+        let event = action_event(
+            execution.action_id,
+            Some(execution.id),
+            sequence,
+            correlation_id,
+            cause,
+            idempotency_key,
+            ACTION_VALIDATED_TYPE_ID,
+            now,
+            &serde_json::json!({"validation": validation, "execution": execution}),
+        )?;
+        insert_action_event(&transaction, &event)?;
+        transaction.commit()?;
+        Ok(execution)
+    }
+
+    /// Commits a validated effect. A compensation action atomically marks its original action
+    /// compensated only after the new causal action itself commits.
+    ///
+    /// # Errors
+    /// Returns a conflict for stale state, a substituted validation event, or an original action
+    /// that is no longer committed.
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    pub fn commit_action_effect(
+        &mut self,
+        execution_id: ActionExecutionId,
+        expected_revision: u64,
+        expected_generation: u64,
+        expected_validation_event: EventId,
+        correlation_id: CorrelationId,
+        idempotency_key: &str,
+        now: DateTime<Utc>,
+    ) -> Result<ActionCommitReceipt, StorageError> {
+        if idempotency_key.trim().is_empty() {
+            return Err(StorageError::InvalidData(
+                "action commit idempotency key cannot be empty".into(),
+            ));
+        }
+        let transaction = self.connection.transaction()?;
+        let mut execution = load_action_execution(&transaction, execution_id)?
+            .ok_or_else(|| StorageError::Conflict("action execution was not found".into()))?;
+        if let Some(event) =
+            load_action_event_by_idempotency(&transaction, execution.action_id, idempotency_key)?
+        {
+            let payload = action_event_payload_value(&event)?;
+            let original_execution = action_event_execution(&event)?;
+            let validation_event: EventId =
+                serde_json::from_value(payload.get("validation_event").cloned().ok_or_else(
+                    || StorageError::InvalidData("commit has no validation".into()),
+                )?)?;
+            if event.type_id.as_str() != ACTION_COMMITTED_TYPE_ID
+                || validation_event != expected_validation_event
+            {
+                return Err(StorageError::Conflict(
+                    "action commit idempotency key was replayed for another validation".into(),
+                ));
+            }
+            let compensated_execution = payload
+                .get("compensated_execution")
+                .filter(|value| !value.is_null())
+                .cloned()
+                .map(serde_json::from_value)
+                .transpose()?;
+            transaction.commit()?;
+            return Ok(ActionCommitReceipt {
+                execution: original_execution,
+                event,
+                compensated_execution,
+            });
+        }
+        ensure_action_expected(&execution, expected_revision, expected_generation)?;
+        if execution.state != ActionExecutionState::Validated {
+            return Err(StorageError::Conflict(
+                "only a validated action effect can be committed".into(),
+            ));
+        }
+        let validation_event = load_action_event(&transaction, expected_validation_event)?
+            .ok_or_else(|| StorageError::Conflict("validation event was not found".into()))?;
+        if validation_event.action_id != execution.action_id
+            || validation_event.execution_id != Some(execution.id)
+            || validation_event.type_id.as_str() != ACTION_VALIDATED_TYPE_ID
+        {
+            return Err(StorageError::Conflict(
+                "commit does not bind the exact validation event".into(),
+            ));
+        }
+        let envelope = load_action_envelope(&transaction, execution.action_id)?
+            .ok_or_else(|| StorageError::InvalidData("action execution has no envelope".into()))?;
+        execution.state = ActionExecutionState::Committed;
+        execution.revision = increment(execution.revision, "action revision")?;
+        execution.lease_generation = increment(execution.lease_generation, "action generation")?;
+        execution.executor = None;
+        execution.updated_at = now;
+        update_action_execution_cas(
+            &transaction,
+            &execution,
+            expected_revision,
+            expected_generation,
+        )?;
+
+        let compensated_execution = if let Some(original_action_id) = envelope.compensates_action {
+            let mut original = load_initial_execution(&transaction, original_action_id)?
+                .ok_or_else(|| StorageError::InvalidData("compensated action is missing".into()))?;
+            if original.state != ActionExecutionState::Committed {
+                return Err(StorageError::Conflict(
+                    "original action is no longer eligible for compensation".into(),
+                ));
+            }
+            let original_revision = original.revision;
+            let original_generation = original.lease_generation;
+            original.state = ActionExecutionState::Compensated;
+            original.revision = increment(original.revision, "action revision")?;
+            original.lease_generation = increment(original.lease_generation, "action generation")?;
+            original.executor = None;
+            original.updated_at = now;
+            update_action_execution_cas(
+                &transaction,
+                &original,
+                original_revision,
+                original_generation,
+            )?;
+            Some(original)
+        } else {
+            None
+        };
+
+        let (sequence, _cause) = next_action_event_position(&transaction, execution.action_id)?;
+        let event = action_event(
+            execution.action_id,
+            Some(execution.id),
+            sequence,
+            correlation_id,
+            Some(expected_validation_event),
+            idempotency_key,
+            ACTION_COMMITTED_TYPE_ID,
+            now,
+            &serde_json::json!({
+                "validation_event": expected_validation_event,
+                "execution": execution,
+                "compensated_execution": compensated_execution,
+            }),
+        )?;
+        insert_action_event(&transaction, &event)?;
+        if let Some(original) = &compensated_execution {
+            let (sequence, _) = next_action_event_position(&transaction, original.action_id)?;
+            let compensation_event = action_event(
+                original.action_id,
+                Some(original.id),
+                sequence,
+                correlation_id,
+                Some(event.id),
+                &format!("compensated-by:{}", execution.action_id),
+                ACTION_COMPENSATED_TYPE_ID,
+                now,
+                &serde_json::json!({
+                    "compensation_action": execution.action_id,
+                    "compensation_event": event.id,
+                    "execution": original,
+                }),
+            )?;
+            insert_action_event(&transaction, &compensation_event)?;
+        }
+        transaction.commit()?;
+        Ok(ActionCommitReceipt {
+            execution,
+            event,
+            compensated_execution,
+        })
     }
 
     /// Loads one durable reconciliation job.
@@ -1251,9 +1502,26 @@ fn validate_action_authorization(
         ));
     }
     validate_policy_binding(&envelope.authority)?;
+    if envelope.effect_class == EffectClass::Irreversible && envelope.elevated_authority.is_none() {
+        return Err(StorageError::InvalidData(
+            "an irreversible action requires a separate elevated authority binding".into(),
+        ));
+    }
+    if let Some(binding) = &envelope.elevated_authority {
+        validate_policy_binding(binding)?;
+    }
     validate_policy_binding(&envelope.budget_reservation)?;
     for precondition in &envelope.preconditions {
         decode_canonical_cbor_v1(&precondition.bytes)
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+    }
+    if envelope.compensates_action == Some(envelope.id) {
+        return Err(StorageError::InvalidData(
+            "an action cannot compensate itself".into(),
+        ));
+    }
+    if let Some(compensation) = &envelope.compensation {
+        decode_canonical_cbor_v1(&compensation.bytes)
             .map_err(|error| StorageError::InvalidData(error.to_string()))?;
     }
     if envelope.effect_class != EffectClass::Observational && envelope.reconciler.is_none() {
@@ -1294,6 +1562,32 @@ fn validate_policy_binding(binding: &mcg_contracts::PolicyBinding) -> Result<(),
     Ok(())
 }
 
+fn validate_compensation_authorization(
+    transaction: &Transaction<'_>,
+    envelope: &ActionEnvelope,
+) -> Result<(), StorageError> {
+    let Some(original_action_id) = envelope.compensates_action else {
+        return Ok(());
+    };
+    let original_envelope = load_action_envelope(transaction, original_action_id)?
+        .ok_or_else(|| StorageError::Conflict("compensated action was not found".into()))?;
+    let original_execution = load_initial_execution(transaction, original_action_id)?
+        .ok_or_else(|| StorageError::InvalidData("compensated action has no execution".into()))?;
+    if original_envelope.workflow_id != envelope.workflow_id
+        || original_envelope.attempt_id != envelope.attempt_id
+        || original_envelope.task_contract != envelope.task_contract
+        || original_envelope.compensation.as_ref() != Some(&envelope.operation)
+        || original_execution.state != ActionExecutionState::Committed
+        || envelope.effect_class == EffectClass::Observational
+    {
+        return Err(StorageError::Conflict(
+            "compensation must be a new effectful action exactly bound to the committed original plan"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
 fn load_workflow_attempt(
     transaction: &Transaction<'_>,
     attempt_id: mcg_contracts::AttemptId,
@@ -1317,8 +1611,8 @@ fn insert_action_envelope(
         "INSERT INTO action_envelopes(
             action_id, workflow_id, workflow_attempt_id, task_contract_id,
             task_contract_version, operation_hash_json, effect_class, idempotency_key,
-            envelope_json, created_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            envelope_json, created_at, compensates_action_id
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         params![
             envelope.id.to_string(),
             envelope.workflow_id.to_string(),
@@ -1330,6 +1624,7 @@ fn insert_action_envelope(
             envelope.idempotency_key,
             serde_json::to_string(envelope)?,
             envelope.created_at.to_rfc3339(),
+            envelope.compensates_action.map(|id| id.to_string()),
         ],
     )?;
     Ok(())
@@ -1713,6 +2008,21 @@ fn load_action_event_by_idempotency(
         .transpose()
 }
 
+fn load_action_event(
+    transaction: &Transaction<'_>,
+    event_id: EventId,
+) -> Result<Option<ActionEvent>, StorageError> {
+    transaction
+        .query_row(
+            "SELECT event_json FROM action_events WHERE event_id = ?1",
+            [event_id.to_string()],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .map(|json| serde_json::from_str(&json).map_err(StorageError::from))
+        .transpose()
+}
+
 fn action_event_execution(event: &ActionEvent) -> Result<ActionExecution, StorageError> {
     let value = action_event_payload_value(event)?;
     serde_json::from_value(value.get("execution").cloned().ok_or_else(|| {
@@ -1740,6 +2050,14 @@ fn action_event_reconciliation_observation(
     let value = action_event_payload_value(event)?;
     serde_json::from_value(value.get("observation").cloned().ok_or_else(|| {
         StorageError::InvalidData("reconciliation event has no observation".into())
+    })?)
+    .map_err(StorageError::from)
+}
+
+fn action_event_validation(event: &ActionEvent) -> Result<ActionValidation, StorageError> {
+    let value = action_event_payload_value(event)?;
+    serde_json::from_value(value.get("validation").cloned().ok_or_else(|| {
+        StorageError::InvalidData("action event has no validation evidence".into())
     })?)
     .map_err(StorageError::from)
 }
@@ -1940,6 +2258,8 @@ mod tests {
             task_contract: workflow.task_contract.clone(),
             actor,
             authority: policy("exact-worktree-write"),
+            elevated_authority: (effect_class == EffectClass::Irreversible)
+                .then(|| policy("explicit-irreversible-approval")),
             expected_versions: Vec::new(),
             operation_hash: operation.content_hash("TestActionOperation").unwrap(),
             operation,
@@ -1951,6 +2271,7 @@ mod tests {
                 "test.compensation_plan.v1",
                 serde_json::json!({"kind": "restore-baseline"}),
             )),
+            compensates_action: None,
             reconciler: Some(payload(
                 "test.reconciler.v1",
                 serde_json::json!({"kind": "exact-file-hash"}),
@@ -1971,6 +2292,111 @@ mod tests {
             updated_at: now(),
         };
         (envelope, execution)
+    }
+
+    fn authorize_and_confirm_action(
+        store: &mut SqliteEventStore,
+        workflow: &WorkflowAttempt,
+        envelope: &ActionEnvelope,
+        execution: &ActionExecution,
+    ) -> ActionExecution {
+        store
+            .authorize_action(
+                envelope,
+                execution,
+                workflow.revision,
+                workflow.lease_generation,
+                CorrelationId::new(),
+                now(),
+            )
+            .unwrap();
+        let dispatched = store
+            .dispatch_action(
+                execution.id,
+                execution.revision,
+                execution.lease_generation,
+                RuntimeActorId::new(),
+                CorrelationId::new(),
+                &format!("dispatch:{}", envelope.id),
+                now(),
+            )
+            .unwrap();
+        let receipt = ActionReceipt {
+            id: ActionReceiptId::new(),
+            action_id: envelope.id,
+            execution_id: execution.id,
+            observation: payload(
+                "test.action_observation.v1",
+                serde_json::json!({"action_id": envelope.id, "status": "effect-observed"}),
+            ),
+            observed_at: now(),
+        };
+        let observed = store
+            .observe_action(
+                &receipt,
+                dispatched.revision,
+                dispatched.lease_generation,
+                CorrelationId::new(),
+                &format!("observe:{}", envelope.id),
+                now(),
+            )
+            .unwrap();
+        store
+            .classify_action_outcome(
+                execution.id,
+                observed.revision,
+                observed.lease_generation,
+                EffectOutcome::EffectConfirmed {
+                    evidence: Vec::new(),
+                },
+                None,
+                CorrelationId::new(),
+                &format!("classify:{}", envelope.id),
+                now(),
+            )
+            .unwrap()
+            .0
+    }
+
+    fn validate_and_commit_action(
+        store: &mut SqliteEventStore,
+        envelope: &ActionEnvelope,
+        confirmed: &ActionExecution,
+    ) -> ActionCommitReceipt {
+        let validation = ActionValidation {
+            action_id: envelope.id,
+            execution_id: confirmed.id,
+            validator: RuntimeActorId::new(),
+            evidence: Vec::new(),
+            postconditions: vec![payload(
+                "test.action_postcondition.v1",
+                serde_json::json!({"action_id": envelope.id, "valid": true}),
+            )],
+            validated_at: now(),
+        };
+        let validated = store
+            .validate_action_effect(
+                confirmed.id,
+                confirmed.revision,
+                confirmed.lease_generation,
+                &validation,
+                CorrelationId::new(),
+                &format!("validate:{}", envelope.id),
+                now(),
+            )
+            .unwrap();
+        let validation_event = store.action_events(envelope.id).unwrap().last().unwrap().id;
+        store
+            .commit_action_effect(
+                confirmed.id,
+                validated.revision,
+                validated.lease_generation,
+                validation_event,
+                CorrelationId::new(),
+                &format!("commit:{}", envelope.id),
+                now(),
+            )
+            .unwrap()
     }
 
     #[test]
@@ -2072,6 +2498,214 @@ mod tests {
         assert_eq!(classified.lease_generation, dispatched.lease_generation + 1);
         assert!(job.is_none());
         assert_eq!(store.action_events(envelope.id).unwrap().len(), 4);
+    }
+
+    #[test]
+    fn confirmed_effect_requires_exact_validation_before_idempotent_commit() {
+        let mut store = SqliteEventStore::open_in_memory().unwrap();
+        let (_contract, workflow, actor) = running_workflow(&mut store);
+        let (envelope, execution) = action_fixture(&workflow, actor, EffectClass::Reversible);
+        let confirmed = authorize_and_confirm_action(&mut store, &workflow, &envelope, &execution);
+        assert!(matches!(
+            store.commit_action_effect(
+                confirmed.id,
+                confirmed.revision,
+                confirmed.lease_generation,
+                EventId::new(),
+                CorrelationId::new(),
+                "commit-before-validation",
+                now(),
+            ),
+            Err(StorageError::Conflict(_))
+        ));
+        let validation = ActionValidation {
+            action_id: envelope.id,
+            execution_id: execution.id,
+            validator: RuntimeActorId::new(),
+            evidence: Vec::new(),
+            postconditions: vec![payload(
+                "test.action_postcondition.v1",
+                serde_json::json!({"sha256": "a".repeat(64)}),
+            )],
+            validated_at: now(),
+        };
+        let validated = store
+            .validate_action_effect(
+                execution.id,
+                confirmed.revision,
+                confirmed.lease_generation,
+                &validation,
+                CorrelationId::new(),
+                "validate-confirmed-effect",
+                now(),
+            )
+            .unwrap();
+        assert_eq!(validated.state, ActionExecutionState::Validated);
+        assert_eq!(
+            store
+                .validate_action_effect(
+                    execution.id,
+                    confirmed.revision,
+                    confirmed.lease_generation,
+                    &validation,
+                    CorrelationId::new(),
+                    "validate-confirmed-effect",
+                    now(),
+                )
+                .unwrap(),
+            validated
+        );
+        let mut substituted = validation.clone();
+        substituted.validator = RuntimeActorId::new();
+        assert!(matches!(
+            store.validate_action_effect(
+                execution.id,
+                confirmed.revision,
+                confirmed.lease_generation,
+                &substituted,
+                CorrelationId::new(),
+                "validate-confirmed-effect",
+                now(),
+            ),
+            Err(StorageError::Conflict(_))
+        ));
+        let validation_event = store.action_events(envelope.id).unwrap().last().unwrap().id;
+        let committed = store
+            .commit_action_effect(
+                execution.id,
+                validated.revision,
+                validated.lease_generation,
+                validation_event,
+                CorrelationId::new(),
+                "commit-confirmed-effect",
+                now(),
+            )
+            .unwrap();
+        assert_eq!(committed.execution.state, ActionExecutionState::Committed);
+        assert!(committed.compensated_execution.is_none());
+        assert_eq!(committed.event.causation_id, Some(validation_event));
+        assert_eq!(
+            store
+                .commit_action_effect(
+                    execution.id,
+                    validated.revision,
+                    validated.lease_generation,
+                    validation_event,
+                    CorrelationId::new(),
+                    "commit-confirmed-effect",
+                    now(),
+                )
+                .unwrap(),
+            committed
+        );
+        assert!(matches!(
+            store.commit_action_effect(
+                execution.id,
+                validated.revision,
+                validated.lease_generation,
+                EventId::new(),
+                CorrelationId::new(),
+                "commit-confirmed-effect",
+                now(),
+            ),
+            Err(StorageError::Conflict(_))
+        ));
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn compensation_is_a_separate_authorized_action_with_causal_history() {
+        let mut store = SqliteEventStore::open_in_memory().unwrap();
+        let (_contract, workflow, actor) = running_workflow(&mut store);
+        let (original_envelope, original_execution) =
+            action_fixture(&workflow, actor, EffectClass::Reversible);
+        let original_confirmed = authorize_and_confirm_action(
+            &mut store,
+            &workflow,
+            &original_envelope,
+            &original_execution,
+        );
+        let original_commit =
+            validate_and_commit_action(&mut store, &original_envelope, &original_confirmed);
+        assert_eq!(
+            original_commit.execution.state,
+            ActionExecutionState::Committed
+        );
+
+        let (mut compensation_envelope, compensation_execution) =
+            action_fixture(&workflow, actor, EffectClass::Reversible);
+        compensation_envelope.idempotency_key = "authorize-compensation".into();
+        compensation_envelope.operation = original_envelope.compensation.clone().unwrap();
+        compensation_envelope.operation_hash = compensation_envelope
+            .operation
+            .content_hash("TestActionOperation")
+            .unwrap();
+        compensation_envelope.compensates_action = Some(original_envelope.id);
+        let compensation_confirmed = authorize_and_confirm_action(
+            &mut store,
+            &workflow,
+            &compensation_envelope,
+            &compensation_execution,
+        );
+        let compensation_commit =
+            validate_and_commit_action(&mut store, &compensation_envelope, &compensation_confirmed);
+        assert_eq!(
+            compensation_commit.execution.state,
+            ActionExecutionState::Committed
+        );
+        let compensated = compensation_commit.compensated_execution.unwrap();
+        assert_eq!(compensated.action_id, original_envelope.id);
+        assert_eq!(compensated.state, ActionExecutionState::Compensated);
+        assert_eq!(
+            store
+                .action_execution(original_execution.id)
+                .unwrap()
+                .unwrap(),
+            compensated
+        );
+        let original_events = store.action_events(original_envelope.id).unwrap();
+        let compensated_event = original_events.last().unwrap();
+        assert_eq!(
+            compensated_event.type_id.as_str(),
+            ACTION_COMPENSATED_TYPE_ID
+        );
+        assert_eq!(
+            compensated_event.causation_id,
+            Some(compensation_commit.event.id)
+        );
+        assert!(
+            original_events
+                .iter()
+                .any(|event| event.type_id.as_str() == ACTION_COMMITTED_TYPE_ID)
+        );
+        assert!(
+            store
+                .action_events(compensation_envelope.id)
+                .unwrap()
+                .iter()
+                .any(|event| event.type_id.as_str() == ACTION_COMMITTED_TYPE_ID)
+        );
+
+        let (mut duplicate_compensation, duplicate_execution) =
+            action_fixture(&workflow, actor, EffectClass::Reversible);
+        duplicate_compensation.idempotency_key = "duplicate-compensation".into();
+        duplicate_compensation.operation = original_envelope.compensation.clone().unwrap();
+        duplicate_compensation.operation_hash = duplicate_compensation
+            .operation
+            .content_hash("TestActionOperation")
+            .unwrap();
+        duplicate_compensation.compensates_action = Some(original_envelope.id);
+        assert!(matches!(
+            store.authorize_action(
+                &duplicate_compensation,
+                &duplicate_execution,
+                workflow.revision,
+                workflow.lease_generation,
+                CorrelationId::new(),
+                now(),
+            ),
+            Err(StorageError::Conflict(_))
+        ));
     }
 
     #[test]
@@ -2746,11 +3380,80 @@ mod tests {
     }
 
     #[test]
+    fn schema_fifty_four_action_history_migrates_to_causal_compensation_schema() {
+        let temporary = tempfile::tempdir().unwrap();
+        let database = temporary.path().join("schema-54-actions.db");
+        let action_id = {
+            let mut store = SqliteEventStore::open(&database).unwrap();
+            let (_contract, workflow, actor) = running_workflow(&mut store);
+            let (envelope, execution) = action_fixture(&workflow, actor, EffectClass::Reversible);
+            store
+                .authorize_action(
+                    &envelope,
+                    &execution,
+                    workflow.revision,
+                    workflow.lease_generation,
+                    CorrelationId::new(),
+                    now(),
+                )
+                .unwrap();
+            envelope.id
+        };
+        rusqlite::Connection::open(&database)
+            .unwrap()
+            .execute_batch(
+                "DROP INDEX action_envelopes_one_compensation;
+                 ALTER TABLE action_envelopes DROP COLUMN compensates_action_id;
+                 DELETE FROM mcg_schema WHERE version = 55;",
+            )
+            .unwrap();
+
+        let store = SqliteEventStore::open(&database).unwrap();
+        assert_eq!(
+            store
+                .connection
+                .query_row("SELECT MAX(version) FROM mcg_schema", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            55
+        );
+        let envelope = store.action_envelope(action_id).unwrap().unwrap();
+        assert!(envelope.compensates_action.is_none());
+        assert_eq!(
+            store
+                .connection
+                .query_row(
+                    "SELECT COUNT(*) FROM pragma_table_info('action_envelopes')
+                     WHERE name = 'compensates_action_id'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
     fn authorization_rejects_substitution_stale_ownership_and_missing_reconciler() {
         let mut store = SqliteEventStore::open_in_memory().unwrap();
         let (_contract, workflow, actor) = running_workflow(&mut store);
         let (mut envelope, execution) = action_fixture(&workflow, actor, EffectClass::Irreversible);
         envelope.reconciler = None;
+        assert!(matches!(
+            store.authorize_action(
+                &envelope,
+                &execution,
+                workflow.revision,
+                workflow.lease_generation,
+                CorrelationId::new(),
+                now(),
+            ),
+            Err(StorageError::InvalidData(_))
+        ));
+
+        let (mut envelope, execution) = action_fixture(&workflow, actor, EffectClass::Irreversible);
+        envelope.elevated_authority = None;
         assert!(matches!(
             store.authorize_action(
                 &envelope,

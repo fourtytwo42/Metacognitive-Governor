@@ -648,6 +648,8 @@ pub struct ActionEnvelope {
     pub task_contract: VersionedRef<TaskContractId>,
     pub actor: RuntimeActorId,
     pub authority: PolicyBinding,
+    #[serde(default)]
+    pub elevated_authority: Option<PolicyBinding>,
     pub expected_versions: Vec<ExpectedVersion>,
     pub operation: VersionedPayload,
     pub operation_hash: ContentHash,
@@ -656,6 +658,8 @@ pub struct ActionEnvelope {
     pub budget_reservation: PolicyBinding,
     pub idempotency_key: String,
     pub compensation: Option<VersionedPayload>,
+    #[serde(default)]
+    pub compensates_action: Option<ActionId>,
     pub reconciler: Option<VersionedPayload>,
     pub reconciliation_deadline: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
@@ -767,6 +771,21 @@ pub struct ActionReceipt {
 impl ActionReceipt {
     pub const SCHEMA_VERSION: u32 = 1;
     pub const TYPE_ID: &'static str = "mcg.action_receipt.v1";
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActionValidation {
+    pub action_id: ActionId,
+    pub execution_id: ActionExecutionId,
+    pub validator: RuntimeActorId,
+    pub evidence: Vec<ArtifactRef>,
+    pub postconditions: Vec<VersionedPayload>,
+    pub validated_at: DateTime<Utc>,
+}
+
+impl ActionValidation {
+    pub const SCHEMA_VERSION: u32 = 1;
+    pub const TYPE_ID: &'static str = "mcg.action_validation.v1";
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1214,6 +1233,7 @@ mod tests {
         assert_eq!(ActionEnvelope::TYPE_ID, "mcg.action_envelope.v1");
         assert_eq!(ActionExecution::TYPE_ID, "mcg.action_execution.v1");
         assert_eq!(ActionReceipt::TYPE_ID, "mcg.action_receipt.v1");
+        assert_eq!(ActionValidation::TYPE_ID, "mcg.action_validation.v1");
         assert_eq!(ReconciliationJob::TYPE_ID, "mcg.reconciliation_job.v1");
         assert_eq!(
             ReconciliationObservation::TYPE_ID,
