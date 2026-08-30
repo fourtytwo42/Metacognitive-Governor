@@ -1,6 +1,6 @@
 # Cognitive Runtime Requirements Traceability
 
-**Status:** Active implementation matrix; Stage 1 complete and Stage 2 Windows implementation evidence in progress
+**Status:** Active implementation matrix; Stage 1 complete and Stage 2 cross-platform package qualification in progress
 **Purpose:** Map normative requirements to implementation stages, automated evidence, E2E/UAT evidence, and release artifacts
 
 This matrix is updated as implementation lands. `Implemented / cumulative UAT pending` means local implementation and its stage-level automated evidence pass, while final native/cross-platform evidence remains open.
@@ -26,18 +26,18 @@ This matrix is updated as implementation lands. `Implemented / cumulative UAT pe
 | Versioned canonical encoding and normalization | 1 | Codec/property tests | Old fixture replay | Implemented / cumulative UAT pending |
 | Domain-separated canonical hashes | 1 | Golden hash tests | Upgrade verification | Implemented / cumulative UAT pending |
 | Historical payload bytes remain interpretable | 1 onward | Decoder/upcaster corpus | Multi-version migration | Stage 1 chain implemented / corpus grows by stage |
-| Old canonical history is not rewritten during ordinary migration | 1, 2 | Byte-for-byte migration assertions | Backup/upgrade/restore | Verified pre-migration backup implemented / full fixture comparison pending |
+| Old canonical history is not rewritten during ordinary migration | 1, 2 | Byte-for-byte migration assertions | Backup/upgrade/restore | Verified interruption/retry/restore process fixture passes / packaged upgrade pending |
 | Root and Evaluator maintain separate canonical histories | 7 | Cross-store reference tests | Disclosed-summary inspection | Planned |
 | Large immutable artifacts use verified atomic content-addressed storage | 2, 7 | Temp/flush/hash/rename tests | Crash during artifact creation | Planned |
 | Derived indexes are rebuildable and non-authoritative | 8 | Delete/rebuild equivalence | Search before/after rebuild | Planned |
-| Existing MetaCog data migrates into a default runtime lineage | 2 | Migration fixtures | Packaged upgrade UAT | Schema 50→51 and stable Root identity implemented / packaged UAT pending |
+| Existing MetaCog data migrates into a default runtime lineage | 2 | Migration fixtures | Packaged upgrade UAT | Schema 50→51, interruption retry, verified restore, data preservation, and stable Root identity pass / packaged UAT pending |
 | Unsafe downgrade fails clearly | 2 | Version downgrade tests | Old package against new data copy | Newer schema refusal implemented / old-package UAT pending |
 
 ## 3. IPC and Process Security
 
 | Requirement | Stage | Automated evidence | E2E/UAT evidence | Status |
 |---|---:|---|---|---|
-| Windows named pipes and Unix-domain sockets | 2 | Platform IPC tests | Native Windows/macOS/Linux process E2E | Implemented / Windows process pass / macOS/Linux pending |
+| Windows named pipes and Unix-domain sockets | 2 | Platform IPC tests | Native Windows/macOS/Linux process E2E | Implemented / native process E2E passes on all three platforms |
 | Versioned length-framed bounded protocol | 1, 2 | Frame/property tests | Cross-process compatibility | Implemented / cumulative cross-platform UAT pending |
 | OS peer identity and per-launch capability | 2 | Wrong-peer/session tests | Forged client attack | Capability/session rejection implemented / cross-platform peer UAT pending |
 | Replay/idempotency protection | 2–4 | Duplicate request tests | Replayed action request | Root status replay rejection implemented / action coverage grows in Stage 4 |

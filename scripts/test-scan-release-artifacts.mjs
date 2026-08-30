@@ -4,6 +4,7 @@ import { mkdtemp, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promi
 import os from "node:os";
 import path from "node:path";
 import {
+  clamAvDailySignatureAgeSeconds,
   qualifyReleaseArtifacts,
   verifyManifestArtifacts,
 } from "./scan-release-artifacts.mjs";
@@ -41,6 +42,19 @@ async function expectFailure(action, pattern) {
 }
 
 try {
+  const scannerNow = new Date("2026-08-21T00:00:00.000Z");
+  assert.equal(clamAvDailySignatureAgeSeconds([
+    { path: "/var/lib/clamav/main.cvd", mtimeMs: new Date("2026-01-01T00:00:00.000Z").getTime() },
+    { path: "/var/lib/clamav/bytecode.cvd", mtimeMs: new Date("2026-01-01T00:00:00.000Z").getTime() },
+    { path: "/var/lib/clamav/daily.cld", mtimeMs: new Date("2026-08-20T23:00:00.000Z").getTime() },
+  ], scannerNow), 3600, "stable base databases must not make a current daily feed stale");
+  await expectFailure(
+    async () => clamAvDailySignatureAgeSeconds([
+      { path: "/var/lib/clamav/daily.cvd", mtimeMs: new Date("2026-08-01T00:00:00.000Z").getTime() },
+    ], scannerNow),
+    /no more than 72 hours old/u,
+  );
+
   await mkdir(artifactDirectory, { recursive: true });
   await writeFile(artifact, artifactBytes, { flag: "wx" });
   await writeManifest(manifestPath, manifestFor());

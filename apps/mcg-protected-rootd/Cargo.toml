@@ -11,5 +11,14 @@ mcg-protected-root = { path = "../../crates/mcg-protected-root" }
 tokio.workspace = true
 tracing-subscriber.workspace = true
 
+[dev-dependencies]
+chrono.workspace = true
+mcg-contracts = { path = "../../crates/mcg-contracts" }
+mcg-domain = { path = "../../crates/mcg-domain" }
+mcg-platform = { path = "../../crates/mcg-platform" }
+mcg-storage = { path = "../../crates/mcg-storage" }
+rusqlite.workspace = true
+tempfile.workspace = true
+
 [lints]
 workspace = true

@@ -56,6 +56,17 @@ function run(command, arguments_, options = {}) {
   return result;
 }
 
+export function clamAvDailySignatureAgeSeconds(databases, now = new Date()) {
+  const daily = databases.filter((database) => /^daily\.(?:cvd|cld)$/u.test(path.basename(database.path)));
+  if (daily.length === 0) fail("ClamAV has no daily signature database.");
+  if (daily.length !== 1) fail("ClamAV must have exactly one daily signature database.");
+  const signatureAgeSeconds = Math.floor((now.getTime() - daily[0].mtimeMs) / 1000);
+  if (!Number.isFinite(signatureAgeSeconds) || signatureAgeSeconds < 0 || signatureAgeSeconds > MAX_SIGNATURE_AGE_SECONDS) {
+    fail("ClamAV signatures must be no more than 72 hours old.");
+  }
+  return signatureAgeSeconds;
+}
+
 async function hashFile(file) {
   const hash = createHash("sha256");
   for await (const chunk of createReadStream(file)) hash.update(chunk);
@@ -145,18 +156,15 @@ async function createLinuxClamAvScanner(now = new Date()) {
     .filter((entry) => entry.isFile() && /\.(?:cvd|cld)$/u.test(entry.name))
     .map((entry) => path.join(databaseRoot, entry.name));
   if (databases.length === 0) fail("ClamAV has no installed signature databases.");
-  let oldestDatabaseMs = Number.POSITIVE_INFINITY;
+  const databaseMetadata = [];
   for (const database of databases) {
     const metadata = await lstat(database);
     if (!metadata.isFile() || metadata.isSymbolicLink() || ![0, databaseRootEntry.uid].includes(metadata.uid) || (metadata.mode & 0o022) !== 0) {
       fail("ClamAV signature databases must be protected files owned by root or the signature-directory service account.");
     }
-    oldestDatabaseMs = Math.min(oldestDatabaseMs, metadata.mtimeMs);
+    databaseMetadata.push({ path: database, mtimeMs: metadata.mtimeMs });
   }
-  const signatureAgeSeconds = Math.floor((now.getTime() - oldestDatabaseMs) / 1000);
-  if (!Number.isFinite(signatureAgeSeconds) || signatureAgeSeconds < 0 || signatureAgeSeconds > MAX_SIGNATURE_AGE_SECONDS) {
-    fail("ClamAV signatures must be no more than 72 hours old.");
-  }
+  const signatureAgeSeconds = clamAvDailySignatureAgeSeconds(databaseMetadata, now);
   const version = run(executable, ["--version"]);
   if (version.status !== 0) fail("ClamAV version query failed.");
 

@@ -342,6 +342,13 @@ fn prepare_root_migration(config: &AppConfig) -> Result<RootMigrationReceipt, Pr
     })();
     remove_snapshot_files(&snapshot);
     let summary = result?;
+    #[cfg(debug_assertions)]
+    if std::env::var_os("MCG_TEST_INTERRUPT_AFTER_ROOT_BACKUP").is_some() {
+        return Err(ProtectedRootError::Io(std::io::Error::new(
+            std::io::ErrorKind::Interrupted,
+            "test interruption after verified Root migration backup",
+        )));
+    }
     Ok(RootMigrationReceipt {
         schema_version: 1,
         from_storage_schema: report.schema_version,
