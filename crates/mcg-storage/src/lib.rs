@@ -71,10 +71,10 @@ pub use experiments::{
 pub use plugins::PluginRecoveryReport;
 pub use scheduler::{ScheduleClaim, ScheduleWakeMutation};
 pub use shadow_workspaces::ShadowWorkspaceMutation;
-pub use workflows::{WorkflowRecoveryReport, task_contract_content_hash};
+pub use workflows::{TaskContractHead, WorkflowRecoveryReport, task_contract_content_hash};
 
 type EventRow = (i64, String, i64, String, Option<String>, String, String);
-pub const STORAGE_SCHEMA_VERSION: i64 = 52;
+pub const STORAGE_SCHEMA_VERSION: i64 = 53;
 
 const MIGRATION_1: &str = r"
 CREATE TABLE IF NOT EXISTS events (
@@ -1786,6 +1786,22 @@ CREATE INDEX IF NOT EXISTS workflow_events_attempt_sequence
     ON workflow_events(attempt_id, sequence);
 ";
 
+const MIGRATION_53: &str = r"
+CREATE TABLE IF NOT EXISTS task_contract_mutations (
+    task_contract_id TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    contract_version INTEGER NOT NULL,
+    expected_head_revision INTEGER NOT NULL CHECK(expected_head_revision > 0),
+    resulting_head_revision INTEGER NOT NULL CHECK(resulting_head_revision > 1),
+    contract_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY(task_contract_id, idempotency_key),
+    UNIQUE(task_contract_id, contract_version),
+    FOREIGN KEY(task_contract_id, contract_version)
+        REFERENCES task_contract_versions(task_contract_id, version)
+);
+";
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RootOwnership {
     pub runtime_identity: RuntimeIdentity,
@@ -2054,6 +2070,7 @@ impl SqliteEventStore {
             (50_i64, MIGRATION_50),
             (51_i64, MIGRATION_51),
             (52_i64, MIGRATION_52),
+            (53_i64, MIGRATION_53),
         ] {
             let applied = self.connection.query_row(
                 "SELECT EXISTS(SELECT 1 FROM mcg_schema WHERE version = ?1)",
@@ -5824,13 +5841,14 @@ mod tests {
             store
                 .connection
                 .execute_batch(
-                    "DROP TABLE workflow_events;
+                    "DROP TABLE task_contract_mutations;
+                     DROP TABLE workflow_events;
                      DROP TABLE workflow_attempts;
                      DROP TABLE task_contract_dependencies;
                      DROP TABLE task_contract_heads;
                      DROP TABLE task_contract_versions;
                      DROP TABLE root_ownership;
-                     DELETE FROM mcg_schema WHERE version IN (51, 52);",
+                     DELETE FROM mcg_schema WHERE version IN (51, 52, 53);",
                 )
                 .expect("downgrade fixture to schema 50");
         }

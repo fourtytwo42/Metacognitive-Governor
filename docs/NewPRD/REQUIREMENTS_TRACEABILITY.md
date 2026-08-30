@@ -30,7 +30,7 @@ This matrix is updated as implementation lands. `Implemented / cumulative UAT pe
 | Root and Evaluator maintain separate canonical histories | 7 | Cross-store reference tests | Disclosed-summary inspection | Planned |
 | Large immutable artifacts use verified atomic content-addressed storage | 2, 7 | Temp/flush/hash/rename tests | Crash during artifact creation | Planned |
 | Derived indexes are rebuildable and non-authoritative | 8 | Delete/rebuild equivalence | Search before/after rebuild | Planned |
-| Existing MetaCog data migrates into a default runtime lineage | 2 | Migration fixtures | Packaged upgrade UAT | Schema 50→52, interruption retry, verified restore, data preservation, stable Root identity, and current migration-process tests pass / current-source packaged UAT pending |
+| Existing MetaCog data migrates into a default runtime lineage | 2 | Migration fixtures | Packaged upgrade UAT | Schema 50→53, interruption retry, verified restore, data preservation, stable Root identity, and current migration-process tests pass / current-source packaged UAT pending |
 | Unsafe downgrade fails clearly | 2 | Version downgrade tests | Old package against new data copy | Newer schema refusal implemented / old-package UAT pending |
 
 ## 3. IPC and Process Security
@@ -49,7 +49,7 @@ This matrix is updated as implementation lands. `Implemented / cumulative UAT pe
 
 | Requirement | Stage | Automated evidence | E2E/UAT evidence | Status |
 |---|---:|---|---|---|
-| Durable `TaskContract` and `WorkflowAttempt` | 3 | Transition/unit tests | Create, restart, inspect | Schema 52 immutable contract versions, heads, dependencies, attempts, ordered events, and atomic initial Ready creation implemented / contract revision API and interface E2E pending |
+| Durable `TaskContract` and `WorkflowAttempt` | 3 | Transition/unit tests | Create, restart, inspect | Schema 53 immutable contract versions/heads/dependencies, revision-head CAS with exact replay, attempts, ordered events, and atomic v1 Ready creation implemented / Root interface E2E pending |
 | Only legal workflow transitions occur | 3 | Generated state-machine tests | Invalid transition through API/CLI | Exhaustive contract table and Root-owned revision/generation CAS transitions pass / API/CLI exposure pending |
 | Terminal workflows do not ordinarily reactivate | 3 | Property tests | Retry creates explicit new attempt | Terminal monotonicity and explicit parent-linked retry attempts pass / cumulative process UAT pending |
 | Generation-fenced leases prevent stale commit | 3 | Race/property tests | Kill owner, reassign, deliver stale result | Claim/heartbeat/cancel/recovery CAS, concurrent-claim winner, and stale-result tests pass / delayed-worker process E2E pending |
@@ -185,7 +185,7 @@ This matrix is updated as implementation lands. `Implemented / cumulative UAT pe
 | Desktop deterministic E2E receipt | Every visible workflow change | Planned |
 | Native Simple/Advanced/Developer UAT | Every meaningful interface stage | Windows portable and Linux AppImage Stage 2 slices pass; current-source Windows installer and macOS remain open |
 | Windows/macOS/Linux package receipt | Every process/package identity change and final candidate | Exact `cea1e07` Linux clean manifest/scan and AppImage native UAT pass; Debian install/remove plus current-source Windows/macOS remain open |
-| Migration + backup/restore receipt | Every schema/ownership change | Schema 50→52 protected-root migration-process test passes / packaged backup/restore UAT pending |
+| Migration + backup/restore receipt | Every schema/ownership change | Schema 50→53 protected-root migration-process test passes / packaged backup/restore UAT pending |
 | Golden payload/hash compatibility receipt | Every codec/schema release | TaskContract v1 fixture/hash plus existing canonical-v1 fixtures pass / cross-version package replay pending |
 | Experiment artifact set | Every protected experiment | Planned |
 | Commit/remote parity and artifact manifest | Every verified major stage | Planned |

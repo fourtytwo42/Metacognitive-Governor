@@ -1,8 +1,8 @@
 use chrono::{DateTime, Utc};
 use mcg_contracts::{
     AttemptId, ContentHash, CorrelationId, EventId, RuntimeActorId, StableTypeId, TaskContract,
-    TaskContractId, TaskContractStatus, VersionedPayload, WaitReason, WorkflowAttempt,
-    WorkflowEvent, WorkflowId, WorkflowState, decode_canonical_cbor_v1,
+    TaskContractId, TaskContractStatus, VersionedPayload, VersionedRef, WaitReason,
+    WorkflowAttempt, WorkflowEvent, WorkflowId, WorkflowState, decode_canonical_cbor_v1,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 
@@ -22,6 +22,12 @@ pub struct WorkflowRecoveryReport {
     pub fenced_expired: u64,
     pub awaiting_reconciliation: u64,
     pub requeued_for_verification: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskContractHead {
+    pub contract: TaskContract,
+    pub revision: u64,
 }
 
 /// Computes the authoritative canonical hash for a task-contract version.
@@ -168,6 +174,165 @@ impl SqliteEventStore {
             .optional()?
             .map(|json| serde_json::from_str(&json).map_err(StorageError::from))
             .transpose()
+    }
+
+    /// Loads the immutable contract version selected by the authoritative head.
+    ///
+    /// # Errors
+    /// Returns a storage error for query or stored-data failures.
+    pub fn task_contract_head(
+        &self,
+        id: TaskContractId,
+    ) -> Result<Option<TaskContractHead>, StorageError> {
+        self.connection
+            .query_row(
+                "SELECT version.contract_json, head.revision
+                 FROM task_contract_heads AS head
+                 JOIN task_contract_versions AS version
+                   ON version.task_contract_id = head.task_contract_id
+                  AND version.version = head.current_version
+                 WHERE head.task_contract_id = ?1",
+                [id.to_string()],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .optional()?
+            .map(|(json, revision)| {
+                Ok(TaskContractHead {
+                    contract: serde_json::from_str(&json)?,
+                    revision: u64::try_from(revision).map_err(|_| {
+                        StorageError::InvalidData("negative task-contract head revision".into())
+                    })?,
+                })
+            })
+            .transpose()
+    }
+
+    /// Appends one immutable material contract revision and advances its head with CAS.
+    ///
+    /// Exact replay returns the original resulting head. A reused key, stale head, skipped
+    /// version, or incorrect previous-version hash fails closed.
+    ///
+    /// # Errors
+    /// Returns a storage error for invalid content, conflicting replay/CAS, or transaction failure.
+    pub fn revise_task_contract(
+        &mut self,
+        contract: &TaskContract,
+        expected_head_revision: u64,
+        idempotency_key: &str,
+    ) -> Result<TaskContractHead, StorageError> {
+        if idempotency_key.trim().is_empty() || expected_head_revision == 0 {
+            return Err(StorageError::InvalidData(
+                "task-contract revision requires a nonempty key and positive head revision".into(),
+            ));
+        }
+        validate_contract(contract)?;
+        let transaction = self.connection.transaction()?;
+        if let Some((json, expected, resulting)) = transaction
+            .query_row(
+                "SELECT contract_json, expected_head_revision, resulting_head_revision
+                 FROM task_contract_mutations
+                 WHERE task_contract_id = ?1 AND idempotency_key = ?2",
+                params![contract.id.to_string(), idempotency_key],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
+            )
+            .optional()?
+        {
+            let original: TaskContract = serde_json::from_str(&json)?;
+            if original != *contract
+                || expected != sql_u64(expected_head_revision, "expected head revision")?
+            {
+                return Err(StorageError::Conflict(
+                    "task-contract idempotency key was replayed with different content".into(),
+                ));
+            }
+            transaction.commit()?;
+            return Ok(TaskContractHead {
+                contract: original,
+                revision: u64::try_from(resulting).map_err(|_| {
+                    StorageError::InvalidData("negative task-contract head revision".into())
+                })?,
+            });
+        }
+
+        let (current_version, current_revision) = transaction
+            .query_row(
+                "SELECT current_version, revision FROM task_contract_heads
+                 WHERE task_contract_id = ?1",
+                [contract.id.to_string()],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .optional()?
+            .ok_or_else(|| StorageError::Conflict("task-contract head does not exist".into()))?;
+        let current_version = u64::try_from(current_version)
+            .map_err(|_| StorageError::InvalidData("negative task-contract version".into()))?;
+        let current_revision = u64::try_from(current_revision)
+            .map_err(|_| StorageError::InvalidData("negative task-contract revision".into()))?;
+        if current_revision != expected_head_revision
+            || contract.version != current_version.saturating_add(1)
+        {
+            return Err(StorageError::Conflict(format!(
+                "stale task-contract head: expected revision/version {expected_head_revision}/{}, current {current_revision}/{current_version}",
+                contract.version
+            )));
+        }
+        let prior =
+            load_task_contract(&transaction, contract.id, current_version)?.ok_or_else(|| {
+                StorageError::InvalidData("task-contract head target is missing".into())
+            })?;
+        let expected_previous = VersionedRef {
+            id: prior.id,
+            version: prior.version,
+            content_hash: task_contract_content_hash(&prior)?,
+        };
+        if contract.previous_version.as_ref() != Some(&expected_previous) {
+            return Err(StorageError::Conflict(
+                "task-contract revision does not bind the exact current head".into(),
+            ));
+        }
+        insert_contract_version(&transaction, contract)?;
+        let resulting_revision = increment(current_revision, "task-contract head revision")?;
+        let changed = transaction.execute(
+            "UPDATE task_contract_heads SET current_version = ?1, revision = ?2
+             WHERE task_contract_id = ?3 AND current_version = ?4 AND revision = ?5",
+            params![
+                sql_u64(contract.version, "task contract version")?,
+                sql_u64(resulting_revision, "task contract head revision")?,
+                contract.id.to_string(),
+                sql_u64(current_version, "current task contract version")?,
+                sql_u64(current_revision, "current task contract head revision")?,
+            ],
+        )?;
+        if changed != 1 {
+            return Err(StorageError::Conflict(
+                "task-contract head changed before commit".into(),
+            ));
+        }
+        transaction.execute(
+            "INSERT INTO task_contract_mutations(
+                task_contract_id, idempotency_key, contract_version, expected_head_revision,
+                resulting_head_revision, contract_json, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                contract.id.to_string(),
+                idempotency_key,
+                sql_u64(contract.version, "task contract version")?,
+                sql_u64(expected_head_revision, "expected head revision")?,
+                sql_u64(resulting_revision, "resulting head revision")?,
+                serde_json::to_string(contract)?,
+                contract.created_at.to_rfc3339(),
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(TaskContractHead {
+            contract: contract.clone(),
+            revision: resulting_revision,
+        })
     }
 
     /// Loads one authoritative workflow attempt.
@@ -698,12 +863,8 @@ fn validate_initial_workflow(
         }
     }
     let first_version = contract.version == 1 && contract.previous_version.is_none();
-    let subsequent_version = contract.version > 1
-        && contract.previous_version.as_ref().is_some_and(|previous| {
-            previous.id == contract.id && previous.version + 1 == contract.version
-        });
     if contract.objective.trim().is_empty()
-        || !(first_version || subsequent_version)
+        || !first_version
         || contract.status != TaskContractStatus::Active
         || contract
             .dependencies
@@ -731,6 +892,109 @@ fn validate_initial_workflow(
         ));
     }
     Ok(())
+}
+
+fn validate_contract(contract: &TaskContract) -> Result<(), StorageError> {
+    let distinct_dependencies = contract
+        .dependencies
+        .iter()
+        .map(|dependency| (dependency.id, dependency.version))
+        .collect::<std::collections::BTreeSet<_>>();
+    for binding in [
+        &contract.permitted_side_effects,
+        &contract.authority,
+        &contract.environment,
+        &contract.risk,
+        &contract.budgets,
+        &contract.rollback,
+    ] {
+        let actual = binding
+            .payload
+            .content_hash(&binding.content_hash.domain)
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        if actual != binding.content_hash {
+            return Err(StorageError::InvalidData(
+                "policy binding hash does not match canonical payload".into(),
+            ));
+        }
+    }
+    let version_lineage = contract.version == 1 && contract.previous_version.is_none()
+        || contract.version > 1
+            && contract.previous_version.as_ref().is_some_and(|previous| {
+                previous.id == contract.id
+                    && previous
+                        .version
+                        .checked_add(1)
+                        .is_some_and(|version| version == contract.version)
+            });
+    if contract.objective.trim().is_empty()
+        || !version_lineage
+        || contract.status != TaskContractStatus::Active
+        || contract
+            .dependencies
+            .iter()
+            .any(|dependency| dependency.id == contract.id)
+        || distinct_dependencies.len() != contract.dependencies.len()
+    {
+        return Err(StorageError::InvalidData(
+            "task-contract revision is invalid or not active".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn insert_contract_version(
+    transaction: &Transaction<'_>,
+    contract: &TaskContract,
+) -> Result<(), StorageError> {
+    let contract_hash = task_contract_content_hash(contract)?;
+    transaction.execute(
+        "INSERT INTO task_contract_versions(
+            task_contract_id, version, type_id, schema_version, content_hash_json,
+            contract_json, status, created_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            contract.id.to_string(),
+            sql_u64(contract.version, "task contract version")?,
+            TaskContract::TYPE_ID,
+            i64::from(TaskContract::SCHEMA_VERSION),
+            serde_json::to_string(&contract_hash)?,
+            serde_json::to_string(contract)?,
+            task_contract_status_label(contract.status),
+            contract.created_at.to_rfc3339(),
+        ],
+    )?;
+    for dependency in &contract.dependencies {
+        transaction.execute(
+            "INSERT INTO task_contract_dependencies(
+                task_contract_id, task_contract_version, dependency_id, dependency_version
+             ) VALUES (?1, ?2, ?3, ?4)",
+            params![
+                contract.id.to_string(),
+                sql_u64(contract.version, "task contract version")?,
+                dependency.id.to_string(),
+                sql_u64(dependency.version, "dependency version")?,
+            ],
+        )?;
+    }
+    Ok(())
+}
+
+fn load_task_contract(
+    connection: &Connection,
+    id: TaskContractId,
+    version: u64,
+) -> Result<Option<TaskContract>, StorageError> {
+    connection
+        .query_row(
+            "SELECT contract_json FROM task_contract_versions
+             WHERE task_contract_id = ?1 AND version = ?2",
+            params![id.to_string(), sql_u64(version, "task contract version")?],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .map(|json| serde_json::from_str(&json).map_err(StorageError::from))
+        .transpose()
 }
 
 fn insert_attempt(
@@ -1191,6 +1455,70 @@ mod tests {
         assert_eq!(TaskContract::SCHEMA_VERSION, expected["schema_version"]);
         assert_eq!(content_hash.domain, expected["semantic_domain"]);
         assert_eq!(content_hash.digest_hex, expected["blake3_256"]);
+    }
+
+    #[test]
+    fn task_contract_revisions_are_immutable_cas_bound_and_exactly_replayable() {
+        let mut store = SqliteEventStore::open_in_memory().unwrap();
+        let (contract, attempt) = fixture();
+        store
+            .create_workflow(&contract, &attempt, CorrelationId::new(), now())
+            .unwrap();
+        assert_eq!(
+            store.task_contract_head(contract.id).unwrap().unwrap(),
+            TaskContractHead {
+                contract: contract.clone(),
+                revision: 1,
+            }
+        );
+
+        let mut revision = contract.clone();
+        revision.version = 2;
+        revision.previous_version = Some(VersionedRef {
+            id: contract.id,
+            version: contract.version,
+            content_hash: task_contract_content_hash(&contract).unwrap(),
+        });
+        revision.objective = "create and revise a durable workflow".to_owned();
+        revision.created_at = now() + chrono::Duration::seconds(1);
+        let revised = store
+            .revise_task_contract(&revision, 1, "contract-revision-2")
+            .unwrap();
+        assert_eq!(revised.revision, 2);
+        assert_eq!(revised.contract, revision);
+        assert_eq!(
+            store.task_contract_version(contract.id, 1).unwrap(),
+            Some(contract.clone())
+        );
+        assert_eq!(
+            store.task_contract_head(contract.id).unwrap(),
+            Some(revised.clone())
+        );
+        assert_eq!(
+            store
+                .revise_task_contract(&revision, 1, "contract-revision-2")
+                .unwrap(),
+            revised
+        );
+
+        let mut substituted = revision.clone();
+        substituted.objective = "substituted content".to_owned();
+        assert!(matches!(
+            store.revise_task_contract(&substituted, 1, "contract-revision-2"),
+            Err(StorageError::Conflict(_))
+        ));
+
+        let mut stale = revision.clone();
+        stale.version = 3;
+        stale.previous_version = Some(VersionedRef {
+            id: revision.id,
+            version: revision.version,
+            content_hash: task_contract_content_hash(&revision).unwrap(),
+        });
+        assert!(matches!(
+            store.revise_task_contract(&stale, 1, "contract-revision-3"),
+            Err(StorageError::Conflict(_))
+        ));
     }
 
     #[test]
