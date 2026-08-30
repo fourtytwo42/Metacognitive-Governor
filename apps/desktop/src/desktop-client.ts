@@ -1167,6 +1167,75 @@ export interface ProtectedRootStatus {
   };
 }
 
+export type WorkflowWaitReason = "user" | "approval" | "external" | "retry_backoff" | "dependency" | "reconciliation" | "protected_component";
+export type WorkflowState = "ready" | "running" | "verifying" | "succeeded" | "failed" | "cancel_requested" | "cancelled" | "quarantined" | { waiting: WorkflowWaitReason };
+
+export interface CanonicalWorkflowAttempt {
+  workflow_id: string;
+  attempt_id: string;
+  task_contract: { id: string; version: number; content_hash: { algorithm: string; domain: string; digest_hex: string } };
+  parent_attempt_id: string | null;
+  attempt_number: number;
+  state: WorkflowState;
+  revision: number;
+  lease_owner: string | null;
+  lease_generation: number;
+  lease_expires_at: string | null;
+  heartbeat_at: string | null;
+  checkpoint: { content_hash: { algorithm: string; domain: string; digest_hex: string }; media_type: string; byte_length: number } | null;
+  environment_snapshot: { algorithm: string; domain: string; digest_hex: string };
+  configuration: { id: string; version: number; content_hash: { algorithm: string; domain: string; digest_hex: string } };
+  idempotency_key: string;
+  retry_policy: { max_attempts: number; initial_backoff_ms: number; maximum_backoff_ms: number };
+  compensation_policy: unknown;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CanonicalTaskContract {
+  id: string;
+  version: number;
+  previous_version: { id: string; version: number; content_hash: { algorithm: string; domain: string; digest_hex: string } } | null;
+  objective: string;
+  non_goals: string[];
+  requirements: Array<{ clause_id: string; statement: string }>;
+  constraints: Array<{ clause_id: string; statement: string }>;
+  assumptions: Array<{ clause_id: string; statement: string }>;
+  acceptance_criteria: Array<{ clause_id: string; statement: string }>;
+  status: string;
+  created_at: string;
+  [key: string]: unknown;
+}
+
+export interface CanonicalWorkflowEvent {
+  id: string;
+  type_id: string;
+  schema_version: number;
+  sequence: number;
+  workflow_id: string;
+  attempt_id: string;
+  attempt_revision: number;
+  lease_generation: number;
+  correlation_id: string;
+  causation_id: string | null;
+  idempotency_key: string;
+  occurred_at: string;
+  payload: unknown;
+}
+
+export interface CanonicalWorkflowInspection {
+  attempt: CanonicalWorkflowAttempt;
+  task_contract: CanonicalTaskContract;
+  events: CanonicalWorkflowEvent[];
+}
+
+export interface CanonicalWorkflowCancelRequest {
+  attempt_id: string;
+  expected_revision: number;
+  expected_generation: number;
+  idempotency_key: string;
+}
+
 export interface PortableOrganizationGenome {
   schema_version: number;
   source: {
@@ -1929,6 +1998,18 @@ export function getLocalServiceStatus(): Promise<LocalServiceStatus> {
 
 export function getProtectedRootStatus(): Promise<ProtectedRootStatus> {
   return invoke("protected_root_status");
+}
+
+export function listProtectedRootWorkflows(): Promise<CanonicalWorkflowAttempt[]> {
+  return invoke("protected_root_workflows");
+}
+
+export function getProtectedRootWorkflow(workflowId: string): Promise<CanonicalWorkflowInspection | null> {
+  return invoke("protected_root_workflow", { workflowId });
+}
+
+export function cancelProtectedRootWorkflow(request: CanonicalWorkflowCancelRequest): Promise<CanonicalWorkflowAttempt> {
+  return invoke("cancel_protected_root_workflow", { request });
 }
 
 export function runDiagnostics(): Promise<DiagnosticReport> {

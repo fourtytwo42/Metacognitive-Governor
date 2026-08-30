@@ -49,13 +49,13 @@ This matrix is updated as implementation lands. `Implemented / cumulative UAT pe
 
 | Requirement | Stage | Automated evidence | E2E/UAT evidence | Status |
 |---|---:|---|---|---|
-| Durable `TaskContract` and `WorkflowAttempt` | 3 | Transition/unit tests | Create, restart, inspect | Schema 53 immutable contract versions/heads/dependencies, revision-head CAS with exact replay, attempts, ordered events, and atomic v1 Ready creation implemented / Root interface E2E pending |
-| Only legal workflow transitions occur | 3 | Generated state-machine tests | Invalid transition through API/CLI | Exhaustive contract table and Root-owned revision/generation CAS transitions pass / API/CLI exposure pending |
+| Durable `TaskContract` and `WorkflowAttempt` | 3 | Transition/unit tests | Create, restart, inspect | Schema 53 immutable contract versions/heads/dependencies, revision-head CAS with exact replay, attempts, ordered events, atomic v1 Ready creation, authenticated Root IPC/CLI inspection, and deterministic Desktop inspection implemented / process-restart E2E pending |
+| Only legal workflow transitions occur | 3 | Generated state-machine tests | Invalid transition through API/CLI | Exhaustive contract table, Root-owned revision/generation CAS transitions, authenticated IPC, CLI parser/process coverage, and Desktop cancellation fencing pass / packaged invalid-transition UAT pending |
 | Terminal workflows do not ordinarily reactivate | 3 | Property tests | Retry creates explicit new attempt | Terminal monotonicity and explicit parent-linked retry attempts pass / cumulative process UAT pending |
 | Generation-fenced leases prevent stale commit | 3 | Race/property tests | Kill owner, reassign, deliver stale result | Claim/heartbeat/cancel/recovery CAS, concurrent-claim winner, and stale-result tests pass / delayed-worker process E2E pending |
 | Restart scanner resumes only satisfied work | 3 | Recovery integration | Process/application restart | Root startup fences expired Running work to reconciliation and requeues expired Verifying work; dependency claim gating passes / complete waiting-condition and process matrix pending |
-| Cancellation is durable and propagated | 3–5 | Cancellation tests | UI/CLI cancel and restart | Durable CancelRequested fencing plus authenticated `mcg workflow cancel` implemented and IPC-tested / child, external-effect, packaged CLI, and GUI E2E pending |
-| UI reconnect cannot alter backend truth | 3 | Projection tests | Close/reopen during work | Planned |
+| Cancellation is durable and propagated | 3–5 | Cancellation tests | UI/CLI cancel and restart | Durable CancelRequested fencing plus authenticated `mcg workflow cancel` and revision/generation-fenced Desktop cancellation pass deterministic IPC/CLI/component/browser E2E / child, external-effect, restart, native, and packaged UAT pending |
+| UI reconnect cannot alter backend truth | 3 | Projection tests | Close/reopen during work | Simple/Advanced/Developer deterministic component/browser E2E projects one unchanged Root attempt and cancellation result / real process/application reconnect and packaged UAT pending |
 
 ## 5. Actions and External Effects
 
@@ -156,8 +156,8 @@ This matrix is updated as implementation lands. `Implemented / cumulative UAT pe
 | `advanced_mode=true` migrates to Advanced, never Developer | 1 | Settings migration test | Existing advanced profile UAT | Automated pass / packaged UAT pending |
 | Protected controls remain locked in Developer | 1 onward | API rejection tests | Client-side tamper UAT | Stage 2 Root projection is read-only in Windows portable and Linux AppImage native UAT / later controls pending |
 | Simple avoids research ontology and raw protected data | 7 onward | UI visibility tests | Native Simple audit | Planned |
-| Advanced exposes practical workflows/evidence | 3 onward | UI tests | Native Advanced workflows | Planned |
-| Developer exposes manifests/diagnostics and authorized research summaries | 1 onward | UI contract tests | Native Developer workflows | Root compatibility inspector passes Windows portable and Linux AppImage native UAT / expands by stage |
+| Advanced exposes practical workflows/evidence | 3 onward | UI tests | Native Advanced workflows | Canonical attempt, revision, generation, wait reason, lease owner, criteria, and ordered-event count pass component/browser E2E / native packaged workflow UAT pending |
+| Developer exposes manifests/diagnostics and authorized research summaries | 1 onward | UI contract tests | Native Developer workflows | Root compatibility inspector passes Windows portable and Linux AppImage native UAT; read-only raw canonical workflow contract/attempt/event evidence passes component/browser E2E / expands by stage and needs native packaged workflow UAT |
 | Existing CLI compatibility remains functional | Every stage | Parser/process regression | Real terminal UAT | Canonical `mcg workflow list/show/cancel` parser and cumulative CLI/process suites pass / packaged terminal UAT pending |
 | Existing conversations/projects/history remain accessible | 2 onward | Migration/integration tests | Packaged upgrade UAT | Planned |
 
@@ -182,10 +182,10 @@ This matrix is updated as implementation lands. `Implemented / cumulative UAT pe
 | Unit/property/integration test receipt | Every implementation change | Stage 3 affected Rust suites pass locally; cumulative workspace/package receipt pending |
 | Crash and process-boundary receipt | Every affected durable boundary | Root open/startup recovery integration passes; forced-kill package matrix pending |
 | Security/adversarial receipt | Every affected trust/capability boundary | Planned |
-| Desktop deterministic E2E receipt | Every visible workflow change | Planned |
+| Desktop deterministic E2E receipt | Every visible workflow change | Complete Desktop Vitest 122/122 and Playwright 29/29 pass, including Simple/Advanced/Developer canonical projection and revision/generation-fenced cancellation |
 | Native Simple/Advanced/Developer UAT | Every meaningful interface stage | Windows portable and Linux AppImage Stage 2 slices pass; current-source Windows installer and macOS remain open |
 | Windows/macOS/Linux package receipt | Every process/package identity change and final candidate | Exact `cea1e07` Linux clean manifest/scan and AppImage native UAT pass; Debian install/remove plus current-source Windows/macOS remain open |
 | Migration + backup/restore receipt | Every schema/ownership change | Schema 50→53 protected-root migration-process test passes / packaged backup/restore UAT pending |
 | Golden payload/hash compatibility receipt | Every codec/schema release | TaskContract v1 fixture/hash plus existing canonical-v1 fixtures pass / cross-version package replay pending |
 | Experiment artifact set | Every protected experiment | Planned |
-| Commit/remote parity and artifact manifest | Every verified major stage | Planned |
+| Commit/remote parity and artifact manifest | Every verified major stage | Stage 3 kernel, TaskContract head CAS, and Root IPC/CLI commits are pushed through `293d34d`; Desktop projection remains uncommitted pending cumulative gates |

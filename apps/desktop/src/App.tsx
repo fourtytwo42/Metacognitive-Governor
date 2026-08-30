@@ -204,6 +204,9 @@ import {
   getSiteMonitor,
   getLocalServiceStatus,
   getProtectedRootStatus,
+  listProtectedRootWorkflows,
+  getProtectedRootWorkflow,
+  cancelProtectedRootWorkflow,
   getGovernorOverview,
   getGovernorControlPolicy,
   getConversation,
@@ -406,6 +409,9 @@ import {
   type DiagnosticReport,
   type LocalServiceStatus,
   type ProtectedRootStatus,
+  type CanonicalWorkflowAttempt,
+  type CanonicalWorkflowInspection,
+  type WorkflowState,
   type UpdateCheck,
   type UpdateConfiguration,
   type TaskEventsResponse,
@@ -433,6 +439,31 @@ import { parseSlashCommand, slashCommandMatches, type SlashCommandName } from ".
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function workflowStateKey(state: WorkflowState): string {
+  return typeof state === "string" ? state : `waiting_${state.waiting}`;
+}
+
+function workflowStateLabel(state: WorkflowState): string {
+  if (typeof state !== "string") {
+    const reason = state.waiting.replaceAll("_", " ");
+    return state.waiting === "reconciliation" ? "Recovering" : `Blocked · ${reason}`;
+  }
+  return ({
+    ready: "Preparing",
+    running: "Working",
+    verifying: "Verifying",
+    succeeded: "Completed",
+    failed: "Failed",
+    cancel_requested: "Stopping safely",
+    cancelled: "Cancelled",
+    quarantined: "Blocked · quarantined"
+  } as Record<string, string>)[state] ?? state.replaceAll("_", " ");
+}
+
+function workflowCanRequestCancellation(state: WorkflowState): boolean {
+  return state === "running" || state === "verifying" || typeof state === "object";
 }
 
 function codexFeatureStageLabel(stage: CodexFeature["stage"]): string {
@@ -2568,6 +2599,10 @@ export function App() {
   const [globalFolderError, setGlobalFolderError] = useState<string | null>(null);
   const [localService, setLocalService] = useState<LocalServiceStatus | null>(null);
   const [protectedRoot, setProtectedRoot] = useState<ProtectedRootStatus | null>(null);
+  const [canonicalWorkflows, setCanonicalWorkflows] = useState<CanonicalWorkflowAttempt[]>([]);
+  const [workflowInspections, setWorkflowInspections] = useState<Record<string, CanonicalWorkflowInspection>>({});
+  const [workflowBusy, setWorkflowBusy] = useState<string | null>(null);
+  const [workflowError, setWorkflowError] = useState<string | null>(null);
   const [advanced, setAdvanced] = useState(false);
   const [userSettings, setUserSettings] = useState<UserSettings | null>(null);
   const [settingsHistory, setSettingsHistory] = useState<UserSettingsRevision[]>([]);
@@ -3959,6 +3994,53 @@ export function App() {
     setChatContextMenu(null);
   }
 
+  async function refreshCanonicalWorkflows() {
+    setWorkflowBusy("list");
+    setWorkflowError(null);
+    try {
+      setCanonicalWorkflows(await listProtectedRootWorkflows());
+    } catch (error) {
+      setWorkflowError(errorMessage(error));
+    } finally {
+      setWorkflowBusy(null);
+    }
+  }
+
+  async function inspectCanonicalWorkflow(workflowId: string) {
+    setWorkflowBusy(workflowId);
+    setWorkflowError(null);
+    try {
+      const inspection = await getProtectedRootWorkflow(workflowId);
+      if (!inspection) throw new Error(`Canonical workflow ${workflowId} was not found.`);
+      setWorkflowInspections((current) => ({ ...current, [workflowId]: inspection }));
+    } catch (error) {
+      setWorkflowError(errorMessage(error));
+    } finally {
+      setWorkflowBusy(null);
+    }
+  }
+
+  async function requestCanonicalWorkflowCancellation(attempt: CanonicalWorkflowAttempt) {
+    if (!window.confirm("Request cancellation? MetaCog will fence late work, but any uncertain external effect must still be reconciled before cancellation can finish.")) return;
+    setWorkflowBusy(attempt.workflow_id);
+    setWorkflowError(null);
+    try {
+      const updated = await cancelProtectedRootWorkflow({
+        attempt_id: attempt.attempt_id,
+        expected_revision: attempt.revision,
+        expected_generation: attempt.lease_generation,
+        idempotency_key: `desktop-cancel-${crypto.randomUUID()}`
+      });
+      setCanonicalWorkflows((current) => current.map((candidate) => candidate.workflow_id === updated.workflow_id ? updated : candidate));
+      const inspection = await getProtectedRootWorkflow(updated.workflow_id);
+      if (inspection) setWorkflowInspections((current) => ({ ...current, [updated.workflow_id]: inspection }));
+    } catch (error) {
+      setWorkflowError(errorMessage(error));
+    } finally {
+      setWorkflowBusy(null);
+    }
+  }
+
   useEffect(() => {
     let active = true;
     getLocalServiceStatus()
@@ -3980,6 +4062,13 @@ export function App() {
       })
       .catch(() => {
         if (active) setProtectedRoot(null);
+      });
+    listProtectedRootWorkflows()
+      .then((workflows) => {
+        if (active) setCanonicalWorkflows(workflows);
+      })
+      .catch((error) => {
+        if (active) setWorkflowError(errorMessage(error));
       });
     getUpdateConfiguration()
       .then((configuration) => {
@@ -8727,6 +8816,39 @@ export function App() {
                   </>}
                 </div>
               </details>
+            </article>
+
+            <article className="agent-section-card canonical-workflow-section" aria-label="Durable workflows">
+              <div className="section-heading compact-heading">
+                <div><h3>Durable workflows</h3><p className="muted">Protected Root owns this state. Closing or reconnecting the app cannot change it.</p></div>
+                <button className="secondary" type="button" disabled={workflowBusy !== null} onClick={() => void refreshCanonicalWorkflows()}>{workflowBusy === "list" ? "Refreshing…" : "Refresh"}</button>
+              </div>
+              {workflowError && <p className="error-message" role="alert">{workflowError}</p>}
+              {canonicalWorkflows.length === 0 ? <p className="empty-state">No canonical workflows yet. Existing compatibility work remains available in its current views while migration proceeds.</p> : <div className="instance-list">
+                {canonicalWorkflows.map((attempt) => {
+                  const inspection = workflowInspections[attempt.workflow_id];
+                  return <div className="instance-row canonical-workflow-row" key={attempt.workflow_id} data-workflow-state={workflowStateKey(attempt.state)}>
+                    <span>
+                      <strong>{inspection?.task_contract.objective ?? `Workflow ${attempt.workflow_id.slice(0, 8)}`}</strong>
+                      <small>{workflowStateLabel(attempt.state)}{advanced ? ` · attempt ${attempt.attempt_number} · revision ${attempt.revision} · generation ${attempt.lease_generation}` : ""}</small>
+                      {advanced && typeof attempt.state === "object" && <small>Wait reason: {attempt.state.waiting.replaceAll("_", " ")}</small>}
+                      {advanced && attempt.lease_owner && <small>Lease owner <code>{attempt.lease_owner}</code>{attempt.lease_expires_at ? ` until ${new Date(attempt.lease_expires_at).toLocaleString()}` : ""}</small>}
+                    </span>
+                    <div className="memory-actions">
+                      {advanced && <button className="secondary" type="button" disabled={workflowBusy !== null} onClick={() => void inspectCanonicalWorkflow(attempt.workflow_id)}>{workflowBusy === attempt.workflow_id ? "Loading…" : inspection ? "Refresh evidence" : "Inspect"}</button>}
+                      {workflowCanRequestCancellation(attempt.state) && <button className="secondary" type="button" disabled={workflowBusy !== null} onClick={() => void requestCanonicalWorkflowCancellation(attempt)}>Request cancellation</button>}
+                    </div>
+                    {advanced && inspection && <div className="workflow-inspection">
+                      <p><strong>Contract v{inspection.task_contract.version}</strong> · {inspection.task_contract.acceptance_criteria.length} acceptance criteria · {inspection.events.length} ordered events</p>
+                      {inspection.task_contract.acceptance_criteria.length > 0 && <ul>{inspection.task_contract.acceptance_criteria.map((criterion) => <li key={criterion.clause_id}>{criterion.statement}</li>)}</ul>}
+                      {userSettings?.interface_complexity === "developer" && <TechnicalDetails title="Canonical workflow evidence" summary={`${inspection.events.length} Root-owned events`}>
+                        <p className="form-note">Read-only canonical evidence. Correlation, causation, revision, generation, and idempotency identities are disclosed without exposing Root mutation authority.</p>
+                        <pre aria-label={`Canonical workflow ${attempt.workflow_id} evidence`} aria-readonly="true" role="textbox" tabIndex={0}>{JSON.stringify(inspection, null, 2)}</pre>
+                      </TechnicalDetails>}
+                    </div>}
+                  </div>;
+                })}
+              </div>}
             </article>
 
             <article className="agent-section-card">

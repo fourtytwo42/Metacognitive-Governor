@@ -212,6 +212,9 @@ const client = vi.hoisted(() => ({
   ,installUpdate: vi.fn()
   ,localServiceStatus: vi.fn()
   ,protectedRootStatus: vi.fn()
+  ,protectedRootWorkflows: vi.fn()
+  ,protectedRootWorkflow: vi.fn()
+  ,cancelProtectedRootWorkflow: vi.fn()
   ,listOpenInApplications: vi.fn()
   ,openWorkspaceIn: vi.fn()
   ,runTerminalCommand: vi.fn()
@@ -416,6 +419,9 @@ vi.mock("./desktop-client", () => ({
   installUpdate: client.installUpdate,
   getLocalServiceStatus: client.localServiceStatus,
   getProtectedRootStatus: client.protectedRootStatus,
+  listProtectedRootWorkflows: client.protectedRootWorkflows,
+  getProtectedRootWorkflow: client.protectedRootWorkflow,
+  cancelProtectedRootWorkflow: client.cancelProtectedRootWorkflow,
   listOpenInApplications: client.listOpenInApplications,
   openWorkspaceIn: client.openWorkspaceIn,
   runTerminalCommand: client.runTerminalCommand
@@ -442,6 +448,9 @@ beforeEach(() => {
   window.localStorage.clear();
   client.localServiceStatus.mockReset();
   client.protectedRootStatus.mockReset();
+  client.protectedRootWorkflows.mockReset();
+  client.protectedRootWorkflow.mockReset();
+  client.cancelProtectedRootWorkflow.mockReset();
   client.start.mockReset();
   client.complete.mockReset();
   client.cancel.mockReset();
@@ -942,6 +951,9 @@ beforeEach(() => {
       migrated_at: "2026-08-29T00:00:00Z"
     }
   });
+  client.protectedRootWorkflows.mockResolvedValue([]);
+  client.protectedRootWorkflow.mockResolvedValue(null);
+  client.cancelProtectedRootWorkflow.mockRejectedValue(new Error("No workflow fixture configured."));
   client.updateSettings.mockImplementation(async (request) => ({
     schema_version: 1,
     revision: request.expected_revision + 1,
@@ -1106,6 +1118,57 @@ test("Agents distinguishes the deterministic runtime from live model agents", as
   fireEvent.click(screen.getByRole("button", { name: "Teams" }));
   expect(screen.getByRole("combobox", { name: "Global default team" })).toHaveValue(organization.organization_id);
   expect(screen.queryByRole("button", { name: "Improvement" })).not.toBeInTheDocument();
+});
+
+test("durable workflows progressively disclose Root evidence and fence cancellation", async () => {
+  const attempt = {
+    workflow_id: "00000000-0000-4000-8000-000000000531",
+    attempt_id: "00000000-0000-4000-8000-000000000532",
+    task_contract: { id: "00000000-0000-4000-8000-000000000533", version: 1, content_hash: { algorithm: "blake3-256", domain: "MetaCog.TaskContract", digest_hex: "a".repeat(64) } },
+    parent_attempt_id: null,
+    attempt_number: 1,
+    state: "running",
+    revision: 2,
+    lease_owner: "00000000-0000-4000-8000-000000000534",
+    lease_generation: 1,
+    lease_expires_at: "2026-08-30T13:00:00Z",
+    heartbeat_at: "2026-08-30T12:00:00Z",
+    checkpoint: null,
+    environment_snapshot: { algorithm: "blake3-256", domain: "Environment", digest_hex: "b".repeat(64) },
+    configuration: { id: "00000000-0000-4000-8000-000000000535", version: 1, content_hash: { algorithm: "blake3-256", domain: "Configuration", digest_hex: "c".repeat(64) } },
+    idempotency_key: "create-workflow",
+    retry_policy: { max_attempts: 3, initial_backoff_ms: 100, maximum_backoff_ms: 1000 },
+    compensation_policy: {},
+    created_at: "2026-08-30T12:00:00Z",
+    updated_at: "2026-08-30T12:00:00Z"
+  };
+  const inspection = {
+    attempt,
+    task_contract: { id: attempt.task_contract.id, version: 1, objective: "Recover a durable report", non_goals: [], requirements: [], constraints: [], assumptions: [], acceptance_criteria: [{ clause_id: "durable", statement: "Survives restart" }], status: "active", created_at: attempt.created_at },
+    events: [{ id: "00000000-0000-4000-8000-000000000536", type_id: "mcg.workflow_claimed.v1", schema_version: 1, sequence: 2, workflow_id: attempt.workflow_id, attempt_id: attempt.attempt_id, attempt_revision: 2, lease_generation: 1, correlation_id: "00000000-0000-4000-8000-000000000537", causation_id: null, idempotency_key: "claim", occurred_at: attempt.updated_at, payload: {} }]
+  };
+  client.getSettings.mockResolvedValue({ schema_version: 1, revision: 1, interface_complexity: "developer", autonomy: "autonomous", shadow_experiments: true, updated_at: attempt.updated_at });
+  client.protectedRootWorkflows.mockResolvedValue([attempt]);
+  client.protectedRootWorkflow.mockResolvedValue(inspection);
+  client.cancelProtectedRootWorkflow.mockResolvedValue({ ...attempt, state: "cancel_requested", revision: 3, lease_generation: 2, lease_owner: null, lease_expires_at: null });
+  const confirmation = vi.spyOn(window, "confirm").mockReturnValue(true);
+
+  render(<App />);
+  fireEvent.click(await screen.findByRole("link", { name: /Agents/ }));
+  const workflows = await screen.findByRole("article", { name: "Durable workflows" });
+  expect(within(workflows).getByText(/Working · attempt 1 · revision 2 · generation 1/)).toBeInTheDocument();
+  fireEvent.click(within(workflows).getByRole("button", { name: "Inspect" }));
+  expect(await within(workflows).findByText("Recover a durable report")).toBeInTheDocument();
+  expect(within(workflows).getByRole("button", { name: "Canonical workflow evidence" })).toBeInTheDocument();
+  fireEvent.click(within(workflows).getByRole("button", { name: "Request cancellation" }));
+  await waitFor(() => expect(client.cancelProtectedRootWorkflow).toHaveBeenCalledWith(expect.objectContaining({
+    attempt_id: attempt.attempt_id,
+    expected_revision: 2,
+    expected_generation: 1,
+    idempotency_key: expect.stringMatching(/^desktop-cancel-/)
+  })));
+  expect(await within(workflows).findByText(/Stopping safely · attempt 1 · revision 3 · generation 2/)).toBeInTheDocument();
+  confirmation.mockRestore();
 });
 
 test("Codex-style sidebar groups project chats, searches them, and persists pins", async () => {

@@ -2,6 +2,15 @@
 
 Durable project context lives here. Update this file whenever information should survive chat context compression or future agent handoff.
 
+### 2026-08-30 - Stage 3 Desktop canonical workflow projection verified
+
+- Context: The owner requested a current implemented-versus-remaining report while Stage 3 Desktop work and a concurrent untracked Stage 3 design document are present; the persistent production goal then resumed from the canonical workflow checkpoint.
+- Decision: Keep one Root-owned workflow truth across Simple, Advanced, and Developer. Simple presents owner-facing lifecycle state, Advanced adds practical attempt/lease/criteria evidence, Developer adds read-only raw canonical history, and cancellation remains revision/generation fenced with an explicit uncertain-effect warning. Do not modify or stage the concurrent `docs/NewPRD/STAGE_3_DURABLE_WORKFLOW.md`.
+- Files: `apps/desktop/src-tauri/src/lib.rs`, `apps/desktop/src/{desktop-client.ts,App.tsx,styles.css,App.test.tsx}`, `tests/e2e/desktop-smoke.spec.ts`, `docs/NewPRD/{REQUIREMENTS_TRACEABILITY.md,IMPLEMENTATION_STATUS_REPORT_2026-08-30.md}`.
+- Commands/tests: Desktop typecheck/build; Vitest 122/122; Playwright 29/29; `cargo check -p mcg-desktop --all-targets`; Rust formatting; documentation, packaging, and diff checks all pass. Strict transitive Desktop Clippy still stops in the documented pre-existing `mcg-codex-app-server`/Desktop build-script backlog before assessing this slice; its first findings are unchanged `map_unwrap_or`, documentation, complexity, and related lint debt outside the changed workflow paths.
+- Result: The Desktop now consumes authenticated Root workflow list/show/cancel boundaries without direct storage authority. Deterministic browser E2E proves presentation-only complexity switching preserves one attempt, Developer evidence is unavailable in lower levels, and fenced cancellation is reflected back in Simple as `Stopping safely`. Stages 0–1 remain substantively implemented, Stage 2 code is complete with Debian/macOS and cumulative package gates open, Stage 3 recovery/cancellation/package gates remain, and Stages 4–13 remain unimplemented as the new canonical architecture.
+- Follow-up: Commit/push this verified Desktop slice without the other agent's file, then implement child/effect-aware cancellation, waiting-condition recovery, existing-work compatibility projection, event streaming, and the complete nonterminal process restart matrix before Stage 4.
+
 ### 2026-08-30 - Exact common-source packages and Linux AppImage native gate
 
 - Context: After the Windows installed gate passed, checkpoint `93b2378c1150ada5a3e03ae56315bb346adb6253` was pushed and transferred to sealed Ubuntu/macOS qualification clones by a verified 24,625-byte incremental Git bundle. Both remote checkouts were clean and detached at that exact commit.

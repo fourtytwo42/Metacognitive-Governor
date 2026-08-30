@@ -102,6 +102,57 @@ test.beforeEach(async ({ page }) => {
     let reviewedRunCount = 0;
     let cloudApplyCandidate: any = null;
     let windowsSandboxReady = false;
+    const canonicalWorkflowId = "00000000-0000-4000-8000-000000000601";
+    const canonicalAttemptId = "00000000-0000-4000-8000-000000000602";
+    let canonicalWorkflow = {
+      workflow_id: canonicalWorkflowId,
+      attempt_id: canonicalAttemptId,
+      task_contract: { id: "00000000-0000-4000-8000-000000000603", version: 1, content_hash: { algorithm: "blake3-256", domain: "TaskContract", digest_hex: "c".repeat(64) } },
+      parent_attempt_id: null,
+      attempt_number: 1,
+      state: "running",
+      revision: 7,
+      lease_owner: "runtime-worker-1",
+      lease_generation: 3,
+      lease_expires_at: "2026-08-18T00:05:00Z",
+      heartbeat_at: "2026-08-18T00:00:30Z",
+      checkpoint: null,
+      environment_snapshot: { algorithm: "sha256", domain: "EnvironmentSnapshot", digest_hex: "d".repeat(64) },
+      configuration: { id: "00000000-0000-4000-8000-000000000604", version: 1, content_hash: { algorithm: "blake3-256", domain: "RuntimeConfiguration", digest_hex: "e".repeat(64) } },
+      idempotency_key: "workflow-create-1",
+      retry_policy: { max_attempts: 3, initial_backoff_ms: 1000, maximum_backoff_ms: 30000 },
+      compensation_policy: null,
+      created_at: now,
+      updated_at: now
+    };
+    const canonicalTaskContract = {
+      id: canonicalWorkflow.task_contract.id,
+      version: 1,
+      previous_version: null,
+      objective: "Recover the exact durable workflow",
+      non_goals: [],
+      requirements: [{ clause_id: "REQ-1", statement: "Preserve canonical workflow truth across reconnect." }],
+      constraints: [],
+      assumptions: [],
+      acceptance_criteria: [{ clause_id: "AC-1", statement: "The same attempt and event sequence remain visible after reconnect." }],
+      status: "active",
+      created_at: now
+    };
+    const canonicalEvents = [{
+      id: "00000000-0000-4000-8000-000000000605",
+      type_id: "mcg.workflow.attempt.claimed",
+      schema_version: 1,
+      sequence: 2,
+      workflow_id: canonicalWorkflowId,
+      attempt_id: canonicalAttemptId,
+      attempt_revision: 7,
+      lease_generation: 3,
+      correlation_id: "00000000-0000-4000-8000-000000000606",
+      causation_id: "00000000-0000-4000-8000-000000000607",
+      idempotency_key: "workflow-claim-1",
+      occurred_at: now,
+      payload: { owner: "runtime-worker-1" }
+    }];
     const history = [{ settings: initial, reason: "initial settings", changed_at: initial.updated_at }];
     Object.defineProperty(window, "__TAURI_INTERNALS__", {
       value: {
@@ -118,6 +169,18 @@ test.beforeEach(async ({ page }) => {
             writer_queue_capacity: 64,
             migration_receipt: { schema_version: 1, from_storage_schema: 50, to_storage_schema: 51, backup_path: "backups/pre-root.mcgb", backup_sha256: "b".repeat(64), migrated_at: "2026-08-29T00:00:00Z" }
           };
+          if (command === "protected_root_workflows") return [canonicalWorkflow];
+          if (command === "protected_root_workflow") {
+            if (args.workflowId !== canonicalWorkflowId) return null;
+            return { attempt: canonicalWorkflow, task_contract: canonicalTaskContract, events: canonicalEvents };
+          }
+          if (command === "cancel_protected_root_workflow") {
+            if (args.request.attempt_id !== canonicalAttemptId || args.request.expected_revision !== 7 || args.request.expected_generation !== 3) {
+              throw new Error("stale workflow cancellation fence");
+            }
+            canonicalWorkflow = { ...canonicalWorkflow, state: "cancel_requested", revision: 8, updated_at: "2026-08-18T00:01:00Z" };
+            return canonicalWorkflow;
+          }
           if (command === "update_configuration") return { schema_version: 1, configured: false, current_version: "0.1.0", detail: "This build has no trusted update endpoint." };
           if (command === "user_settings_history") return { revisions: [...history] };
           if (command === "list_backups") return { backups: [] };
@@ -419,6 +482,53 @@ test("Simple Advanced and Developer share one workspace while exposing progressi
   await expect(composer).toHaveValue("Keep this active work unchanged");
 });
 
+test("durable workflows keep one Root truth across Simple Advanced and Developer", async ({ page }) => {
+  test.setTimeout(90_000);
+  await page.goto("/");
+  await page.getByRole("link", { name: "Agents", exact: true }).click();
+
+  let workflows = page.getByRole("article", { name: "Durable workflows" });
+  await expect(workflows.getByText("Working", { exact: true })).toBeVisible();
+  await expect(workflows.getByText(/attempt 1/)).toHaveCount(0);
+  await expect(workflows.getByRole("button", { name: "Inspect" })).toHaveCount(0);
+  await expect(workflows.getByRole("button", { name: "Canonical workflow evidence" })).toHaveCount(0);
+
+  await enableAdvancedMode(page);
+  await page.getByRole("link", { name: "Agents", exact: true }).click();
+  workflows = page.getByRole("article", { name: "Durable workflows" });
+  await expect(workflows.getByText(/Working · attempt 1 · revision 7 · generation 3/)).toBeVisible();
+  await expect(workflows.getByText(/Lease owner/)).toContainText("runtime-worker-1");
+  await workflows.getByRole("button", { name: "Inspect" }).click();
+  await expect(workflows.getByText("Recover the exact durable workflow")).toBeVisible();
+  await expect(workflows.getByText("The same attempt and event sequence remain visible after reconnect.")).toBeVisible();
+  await expect(workflows.getByRole("button", { name: "Canonical workflow evidence" })).toHaveCount(0);
+
+  await openOwnerSurface(page, "Settings");
+  await page.getByRole("button", { name: "General", exact: true }).click();
+  await page.getByRole("radio", { name: /Developer/ }).click();
+  await expect(page.getByRole("radio", { name: /Developer/ })).toBeChecked();
+  await page.getByRole("button", { name: "Back to app" }).click();
+  await page.getByRole("link", { name: "Agents", exact: true }).click();
+  workflows = page.getByRole("article", { name: "Durable workflows" });
+  const evidence = workflows.getByRole("button", { name: "Canonical workflow evidence" });
+  await evidence.click();
+  await expect(workflows.getByRole("textbox", { name: /Canonical workflow .* evidence/ })).toContainText("mcg.workflow.attempt.claimed");
+  await expect(workflows.getByRole("textbox", { name: /Canonical workflow .* evidence/ })).toContainText("correlation_id");
+
+  page.once("dialog", (dialog) => dialog.accept());
+  await workflows.getByRole("button", { name: "Request cancellation" }).click();
+  await expect(workflows.getByText(/Stopping safely · attempt 1 · revision 8 · generation 3/)).toBeVisible();
+
+  await openOwnerSurface(page, "Settings");
+  await page.getByRole("button", { name: "General", exact: true }).click();
+  await page.getByRole("radio", { name: /Simple/ }).click();
+  await page.getByRole("button", { name: "Back to app" }).click();
+  await page.getByRole("link", { name: "Agents", exact: true }).click();
+  workflows = page.getByRole("article", { name: "Durable workflows" });
+  await expect(workflows.getByText("Stopping safely", { exact: true })).toBeVisible();
+  await expect(workflows.getByRole("button", { name: "Canonical workflow evidence" })).toHaveCount(0);
+});
+
 test("consumer shell starts simple and can reveal advanced status", async ({ page }) => {
   test.setTimeout(180_000);
   await page.goto("/");
@@ -474,7 +584,7 @@ test("consumer shell starts simple and can reveal advanced status", async ({ pag
   await windowsSandbox.getByRole("button", { name: "Grant read access" }).click();
   await expect(windowsSandbox.getByText(/Codex sandbox read access is ready/)).toBeVisible();
   await page.getByText("Codex feature flags", { exact: true }).click();
-  const featureFlags = page.getByLabel("Codex feature flags", { exact: true });
+  const featureFlags = page.locator('.codex-feature-list[aria-label="Codex feature flags"]');
   await expect(featureFlags).toBeVisible();
   await page.getByRole("textbox", { name: "Search Codex feature flags" }).fill("memor");
   await expect(featureFlags.getByText("Memories", { exact: true })).toBeVisible();

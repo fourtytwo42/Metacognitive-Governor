@@ -1848,6 +1848,11 @@ input:focus, select:focus, textarea:focus { border-color: #777; box-shadow: 0 0 
 .assignment-row, .team-row, .instance-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 13px 4px; border-top: 1px solid var(--mcg-border); }
 .assignment-row > span, .team-row > span, .instance-row > span { display: grid; min-width: 0; gap: 3px; }
 .assignment-row small, .team-row small, .instance-row small { color: var(--mcg-muted); }
+.canonical-workflow-row { flex-wrap: wrap; align-items: flex-start; }
+.canonical-workflow-row > span { flex: 1 1 360px; }
+.workflow-inspection { flex: 1 0 100%; display: grid; gap: 10px; padding: 12px; border: 1px solid var(--mcg-border); border-radius: 10px; background: var(--mcg-bg); }
+.workflow-inspection p, .workflow-inspection ul { margin: 0; }
+.workflow-inspection pre { max-height: 360px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
 .assignment-row select { width: min(100%, 330px); }
 .organization-editor label, .role-editor label, .revision-preview label { display: grid; gap: 7px; }
 .editor-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }

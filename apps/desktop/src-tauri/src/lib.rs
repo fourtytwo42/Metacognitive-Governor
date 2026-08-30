@@ -179,6 +179,35 @@ async fn protected_root_status() -> Result<mcg_contracts::RootStatus, String> {
 }
 
 #[tauri::command]
+async fn protected_root_workflows() -> Result<Vec<mcg_contracts::WorkflowAttempt>, String> {
+    mcg_platform::query_root_workflows(&AppConfig::default().data_directory)
+        .await
+        .map_err(|error| format!("Protected Root workflows could not be loaded: {error}"))
+}
+
+#[tauri::command]
+async fn protected_root_workflow(
+    workflow_id: String,
+) -> Result<Option<mcg_contracts::WorkflowInspection>, String> {
+    let workflow_id = mcg_contracts::WorkflowId(
+        uuid::Uuid::parse_str(&workflow_id)
+            .map_err(|error| format!("Workflow ID is invalid: {error}"))?,
+    );
+    mcg_platform::query_root_workflow(&AppConfig::default().data_directory, workflow_id)
+        .await
+        .map_err(|error| format!("Protected Root workflow could not be loaded: {error}"))
+}
+
+#[tauri::command]
+async fn cancel_protected_root_workflow(
+    request: mcg_contracts::WorkflowCancelRequest,
+) -> Result<mcg_contracts::WorkflowAttempt, String> {
+    mcg_platform::cancel_root_workflow(&AppConfig::default().data_directory, &request)
+        .await
+        .map_err(|error| format!("Protected Root workflow cancellation was rejected: {error}"))
+}
+
+#[tauri::command]
 async fn run_diagnostics() -> Result<DiagnosticReport, String> {
     let response = reqwest::Client::new()
         .get(format!("{LOCAL_DAEMON}/api/v1/system/diagnostics"))
@@ -3977,6 +4006,9 @@ pub fn run() {
             runtime_label,
             local_service_status,
             protected_root_status,
+            protected_root_workflows,
+            protected_root_workflow,
+            cancel_protected_root_workflow,
             run_diagnostics,
             updater::update_configuration,
             updater::check_for_update,
