@@ -73,11 +73,13 @@ observation before the workflow can commit, compensate, retry, cancel, or settle
 
 Directly invoking the packaged runner grants no capability beyond the invoking OS user's
 existing filesystem authority. It must never be treated as a substitute for Root policy,
-OS sandboxing, process-tree confinement, or the action ledger.
+OS sandboxing, or the action ledger. Root-supervised execution confines each request to a
+Windows Job Object or POSIX process group and terminates the whole tree at the shared
+deadline; this process boundary is defense in depth, not a filesystem or network sandbox.
 
 ## Verification completed
 
-- Runner unit and separate-process tests: 9 passed.
+- Runner unit and separate-process tests: 17 passed (5 unit and 12 separate-process).
 - Storage action/recovery suite within 103 passing storage tests, including backward-compatible
   origin decoding, bounds validation, canonical inspection, and replay-substitution rejection.
 - Protected Root tests: 11 passed (10 unit and 1 real-process integration), including
@@ -90,9 +92,11 @@ OS sandboxing, process-tree confinement, or the action ledger.
 - Contracts and platform strict all-target Clippy: passed.
 - Runtime tests: 108 passed with two explicit native Windows Sandbox package gates ignored.
 - Protected Root migration-process test: passed.
-- Action runner tests: 13 passed (5 unit and 8 separate-process), including deterministic
+- Action runner tests: 17 passed (5 unit and 12 separate-process), including deterministic
   pre-effect exit, post-effect lost response, timeout-before-effect, timeout-after-effect,
-  PID reaping, and rejection of work scheduled after the deadline.
+  direct-child and descendant reaping, rejection of work scheduled after the deadline,
+  malformed responses, diagnostic output, bounded stdout/stderr overflow, and a leader that
+  exits while a descendant retains inherited pipes.
 - Strict runner all-target Clippy: passed with `-D warnings`.
 - Strict client-only runner Clippy and dependency-shape checks: passed; `cap-fs-ext` and
   `cap-std` are absent from the Root-linked feature graph.
@@ -112,7 +116,8 @@ The unit suite covers create/inspect/duplicate/compensate behavior, operation an
 substitution, traversal rejection, changed-target preservation, empty-root qualification,
 and cleanup. Separate-process coverage proves one-shot request/response behavior, malformed
 input failure, the package qualification contract, uncertain classification after a lost
-response, and bounded kill/reap behavior before and after an effect. The fault fixture is a
+response, bounded output/diagnostic failure, and whole-process-tree kill/reap behavior before
+and after an effect. The fault fixture is a
 separate executable used only from tests; release packaging's exact sidecar allowlist copies
 only `mcg-action-runner`. Unix additionally compiles a symlink escape test, which must run on
 the native Linux and macOS lanes.
@@ -131,8 +136,10 @@ Stage 4 is not complete until all of the following pass:
    compatibility producers plus exact invocation/command/approval focus remain. The current
    Desktop source-workflow loader is not the complete navigation contract. Add a Root HTTP/API
    projection only if a non-local product consumer requires it.
-3. Semantic path policy, resource budgets, process-tree confinement, and platform sandbox
-   capability reporting pass adversarial Windows, Linux, and macOS tests.
+3. Semantic path policy, resource budgets beyond bounded I/O/deadlines, network denial, and
+   platform sandbox capability reporting pass adversarial Windows, Linux, and macOS tests.
+   Windows Job Object/POSIX process-group confinement and focused Windows descendant tests
+   are implemented; native Linux/macOS and packaged process-tree qualification remain.
 4. Fresh Windows installer/portable, Linux Debian/AppImage, and macOS app/DMG builds pass
    native package UAT. The Debian sudo and macOS authenticated owner gates remain intact.
 
