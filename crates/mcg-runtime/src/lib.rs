@@ -3077,6 +3077,32 @@ fn effective_delegation_permission_mode(
     }
 }
 
+fn coder_report_template(
+    success_conditions: &[String],
+    integration_ready: bool,
+) -> serde_json::Result<String> {
+    let requirement_evidence = success_conditions
+        .iter()
+        .map(|requirement| {
+            serde_json::json!({
+                "requirement": requirement,
+                "satisfied": true,
+                "evidence": "<replace with concrete observable evidence>",
+                "verification": "<replace with the exact test, command, inspection, or workflow>"
+            })
+        })
+        .collect::<Vec<_>>();
+    serde_json::to_string_pretty(&serde_json::json!({
+        "summary": "<replace with a concise verified result>",
+        "changed_files": [],
+        "checks": ["<replace with at least one completed verification check>"],
+        "evidence": ["<replace with at least one concrete evidence item>"],
+        "requirement_evidence": requirement_evidence,
+        "unresolved_issues": [],
+        "integration_ready": integration_ready
+    }))
+}
+
 fn effective_parallel_specialist_limit(
     preferences: &ExecutionPreferences,
     organization: &OrganizationGenome,
@@ -5917,7 +5943,7 @@ impl AppRuntime {
                 recovery_state: CodexRecoveryState::Healthy,
             })?;
         let mut coder_prompt = format!(
-            "{} brief from the Coordinator Agent:\n{}\n\nScope: {}\nConstraints: {}\nSuccess conditions: {}\nContext references: {}\n\n{} Before reporting, audit the pinned success conditions one by one. Exercise representative owner workflows and negative/edge cases; do not treat a shallow happy-path check as proof of behavioral completeness. The `requirement_evidence` report field must contain exactly one entry for every success condition, copying its text exactly and naming concrete evidence plus the verification method. If any condition is not verified, mark it unsatisfied and report the blocker. Send questions and bounded progress to `message_coordinator`. {} {}",
+            "{} brief from the Coordinator Agent:\n{}\n\nScope: {}\nConstraints: {}\nSuccess conditions: {}\nContext references: {}\n\n{} Before reporting, audit the pinned success conditions one by one. Exercise representative owner workflows and negative/edge cases; do not treat a shallow happy-path check as proof of behavioral completeness. The `requirement_evidence` report field must contain exactly one entry for every success condition, copying its text exactly and naming concrete evidence plus the verification method. Call `report_result` only after every entry is independently verified and can be marked `satisfied: true`; if any condition remains unverified, send the concrete blocker through `message_coordinator` instead of submitting a completion report. Send questions and bounded progress to `message_coordinator`. {} {}",
             if is_tester { "Testing" } else { "Coding" },
             brief.objective,
             brief.scope.join("; "),
@@ -5932,7 +5958,7 @@ impl AppRuntime {
                 "Make the changes and verify them. Your checks run in an isolated pre-integration workspace; do not commit or integrate the branch."
             },
             if self.config.two_agent_conversations {
-                "Before finishing, you MUST call the fully qualified `mcp__mcg_agent__report_result` tool exactly once with summary, changed_files, checks, evidence, requirement_evidence, unresolved_issues, and integration_ready. This is your required final action. Ordinary assistant text is not a report and the delegation will fail without the tool call."
+                "Before finishing, you MUST make one accepted call to the fully qualified `mcp__mcg_agent__report_result` tool with summary, changed_files, checks, evidence, requirement_evidence, unresolved_issues, and integration_ready. Validate the complete payload against the pinned template included in this prompt before calling. If the tool rejects the payload, correct the exact reported field and retry; ordinary assistant text is not a report and cannot complete the delegation."
             } else {
                 "Report what changed and what you verified in your final response."
             },
@@ -5942,6 +5968,14 @@ impl AppRuntime {
                 ""
             }
         );
+        if self.config.two_agent_conversations {
+            let report_template =
+                coder_report_template(&brief.success_conditions, !read_only_delegation)
+                    .map_err(StorageError::from)?;
+            coder_prompt = format!(
+                "Pinned `report_result` payload template (replace placeholders, preserve every exact `requirement` string and the `integration_ready` value):\n{report_template}\n\n{coder_prompt}"
+            );
+        }
         let receipt = context_receipt(
             &brief.context_references,
             &coder_prompt,
@@ -27775,6 +27809,40 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn coder_report_template_preserves_every_pinned_requirement_and_readiness() {
+        let requirements = vec![
+            "Verify the installed provider journey.".to_owned(),
+            "Preserve exact punctuation: alpha, beta; gamma.".to_owned(),
+            "Prove restart-safe evidence.".to_owned(),
+        ];
+        let encoded = coder_report_template(&requirements, true).expect("report template");
+        let value: serde_json::Value = serde_json::from_str(&encoded).expect("template JSON");
+        let evidence = value["requirement_evidence"]
+            .as_array()
+            .expect("requirement evidence array");
+
+        assert_eq!(evidence.len(), requirements.len());
+        assert_eq!(
+            evidence
+                .iter()
+                .map(|item| item["requirement"].as_str().expect("requirement"))
+                .collect::<Vec<_>>(),
+            requirements.iter().map(String::as_str).collect::<Vec<_>>()
+        );
+        assert!(
+            evidence
+                .iter()
+                .all(|item| item["satisfied"].as_bool() == Some(true))
+        );
+        assert_eq!(value["integration_ready"].as_bool(), Some(true));
+
+        let read_only = coder_report_template(&requirements, false).expect("read-only template");
+        let read_only: serde_json::Value =
+            serde_json::from_str(&read_only).expect("read-only template JSON");
+        assert_eq!(read_only["integration_ready"].as_bool(), Some(false));
+    }
 
     #[tokio::test]
     async fn invocation_transport_is_conversation_scoped_and_release_respects_active_work() {

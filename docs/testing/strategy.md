@@ -329,6 +329,14 @@ The Chat/Coordinator handoff crosses only the executable-pinned, per-thread
 must prove this bridge works while the role thread remains read-only and must not
 substitute a broad approval bypass or manufacture a Root approval for that internal
 handoff.
+Specialist completion is also contract-tested rather than inferred from model prose.
+The runtime includes a machine-generated `report_result` template with exactly one
+entry for every pinned success condition, preserves each condition byte-for-byte,
+and fixes `integration_ready` to the delegation's authority mode. Specialists send
+unverified conditions to the Coordinator as blockers; the protected validator
+continues to reject missing, duplicate, unsatisfied, evidence-free, or incorrectly
+readiness-marked reports. Installed provider UAT must observe one accepted durable
+report and a terminal coordination batch after exercising this correction.
 The fixture is disconnected before daemon restart; the second phase requires the
 same task, evaluator, audit, and deterministic side-effect-free replay evidence with
 no provider available. Windows, Linux, and macOS package harnesses share this gate,
