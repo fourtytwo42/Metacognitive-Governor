@@ -779,7 +779,7 @@ launch_and_capture() {
   wait_for_health "$port"
   local window_id=""
   for attempt in $(seq 1 100); do
-    window_id="$(runuser -u "$uat_user" -- env DISPLAY="$display" xdotool search --name '^MCG$' 2>/dev/null | head -n 1 || true)"
+    window_id="$(runuser -u "$uat_user" -- env DISPLAY="$display" xdotool search --name '^(MCG|MetaCog)$' 2>/dev/null | head -n 1 || true)"
     [[ -n "$window_id" ]] && break
     sleep 0.1
   done
