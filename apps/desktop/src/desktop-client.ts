@@ -1229,6 +1229,83 @@ export interface CanonicalWorkflowInspection {
   events: CanonicalWorkflowEvent[];
 }
 
+export type ActionEffectClass = "observational" | "reversible" | "consequential" | "irreversible";
+export type ActionExecutionState = "proposed" | "authorized" | "executing" | "observed" | "no_effect_confirmed" | "effect_confirmed" | "outcome_unknown" | "reconciling" | "validated" | "committed" | "denied" | "quarantined" | "compensated";
+
+export interface CanonicalActionSummary {
+  action_id: string;
+  execution_id: string;
+  workflow_id: string;
+  attempt_id: string;
+  actor: string;
+  effect_class: ActionEffectClass;
+  state: ActionExecutionState;
+  outcome: unknown;
+  revision: number;
+  lease_generation: number;
+  updated_at: string;
+}
+
+export interface CanonicalVersionedPayload {
+  type_id: string;
+  schema_version: number;
+  canonical_encoding: string;
+  normalization: string;
+  bytes: number[];
+}
+
+export interface CanonicalActionInspection {
+  envelope: {
+    id: string;
+    workflow_id: string;
+    attempt_id: string;
+    actor: string;
+    effect_class: ActionEffectClass;
+    operation: CanonicalVersionedPayload;
+    operation_hash: { algorithm: string; domain: string; digest_hex: string };
+    created_at: string;
+    [key: string]: unknown;
+  };
+  executions: Array<{
+    id: string;
+    action_id: string;
+    attempt_number: number;
+    state: ActionExecutionState;
+    revision: number;
+    lease_generation: number;
+    executor: string | null;
+    outcome: unknown;
+    created_at: string;
+    updated_at: string;
+  }>;
+  receipts: Array<{ id: string; action_id: string; execution_id: string; observation: CanonicalVersionedPayload; observed_at: string }>;
+  reconciliation_jobs: Array<{
+    id: string;
+    action_id: string;
+    execution_id: string;
+    state: "pending" | "running" | "resolved" | "user_action_required" | "quarantined";
+    revision: number;
+    lease_generation: number;
+    attempts: number;
+    deadline: string;
+    updated_at: string;
+    [key: string]: unknown;
+  }>;
+  events: Array<{
+    id: string;
+    type_id: string;
+    schema_version: number;
+    sequence: number;
+    action_id: string;
+    execution_id: string | null;
+    correlation_id: string;
+    causation_id: string | null;
+    idempotency_key: string;
+    occurred_at: string;
+    payload: CanonicalVersionedPayload;
+  }>;
+}
+
 export interface CanonicalWorkflowCancelRequest {
   attempt_id: string;
   expected_revision: number;
@@ -2006,6 +2083,14 @@ export function listProtectedRootWorkflows(): Promise<CanonicalWorkflowAttempt[]
 
 export function getProtectedRootWorkflow(workflowId: string): Promise<CanonicalWorkflowInspection | null> {
   return invoke("protected_root_workflow", { workflowId });
+}
+
+export function listProtectedRootActions(limit = 100): Promise<CanonicalActionSummary[]> {
+  return invoke("protected_root_actions", { limit });
+}
+
+export function getProtectedRootAction(actionId: string, eventLimit = 500): Promise<CanonicalActionInspection | null> {
+  return invoke("protected_root_action", { actionId, eventLimit });
 }
 
 export function cancelProtectedRootWorkflow(request: CanonicalWorkflowCancelRequest): Promise<CanonicalWorkflowAttempt> {

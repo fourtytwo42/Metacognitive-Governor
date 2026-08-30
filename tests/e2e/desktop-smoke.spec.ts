@@ -153,6 +153,29 @@ test.beforeEach(async ({ page }) => {
       occurred_at: now,
       payload: { owner: "runtime-worker-1" }
     }];
+    const canonicalActionId = "00000000-0000-4000-8000-000000000608";
+    const canonicalExecutionId = "00000000-0000-4000-8000-000000000609";
+    const actionPayload = { type_id: "mcg.governed_filesystem_operation.v1", schema_version: 1, canonical_encoding: "canonical-cbor-v1", normalization: "canonical-json-v1", bytes: [1, 2, 3] };
+    const canonicalAction = {
+      action_id: canonicalActionId,
+      execution_id: canonicalExecutionId,
+      workflow_id: canonicalWorkflowId,
+      attempt_id: canonicalAttemptId,
+      actor: "root-action-runner",
+      effect_class: "reversible",
+      state: "outcome_unknown",
+      outcome: { outcome: "outcome_unknown", hint: actionPayload },
+      revision: 3,
+      lease_generation: 2,
+      updated_at: now
+    };
+    const canonicalActionInspection = {
+      envelope: { id: canonicalActionId, workflow_id: canonicalWorkflowId, attempt_id: canonicalAttemptId, actor: canonicalAction.actor, effect_class: canonicalAction.effect_class, operation: actionPayload, operation_hash: { algorithm: "blake3-256", domain: "MetaCog.ActionOperation", digest_hex: "f".repeat(64) }, created_at: now },
+      executions: [{ id: canonicalExecutionId, action_id: canonicalActionId, attempt_number: 1, state: canonicalAction.state, revision: 3, lease_generation: 2, executor: canonicalAction.actor, outcome: canonicalAction.outcome, created_at: now, updated_at: now }],
+      receipts: [],
+      reconciliation_jobs: [{ id: "00000000-0000-4000-8000-00000000060a", action_id: canonicalActionId, execution_id: canonicalExecutionId, adapter: actionPayload, state: "pending", revision: 1, lease_generation: 0, lease_owner: null, lease_expires_at: null, next_attempt_at: now, attempts: 0, deadline: "2026-08-18T01:00:00Z", last_hint: null, created_at: now, updated_at: now }],
+      events: [{ id: "00000000-0000-4000-8000-00000000060b", type_id: "mcg.action_classified.v1", schema_version: 1, sequence: 4, action_id: canonicalActionId, execution_id: canonicalExecutionId, correlation_id: "00000000-0000-4000-8000-00000000060c", causation_id: null, idempotency_key: "action-classify-1", occurred_at: now, payload: actionPayload }]
+    };
     const history = [{ settings: initial, reason: "initial settings", changed_at: initial.updated_at }];
     Object.defineProperty(window, "__TAURI_INTERNALS__", {
       value: {
@@ -174,6 +197,8 @@ test.beforeEach(async ({ page }) => {
             if (args.workflowId !== canonicalWorkflowId) return null;
             return { attempt: canonicalWorkflow, task_contract: canonicalTaskContract, events: canonicalEvents };
           }
+          if (command === "protected_root_actions") return [canonicalAction];
+          if (command === "protected_root_action") return args.actionId === canonicalActionId ? canonicalActionInspection : null;
           if (command === "cancel_protected_root_workflow") {
             if (args.request.attempt_id !== canonicalAttemptId || args.request.expected_revision !== 7 || args.request.expected_generation !== 3) {
               throw new Error("stale workflow cancellation fence");
@@ -527,6 +552,50 @@ test("durable workflows keep one Root truth across Simple Advanced and Developer
   workflows = page.getByRole("article", { name: "Durable workflows" });
   await expect(workflows.getByText("Stopping safely", { exact: true })).toBeVisible();
   await expect(workflows.getByRole("button", { name: "Canonical workflow evidence" })).toHaveCount(0);
+});
+
+test("governed actions keep one Root truth across Simple Advanced and Developer", async ({ page }) => {
+  test.setTimeout(90_000);
+  await page.goto("/");
+  await page.getByRole("link", { name: "Agents", exact: true }).click();
+
+  let actions = page.getByRole("article", { name: "Governed actions" });
+  await expect(actions.getByText("Checking what happened", { exact: true })).toBeVisible();
+  await expect(actions.getByText(/revision 3/)).toHaveCount(0);
+  await expect(actions.getByRole("button", { name: "Inspect" })).toHaveCount(0);
+  await expect(actions.getByRole("button", { name: "Canonical action evidence" })).toHaveCount(0);
+
+  await enableAdvancedMode(page);
+  await page.getByRole("link", { name: "Agents", exact: true }).click();
+  actions = page.getByRole("article", { name: "Governed actions" });
+  await expect(actions.getByText(/Checking what happened · reversible · revision 3 · generation 2/)).toBeVisible();
+  await actions.getByRole("button", { name: "Inspect" }).click();
+  await expect(actions.getByText("mcg.governed_filesystem_operation.v1")).toBeVisible();
+  await expect(actions.getByText("Reconciliation: pending")).toBeVisible();
+  await expect(actions.getByRole("button", { name: "Canonical action evidence" })).toHaveCount(0);
+
+  await openOwnerSurface(page, "Settings");
+  await page.getByRole("button", { name: "General", exact: true }).click();
+  await page.getByRole("radio", { name: /Developer/ }).click();
+  await page.getByRole("button", { name: "Back to app" }).click();
+  await page.getByRole("link", { name: "Agents", exact: true }).click();
+  actions = page.getByRole("article", { name: "Governed actions" });
+  await actions.getByRole("button", { name: "Canonical action evidence" }).click();
+  const evidence = actions.getByRole("textbox", { name: /Canonical action .* evidence/ });
+  await expect(evidence).toContainText("mcg.action_classified.v1");
+  await expect(evidence).toContainText("correlation_id");
+  const accessibility = await new AxeBuilder({ page }).include(".canonical-action-section").analyze();
+  expect(accessibility.violations, "governed-action accessibility violations").toEqual([]);
+
+  await openOwnerSurface(page, "Settings");
+  await page.getByRole("button", { name: "General", exact: true }).click();
+  await page.getByRole("radio", { name: /Simple/ }).click();
+  await page.getByRole("button", { name: "Back to app" }).click();
+  await page.getByRole("link", { name: "Agents", exact: true }).click();
+  actions = page.getByRole("article", { name: "Governed actions" });
+  await expect(actions.getByText("Checking what happened", { exact: true })).toBeVisible();
+  await expect(actions.getByRole("button", { name: "Inspect" })).toHaveCount(0);
+  await expect(actions.getByRole("button", { name: "Canonical action evidence" })).toHaveCount(0);
 });
 
 test("consumer shell starts simple and can reveal advanced status", async ({ page }) => {

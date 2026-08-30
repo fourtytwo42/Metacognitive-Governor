@@ -214,6 +214,8 @@ const client = vi.hoisted(() => ({
   ,protectedRootStatus: vi.fn()
   ,protectedRootWorkflows: vi.fn()
   ,protectedRootWorkflow: vi.fn()
+  ,protectedRootActions: vi.fn()
+  ,protectedRootAction: vi.fn()
   ,cancelProtectedRootWorkflow: vi.fn()
   ,listOpenInApplications: vi.fn()
   ,openWorkspaceIn: vi.fn()
@@ -421,6 +423,8 @@ vi.mock("./desktop-client", () => ({
   getProtectedRootStatus: client.protectedRootStatus,
   listProtectedRootWorkflows: client.protectedRootWorkflows,
   getProtectedRootWorkflow: client.protectedRootWorkflow,
+  listProtectedRootActions: client.protectedRootActions,
+  getProtectedRootAction: client.protectedRootAction,
   cancelProtectedRootWorkflow: client.cancelProtectedRootWorkflow,
   listOpenInApplications: client.listOpenInApplications,
   openWorkspaceIn: client.openWorkspaceIn,
@@ -450,6 +454,8 @@ beforeEach(() => {
   client.protectedRootStatus.mockReset();
   client.protectedRootWorkflows.mockReset();
   client.protectedRootWorkflow.mockReset();
+  client.protectedRootActions.mockReset();
+  client.protectedRootAction.mockReset();
   client.cancelProtectedRootWorkflow.mockReset();
   client.start.mockReset();
   client.complete.mockReset();
@@ -953,6 +959,8 @@ beforeEach(() => {
   });
   client.protectedRootWorkflows.mockResolvedValue([]);
   client.protectedRootWorkflow.mockResolvedValue(null);
+  client.protectedRootActions.mockResolvedValue([]);
+  client.protectedRootAction.mockResolvedValue(null);
   client.cancelProtectedRootWorkflow.mockRejectedValue(new Error("No workflow fixture configured."));
   client.updateSettings.mockImplementation(async (request) => ({
     schema_version: 1,
@@ -1169,6 +1177,47 @@ test("durable workflows progressively disclose Root evidence and fence cancellat
   })));
   expect(await within(workflows).findByText(/Stopping safely · attempt 1 · revision 3 · generation 2/)).toBeInTheDocument();
   confirmation.mockRestore();
+});
+
+test("Developer progressively inspects canonical governed-action evidence", async () => {
+  const action = {
+    action_id: "00000000-0000-4000-8000-000000000541",
+    execution_id: "00000000-0000-4000-8000-000000000542",
+    workflow_id: "00000000-0000-4000-8000-000000000531",
+    attempt_id: "00000000-0000-4000-8000-000000000532",
+    actor: "root-action-runner",
+    effect_class: "reversible",
+    state: "outcome_unknown",
+    outcome: { outcome: "outcome_unknown" },
+    revision: 3,
+    lease_generation: 2,
+    updated_at: "2026-08-30T12:00:00Z"
+  };
+  const payload = { type_id: "mcg.governed_filesystem_operation.v1", schema_version: 1, canonical_encoding: "canonical-cbor-v1", normalization: "canonical-json-v1", bytes: [1, 2, 3] };
+  const inspection = {
+    envelope: { id: action.action_id, workflow_id: action.workflow_id, attempt_id: action.attempt_id, actor: action.actor, effect_class: action.effect_class, operation: payload, operation_hash: { algorithm: "blake3-256", domain: "MetaCog.ActionOperation", digest_hex: "d".repeat(64) }, created_at: action.updated_at },
+    executions: [{ id: action.execution_id, action_id: action.action_id, attempt_number: 1, state: action.state, revision: 3, lease_generation: 2, executor: action.actor, outcome: action.outcome, created_at: action.updated_at, updated_at: action.updated_at }],
+    receipts: [],
+    reconciliation_jobs: [{ id: "00000000-0000-4000-8000-000000000543", action_id: action.action_id, execution_id: action.execution_id, adapter: payload, state: "pending", revision: 1, lease_generation: 0, lease_owner: null, lease_expires_at: null, next_attempt_at: action.updated_at, attempts: 0, deadline: "2026-08-30T13:00:00Z", last_hint: null, created_at: action.updated_at, updated_at: action.updated_at }],
+    events: [{ id: "00000000-0000-4000-8000-000000000544", type_id: "mcg.action_classified.v1", schema_version: 1, sequence: 4, action_id: action.action_id, execution_id: action.execution_id, correlation_id: "00000000-0000-4000-8000-000000000545", causation_id: null, idempotency_key: "classify", occurred_at: action.updated_at, payload }]
+  };
+  client.getSettings.mockResolvedValue({ schema_version: 1, revision: 1, interface_complexity: "developer", autonomy: "autonomous", shadow_experiments: true, updated_at: action.updated_at });
+  client.protectedRootActions.mockResolvedValue([action]);
+  client.protectedRootAction.mockResolvedValue(inspection);
+
+  render(<App />);
+  fireEvent.click(await screen.findByRole("link", { name: /Agents/ }));
+  const actions = await screen.findByRole("article", { name: "Governed actions" });
+  expect(within(actions).getByText(/Checking what happened · reversible · revision 3 · generation 2/)).toBeInTheDocument();
+  fireEvent.click(within(actions).getByRole("button", { name: "Inspect" }));
+  expect(await within(actions).findByText("mcg.governed_filesystem_operation.v1")).toBeInTheDocument();
+  expect(within(actions).getByText("Reconciliation: pending")).toBeInTheDocument();
+  expect(within(actions).getByRole("button", { name: "Canonical action evidence" })).toBeInTheDocument();
+  fireEvent.click(within(actions).getByRole("button", { name: "Canonical action evidence" }));
+  const evidence = within(actions).getByRole("textbox", { name: /Canonical action .* evidence/ });
+  expect(evidence).toHaveAttribute("aria-readonly", "true");
+  expect(evidence).toHaveTextContent("mcg.action_classified.v1");
+  expect(evidence).toHaveTextContent("correlation_id");
 });
 
 test("Codex-style sidebar groups project chats, searches them, and persists pins", async () => {

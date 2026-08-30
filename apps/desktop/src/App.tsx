@@ -206,6 +206,8 @@ import {
   getProtectedRootStatus,
   listProtectedRootWorkflows,
   getProtectedRootWorkflow,
+  listProtectedRootActions,
+  getProtectedRootAction,
   cancelProtectedRootWorkflow,
   getGovernorOverview,
   getGovernorControlPolicy,
@@ -411,6 +413,9 @@ import {
   type ProtectedRootStatus,
   type CanonicalWorkflowAttempt,
   type CanonicalWorkflowInspection,
+  type CanonicalActionSummary,
+  type CanonicalActionInspection,
+  type ActionExecutionState,
   type WorkflowState,
   type UpdateCheck,
   type UpdateConfiguration,
@@ -464,6 +469,24 @@ function workflowStateLabel(state: WorkflowState): string {
 
 function workflowCanRequestCancellation(state: WorkflowState): boolean {
   return state === "running" || state === "verifying" || typeof state === "object";
+}
+
+function actionStateLabel(state: ActionExecutionState): string {
+  return ({
+    proposed: "Proposed",
+    authorized: "Approved and ready",
+    executing: "Working",
+    observed: "Checking result",
+    no_effect_confirmed: "No change made",
+    effect_confirmed: "Change confirmed",
+    outcome_unknown: "Checking what happened",
+    reconciling: "Recovering safely",
+    validated: "Verified",
+    committed: "Completed",
+    denied: "Not allowed",
+    quarantined: "Needs attention",
+    compensated: "Reverted"
+  } as Record<ActionExecutionState, string>)[state];
 }
 
 function codexFeatureStageLabel(stage: CodexFeature["stage"]): string {
@@ -2603,6 +2626,10 @@ export function App() {
   const [workflowInspections, setWorkflowInspections] = useState<Record<string, CanonicalWorkflowInspection>>({});
   const [workflowBusy, setWorkflowBusy] = useState<string | null>(null);
   const [workflowError, setWorkflowError] = useState<string | null>(null);
+  const [canonicalActions, setCanonicalActions] = useState<CanonicalActionSummary[]>([]);
+  const [actionInspections, setActionInspections] = useState<Record<string, CanonicalActionInspection>>({});
+  const [actionBusy, setActionBusy] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
   const [advanced, setAdvanced] = useState(false);
   const [userSettings, setUserSettings] = useState<UserSettings | null>(null);
   const [settingsHistory, setSettingsHistory] = useState<UserSettingsRevision[]>([]);
@@ -4041,6 +4068,32 @@ export function App() {
     }
   }
 
+  async function refreshCanonicalActions() {
+    setActionBusy("list");
+    setActionError(null);
+    try {
+      setCanonicalActions(await listProtectedRootActions());
+    } catch (error) {
+      setActionError(errorMessage(error));
+    } finally {
+      setActionBusy(null);
+    }
+  }
+
+  async function inspectCanonicalAction(actionId: string) {
+    setActionBusy(actionId);
+    setActionError(null);
+    try {
+      const inspection = await getProtectedRootAction(actionId);
+      if (!inspection) throw new Error(`Canonical action ${actionId} was not found.`);
+      setActionInspections((current) => ({ ...current, [actionId]: inspection }));
+    } catch (error) {
+      setActionError(errorMessage(error));
+    } finally {
+      setActionBusy(null);
+    }
+  }
+
   useEffect(() => {
     let active = true;
     getLocalServiceStatus()
@@ -4069,6 +4122,13 @@ export function App() {
       })
       .catch((error) => {
         if (active) setWorkflowError(errorMessage(error));
+      });
+    listProtectedRootActions()
+      .then((actions) => {
+        if (active) setCanonicalActions(actions);
+      })
+      .catch((error) => {
+        if (active) setActionError(errorMessage(error));
       });
     getUpdateConfiguration()
       .then((configuration) => {
@@ -8844,6 +8904,40 @@ export function App() {
                       {userSettings?.interface_complexity === "developer" && <TechnicalDetails title="Canonical workflow evidence" summary={`${inspection.events.length} Root-owned events`}>
                         <p className="form-note">Read-only canonical evidence. Correlation, causation, revision, generation, and idempotency identities are disclosed without exposing Root mutation authority.</p>
                         <pre aria-label={`Canonical workflow ${attempt.workflow_id} evidence`} aria-readonly="true" role="textbox" tabIndex={0}>{JSON.stringify(inspection, null, 2)}</pre>
+                      </TechnicalDetails>}
+                    </div>}
+                  </div>;
+                })}
+              </div>}
+            </article>
+
+            <article className="agent-section-card canonical-action-section" aria-label="Governed actions">
+              <div className="section-heading compact-heading">
+                <div><h3>Governed actions</h3><p className="muted">Protected Root records what was authorized, what was observed, and whether an external change is certain.</p></div>
+                <button className="secondary" type="button" disabled={actionBusy !== null} onClick={() => void refreshCanonicalActions()}>{actionBusy === "list" ? "Refreshing…" : "Refresh"}</button>
+              </div>
+              {actionError && <p className="error-message" role="alert">{actionError}</p>}
+              {canonicalActions.length === 0 ? <p className="empty-state">No governed actions yet.</p> : <div className="instance-list">
+                {canonicalActions.map((action) => {
+                  const inspection = actionInspections[action.action_id];
+                  return <div className="instance-row canonical-action-row" key={action.execution_id} data-action-state={action.state}>
+                    <span>
+                      <strong>Action {action.action_id.slice(0, 8)}</strong>
+                      <small>{actionStateLabel(action.state)}{advanced ? ` · ${action.effect_class.replaceAll("_", " ")} · revision ${action.revision} · generation ${action.lease_generation}` : ""}</small>
+                      {advanced && <small>Actor <code>{action.actor}</code> · updated {new Date(action.updated_at).toLocaleString()}</small>}
+                    </span>
+                    {advanced && <div className="memory-actions">
+                      <button className="secondary" type="button" disabled={actionBusy !== null} onClick={() => void inspectCanonicalAction(action.action_id)}>{actionBusy === action.action_id ? "Loading…" : inspection ? "Refresh evidence" : "Inspect"}</button>
+                    </div>}
+                    {advanced && inspection && <div className="action-inspection">
+                      <p><strong>Operation</strong> <code>{inspection.envelope.operation.type_id}</code></p>
+                      <p>{inspection.executions.length} execution record{inspection.executions.length === 1 ? "" : "s"} · {inspection.receipts.length} receipt{inspection.receipts.length === 1 ? "" : "s"} · {inspection.events.length} ordered event{inspection.events.length === 1 ? "" : "s"}</p>
+                      <p>Source workflow <code>{inspection.envelope.workflow_id}</code></p>
+                      {inspection.reconciliation_jobs.length > 0 && <p>Reconciliation: {inspection.reconciliation_jobs.map((job) => job.state.replaceAll("_", " ")).join(", ")}</p>}
+                      <button className="link-button" type="button" disabled={workflowBusy !== null} onClick={() => void inspectCanonicalWorkflow(inspection.envelope.workflow_id)}>Load source workflow evidence →</button>
+                      {userSettings?.interface_complexity === "developer" && <TechnicalDetails title="Canonical action evidence" summary={`${inspection.events.length} Root-owned events`}>
+                        <p className="form-note">Read-only canonical evidence. Developer mode exposes exact intent, execution, receipt, reconciliation, correlation, and causation records without granting Root mutation authority.</p>
+                        <pre aria-label={`Canonical action ${action.action_id} evidence`} aria-readonly="true" role="textbox" tabIndex={0}>{JSON.stringify(inspection, null, 2)}</pre>
                       </TechnicalDetails>}
                     </div>}
                   </div>;
