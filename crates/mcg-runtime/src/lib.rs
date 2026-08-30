@@ -5336,6 +5336,27 @@ impl AppRuntime {
             .clone())
     }
 
+    fn record_coordination_owner_intervention(
+        &self,
+        batch_id: CoordinationBatchId,
+    ) -> Result<(), RuntimeError> {
+        // Drop the storage guard before saving. An `if let` whose scrutinee calls
+        // `self.store()` retains that temporary guard through the body, so a second
+        // `self.store()` here would deadlock the single protected storage owner.
+        let batch = {
+            let store = self.store()?;
+            store.coordination_batch(batch_id)?
+        };
+        if let Some(mut batch) = batch {
+            batch.owner_intervention_count = batch.owner_intervention_count.saturating_add(1);
+            batch.revision = batch.revision.saturating_add(1);
+            batch.updated_at = Utc::now();
+            let event = self.store()?.save_coordination_batch(&batch)?;
+            let _ = self.event_sender.send(event);
+        }
+        Ok(())
+    }
+
     async fn project_direct_workspace_lock(
         &self,
         project_id: ProjectId,
@@ -11009,14 +11030,8 @@ impl AppRuntime {
                 .outcome
                 .owner_interventions
                 .saturating_add(1);
-            if let Some(batch_id) = delegation.coordination_batch_id
-                && let Some(mut batch) = self.store()?.coordination_batch(batch_id)?
-            {
-                batch.owner_intervention_count = batch.owner_intervention_count.saturating_add(1);
-                batch.revision = batch.revision.saturating_add(1);
-                batch.updated_at = Utc::now();
-                let event = self.store()?.save_coordination_batch(&batch)?;
-                let _ = self.event_sender.send(event);
+            if let Some(batch_id) = delegation.coordination_batch_id {
+                self.record_coordination_owner_intervention(batch_id)?;
             }
         }
         let mut worktree = review.worktree.ok_or_else(|| {
@@ -30393,6 +30408,98 @@ mod tests {
         assert!(isolated.is_dir());
         drop(runtime);
         assert!(!isolated.exists());
+    }
+
+    #[test]
+    fn coordination_owner_intervention_releases_read_guard_before_save() {
+        let runtime = AppRuntime::open_in_memory(AppConfig::default(), TEST_TOKEN.to_owned())
+            .expect("in-memory runtime");
+        let now = Utc::now();
+        let conversation = runtime
+            .create_conversation(
+                Some("Owner integration intervention".into()),
+                None,
+                ExecutionPreferences::default(),
+                ConversationInteractionKind::Interactive,
+            )
+            .expect("conversation");
+        let turn = ConversationTurn {
+            schema_version: mcg_domain::CONVERSATION_SCHEMA_VERSION,
+            id: ConversationTurnId::new(),
+            conversation_id: conversation.id,
+            state: ConversationTurnState::Completed,
+            execution_preferences: ExecutionPreferences::default(),
+            codex_thread_id: None,
+            codex_turn_id: None,
+            task_id: None,
+            run_id: None,
+            error: None,
+            created_at: now,
+            updated_at: now,
+        };
+        let coordinator = ConversationAgentSession {
+            schema_version: CONVERSATION_TEAM_SCHEMA_VERSION,
+            id: ConversationAgentSessionId::new(),
+            conversation_id: conversation.id,
+            role_id: mcg_domain::RoleId::new(),
+            organization_revision_id: OrganizationRevisionId::new(),
+            kind: ConversationAgentKind::Coordinator,
+            display_name: "Coordinator".into(),
+            parent_session_id: None,
+            state: ConversationAgentSessionState::Ready,
+            codex_thread_id: None,
+            model: None,
+            prompt_revision: 1,
+            created_at: now,
+            updated_at: now,
+        };
+        {
+            let mut store = runtime.store().expect("store");
+            store.save_conversation_turn(&turn).expect("save turn");
+            store
+                .save_conversation_agent_session(&coordinator)
+                .expect("save coordinator");
+        }
+        let batch = CoordinationBatch {
+            schema_version: CONVERSATION_TEAM_SCHEMA_VERSION,
+            id: CoordinationBatchId::new(),
+            conversation_id: conversation.id,
+            origin_turn_id: turn.id,
+            coordinator_session_id: coordinator.id,
+            delivery_target: ConversationDeliveryTarget::CustomProject,
+            delivery_rationale: None,
+            site_owner_session_id: None,
+            state: CoordinationBatchState::Completed,
+            revision: 4,
+            delegation_ids: Vec::new(),
+            coordinator_turn_count: 1,
+            coordinator_approximate_tokens: 20,
+            coordinator_bypassed: false,
+            routing_rationale: None,
+            owner_intervention_count: 0,
+            last_error: None,
+            created_at: now,
+            updated_at: now,
+        };
+        runtime
+            .store()
+            .expect("store")
+            .save_coordination_batch(&batch)
+            .expect("save batch");
+
+        runtime
+            .record_coordination_owner_intervention(batch.id)
+            .expect("record intervention without reentrant storage deadlock");
+
+        let saved = runtime
+            .store()
+            .expect("store")
+            .coordination_batch(batch.id)
+            .expect("load batch")
+            .expect("saved batch");
+        assert_eq!(saved.owner_intervention_count, 1);
+        assert_eq!(saved.revision, 5);
+        assert!(saved.updated_at >= now);
     }
 
     #[test]

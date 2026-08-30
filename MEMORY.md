@@ -2,6 +2,16 @@
 
 Durable project context lives here. Update this file whenever information should survive chat context compression or future agent handoff.
 
+### 2026-08-30 - Stage 2 owner-apply storage deadlock correction
+
+- Context: A clean exact-`fcaf607` Windows installed run with pinned Codex 0.150.1 proved the isolated Coder grant works: one accepted hashed `report_result`, a completed coordination batch, and an exact verified 33-byte result in the managed worktree. The Chat Agent correctly returned Review/Apply and the linked project remained unchanged under `Ask`. After the verifier was corrected to perform explicit owner apply, the apply request and all later API calls timed out.
+- Diagnosis: `integrate_delegation` fetched the coordination batch inside an `if let` scrutinee and then called `self.store()` again in the body. Rust retained the temporary storage guard through that body, deadlocking the single non-reentrant Protected Root store while recording the owner-intervention count. The retained failed run also proved stale revisions are rejected with HTTP 409 after restart recovery increments the delegation revision.
+- Decision: Fetch the optional batch in its own scope so the read guard drops before saving. Keep Ask-mode review/apply mandatory. The installed verifier now requires visible pre-apply review state, an accepted report hash, terminal batch, current-revision patch review, explicit owner apply, one owner intervention, exact linked-project bytes, worktree removal, and restart persistence.
+- Files: `crates/mcg-runtime/src/lib.rs`, `scripts/test-installed-provider-success.py`, `docs/NewPRD/STAGE_2_PROTECTED_ROOT.md`, `docs/testing/strategy.md`, and `MEMORY.md`.
+- Commands/tests: Focused regression passes; complete `mcg-runtime` passes 107 active tests with two explicit Windows Sandbox tests ignored; `mcg-agent-mcp`, affected all-target check, Python compile, packaging/docs, format, and diff gates pass.
+- Result: The runtime deadlock is fixed locally. The pre-fix `fcaf607` installer remains rejected qualification evidence even though its report/worktree stages passed.
+- Follow-up: Commit/push, rebuild an exact Windows package, and repeat installed provider UAT through apply/restart. Then repeat native GUI, exact Linux AppImage, Debian sudo, and macOS owner-authenticated gates before Stage 2 closes.
+
 ### 2026-08-30 - Stage 2 provider UAT timeout classification correction
 
 - Context: Exact `48cc71dbcf9fd2208244912bce003b6cae62a87b` Windows owner-authenticated UAT reached the concrete Chat → Coordinator → Coder journey after granting the Coder exactly its isolated worktree, but the provider-success verifier terminated the CLI at its generic 120-second subprocess limit. Before the durable database could be compactly classified, the retained exact checkout, log, scheduled task, and temporary UAT root were no longer present on the host; no success or rejection may be inferred from that missing evidence.

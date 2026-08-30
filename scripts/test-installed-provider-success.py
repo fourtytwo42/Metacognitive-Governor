@@ -282,6 +282,37 @@ def list_values(
     return decode_json(result, label)[f"{noun}s"]
 
 
+def conversation_id_from_human_output(output: str) -> str:
+    for line in output.splitlines():
+        prefix = "Conversation: "
+        if line.startswith(prefix):
+            return str(uuid.UUID(line.removeprefix(prefix).strip()))
+    raise AssertionError("provider-backed human output has no conversation identity")
+
+
+def effective_batch_delegation(view: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    team = view["team"]
+    batches = team["coordination_batches"]
+    assert len(batches) == 1, "provider-backed human journey did not create one coordination batch"
+    batch = batches[0]
+    assert batch["state"] == "completed", "provider-backed coordination batch is not terminal"
+    delegations = [
+        delegation
+        for delegation in team["delegations"]
+        if delegation.get("coordination_batch_id") == batch["id"]
+    ]
+    superseded_ids = {
+        delegation["retry_of_id"]
+        for delegation in delegations
+        if delegation.get("retry_of_id") is not None
+    }
+    effective = [
+        delegation for delegation in delegations if delegation["id"] not in superseded_ids
+    ]
+    assert len(effective) == 1, "provider-backed batch has no unique effective delegation"
+    return batch, effective[0]
+
+
 def exercise(args: argparse.Namespace) -> None:
     cli = pathlib.Path(args.cli).resolve(strict=True)
     token_file = pathlib.Path(args.token_file).resolve(strict=True)
@@ -365,7 +396,48 @@ def exercise(args: argparse.Namespace) -> None:
         captured_results.append(human)
         require_success(human, "provider-success-human")
         human_text = human.stdout.decode("utf-8")
-        assert "Status: completed" in human_text
+        assert "review/apply" in human_text.casefold()
+        assert not project.joinpath("installed-provider-result.txt").exists()
+        conversation_id = conversation_id_from_human_output(human_text)
+        conversation = api_json(
+            args.host,
+            token,
+            "GET",
+            f"/api/v1/conversations/{conversation_id}",
+        )
+        batch, delegation = effective_batch_delegation(conversation)
+        assert delegation["state"] == "reported"
+        assert delegation["integration_ready"] is True
+        assert delegation["governance"]["outcome"]["successful"] is True
+        assert delegation["unresolved_issues"] == []
+        assert len(delegation["report_sha256"]) == 64
+        review = api_json(
+            args.host,
+            token,
+            "GET",
+            f"/api/v1/conversations/{conversation_id}/delegations/{delegation['id']}/review",
+        )
+        assert review["delegation"]["revision"] == delegation["revision"]
+        assert "installed-provider-result.txt" in review["patch"]
+        applied = api_json(
+            args.host,
+            token,
+            "POST",
+            f"/api/v1/conversations/{conversation_id}/delegations/{delegation['id']}/apply",
+            {"expected_revision": review["delegation"]["revision"]},
+        )
+        applied_batch, applied_delegation = effective_batch_delegation(applied)
+        assert applied_batch["id"] == batch["id"]
+        assert applied_delegation["id"] == delegation["id"]
+        assert applied_delegation["state"] == "completed"
+        assert applied_delegation["governance"]["outcome"]["owner_interventions"] == 1
+        applied_worktrees = [
+            worktree
+            for worktree in applied["team"]["worktrees"]
+            if worktree.get("delegation_id") == delegation["id"]
+        ]
+        assert len(applied_worktrees) == 1
+        assert applied_worktrees[0]["state"] == "removed"
         assert project.joinpath("installed-provider-result.txt").read_bytes() == (
             f"{FIXTURE_TEXT}\n".encode()
         )
@@ -477,6 +549,9 @@ def exercise(args: argparse.Namespace) -> None:
             "provider_calls": provider.call_count,
             "audit_counts": audit_counts,
             "run_ids": run_ids,
+            "conversation_id": conversation_id,
+            "delegation_id": delegation["id"],
+            "report_sha256": delegation["report_sha256"],
         }
         state_path.write_text(json.dumps(state, sort_keys=True), encoding="utf-8")
         output_path.write_text(
@@ -495,6 +570,10 @@ def exercise(args: argparse.Namespace) -> None:
                     "project_count": len(new_projects),
                     "token_excluded": True,
                     "private_context_excluded": True,
+                    "accepted_specialist_report": True,
+                    "terminal_coordination_batch": True,
+                    "owner_apply_completed": True,
+                    "isolated_worktree_removed": True,
                 },
                 sort_keys=True,
             ),
@@ -519,6 +598,26 @@ def verify(args: argparse.Namespace) -> None:
     state = json.loads(state_path.read_text(encoding="utf-8"))
     assert state["schema_version"] == SCHEMA_VERSION
     assert state["project_path_sha256"] == hashlib.sha256(str(project).encode("utf-8")).hexdigest()
+    conversation = api_json(
+        args.host,
+        token,
+        "GET",
+        f"/api/v1/conversations/{state['conversation_id']}",
+    )
+    batch, delegation = effective_batch_delegation(conversation)
+    assert batch["state"] == "completed"
+    assert delegation["id"] == state["delegation_id"]
+    assert delegation["state"] == "completed"
+    assert delegation["report_sha256"] == state["report_sha256"]
+    worktrees = [
+        worktree
+        for worktree in conversation["team"]["worktrees"]
+        if worktree.get("delegation_id") == state["delegation_id"]
+    ]
+    assert len(worktrees) == 1 and worktrees[0]["state"] == "removed"
+    assert project.joinpath("installed-provider-result.txt").read_bytes() == (
+        f"{FIXTURE_TEXT}\n".encode()
+    )
 
     for index, task_id in enumerate(state["task_ids"], start=1):
         result = invoke_cli(
@@ -592,6 +691,8 @@ def verify(args: argparse.Namespace) -> None:
                 "restart_replay_side_effect_free": True,
                 "provider_required_for_replay": False,
                 "token_excluded": True,
+                "accepted_specialist_report_survived_restart": True,
+                "owner_apply_survived_restart": True,
             },
             sort_keys=True,
         ),

@@ -328,6 +328,14 @@ The real Chat → Coordinator → Coder journey has a five-minute process envelo
 metadata, replay, and audit calls retain the stricter two-minute envelope. A harness
 timeout is a failed qualification and must retain durable state for diagnosis rather
 than being reclassified as completion.
+Under owner-facing `Ask`, the successful agent turn must first return a visible
+Review/Apply boundary with no linked-project mutation. The verifier reads the exact
+conversation/delegation revision, inspects the patch, performs one explicit
+revision-bound apply, and then requires completed delegation state, one recorded
+owner intervention, exact linked-project bytes, managed-worktree removal, and the
+same report hash and integration state after Root restart. A focused runtime test
+also guards the read-then-save storage lifetime that previously deadlocked this
+owner apply path.
 The Chat/Coordinator handoff crosses only the executable-pinned, per-thread
 `mcg_agent` MCP bridge, whose Codex server-scoped tool approval is explicit; tests
 must prove this bridge works while the role thread remains read-only and must not
