@@ -1,6 +1,6 @@
 # Stage 4 — Governed Actions, Side Effects, and Reconciliation
 
-**Status:** Authoritative ledger and narrow filesystem-runner foundation implemented; Root integration and release qualification remain open
+**Status:** Authoritative ledger, filesystem runner, Root dispatch, reconciliation, and restart recovery implemented; product and release qualification remain open
 
 **Last verified:** 2026-08-30
 
@@ -29,14 +29,24 @@ one-file Windows portable payload. Package harnesses require the executable and 
 create, lost-response-style inspection/reconciliation, duplicate suppression, exact
 compensation, and zero-residue cleanup.
 
+Protected Root now links only the client/protocol feature, never the filesystem executor.
+It persists dispatch before launch, derives the request exclusively from the immutable
+authorized envelope, supervises the exact adjacent sidecar with bounded I/O and timeout,
+and durably classifies confirmed, no-effect, and unknown outcomes. A Root-owned worker
+claims due reconciliation jobs with revision/generation leases, invokes only their bound
+inspection adapter, and resolves exact occurrence, exact non-occurrence, or bounded
+ambiguity. Startup recovery converts stranded effectful `Executing`/`Observed` work into
+reconciliation without redispatch and safely settles stranded observational work as
+no-effect.
+
 ## Authority boundary
 
 The runner is an effect executor, not an authorization service. Its request identifiers
-and hashes do not independently prove Root authority. Production dispatch must come from
-Protected Root after durable authorization, using the exact adjacent verified executable,
-an invocation-scoped capability root, bounded environment and inherited resources, and a
-deadline with kill/reap semantics. Root must persist and classify the returned observation
-before the workflow can commit, compensate, retry, cancel, or settle.
+and hashes do not independently prove Root authority. Production dispatch comes from
+Protected Root after durable authorization, using the exact adjacent executable, a
+hash-bound capability root, a cleared environment, bounded request/response/diagnostics,
+and a deadline with kill/reap semantics. Root persists and classifies the returned
+observation before the workflow can commit, compensate, retry, cancel, or settle.
 
 Directly invoking the packaged runner grants no capability beyond the invoking OS user's
 existing filesystem authority. It must never be treated as a substitute for Root policy,
@@ -44,8 +54,16 @@ OS sandboxing, process-tree confinement, or the action ledger.
 
 ## Verification completed
 
-- Runner unit and separate-process tests: 6 passed.
+- Runner unit and separate-process tests: 9 passed.
+- Storage action/recovery suite within 101 passing storage tests.
+- Protected Root tests: 9 passed, including confirmed/lost/pre-launch classification,
+  occurred/not-occurred/ambiguous reconciliation, real-store reopen, and stranded dispatch
+  restart recovery.
+- Runtime tests: 108 passed with two explicit native Windows Sandbox package gates ignored.
+- Protected Root migration-process test: passed.
 - Strict runner all-target Clippy: passed with `-D warnings`.
+- Strict client-only runner Clippy and dependency-shape checks: passed; `cap-fs-ext` and
+  `cap-std` are absent from the Root-linked feature graph.
 - Desktop Rust tests: 20 passed.
 - Whole workspace all-target compile: passed.
 - Windows debug sidecar preparation and copied-sidecar qualification: passed.
@@ -63,19 +81,13 @@ escape test, which must run on the native Linux and macOS lanes.
 
 Stage 4 is not complete until all of the following pass:
 
-1. Protected Root launches the runner through a bounded parent client and maps each typed
-   response into the exact authorized `ActionExecution` and reconciliation job.
-2. Runner requests are derived from the immutable authorized `ActionEnvelope`; callers
-   cannot substitute action, execution, operation, workflow generation, root, or actor.
-3. Lost response, crash-before-effect, crash-after-effect, timeout, late response, and
+1. Lost response, crash-before-effect, crash-after-effect, timeout, late response, and
    killed-process cases pass real process injection without blind redispatch.
-4. Reconciliation observes the exact target and can resolve occurred, not occurred, or
-   still unknown without performing the original effect.
-5. Root API/IPC, CLI, and Simple/Advanced/Developer projections expose safe action status,
+2. Root API/IPC, CLI, and Simple/Advanced/Developer projections expose safe action status,
    source navigation, evidence, reconciliation, and compensation.
-6. Semantic path policy, resource budgets, process-tree confinement, and platform sandbox
+3. Semantic path policy, resource budgets, process-tree confinement, and platform sandbox
    capability reporting pass adversarial Windows, Linux, and macOS tests.
-7. Fresh Windows installer/portable, Linux Debian/AppImage, and macOS app/DMG builds pass
+4. Fresh Windows installer/portable, Linux Debian/AppImage, and macOS app/DMG builds pass
    native package UAT. The Debian sudo and macOS authenticated owner gates remain intact.
 
 ## Release rule
