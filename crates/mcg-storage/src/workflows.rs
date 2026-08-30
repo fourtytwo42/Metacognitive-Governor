@@ -346,6 +346,48 @@ impl SqliteEventStore {
         load_attempt(&self.connection, attempt_id)
     }
 
+    /// Lists the latest authoritative attempt for each canonical workflow.
+    ///
+    /// # Errors
+    /// Returns a storage error for query or stored-data failures.
+    pub fn workflow_attempts(&self) -> Result<Vec<WorkflowAttempt>, StorageError> {
+        let mut statement = self.connection.prepare(
+            "SELECT candidate.attempt_json
+             FROM workflow_attempts AS candidate
+             WHERE candidate.attempt_number = (
+                 SELECT MAX(latest.attempt_number) FROM workflow_attempts AS latest
+                 WHERE latest.workflow_id = candidate.workflow_id
+             )
+             ORDER BY candidate.updated_at DESC, candidate.workflow_id",
+        )?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        rows.map(|row| {
+            let json = row?;
+            serde_json::from_str(&json).map_err(StorageError::from)
+        })
+        .collect()
+    }
+
+    /// Loads the latest authoritative attempt for one canonical workflow.
+    ///
+    /// # Errors
+    /// Returns a storage error for query or stored-data failures.
+    pub fn workflow_attempt_for_workflow(
+        &self,
+        workflow_id: WorkflowId,
+    ) -> Result<Option<WorkflowAttempt>, StorageError> {
+        self.connection
+            .query_row(
+                "SELECT attempt_json FROM workflow_attempts
+                 WHERE workflow_id = ?1 ORDER BY attempt_number DESC LIMIT 1",
+                [workflow_id.to_string()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .map(|json| serde_json::from_str(&json).map_err(StorageError::from))
+            .transpose()
+    }
+
     /// Returns the ordered event history for one workflow.
     ///
     /// # Errors

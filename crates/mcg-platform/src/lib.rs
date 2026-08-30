@@ -12,7 +12,8 @@ use std::fmt::Write as _;
 use chrono::{DateTime, Duration, Utc};
 use mcg_contracts::{
     AuthenticatedRpcRequest, ContractError, CorrelationId, PROTOCOL_V1, RequestId, RootStatus,
-    RpcEnvelope, RuntimeInstanceId, SessionId, StableTypeId, VersionedPayload, canonical_cbor_v1,
+    RpcEnvelope, RuntimeInstanceId, SessionId, StableTypeId, VersionedPayload, WorkflowAttempt,
+    WorkflowCancelRequest, WorkflowId, WorkflowInspection, canonical_cbor_v1,
     decode_canonical_cbor_v1,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -28,6 +29,12 @@ pub const MAX_ROOT_IPC_FRAME_BYTES: usize = 1024 * 1024;
 pub const ROOT_IPC_SESSION_SCHEMA_VERSION: u16 = 1;
 pub const ROOT_STATUS_REQUEST_TYPE: &str = "metacog.root.status.request.v1";
 pub const ROOT_STATUS_RESPONSE_TYPE: &str = "metacog.root.status.response.v1";
+pub const ROOT_WORKFLOW_LIST_REQUEST_TYPE: &str = "metacog.root.workflow_list.request.v1";
+pub const ROOT_WORKFLOW_LIST_RESPONSE_TYPE: &str = "metacog.root.workflow_list.response.v1";
+pub const ROOT_WORKFLOW_SHOW_REQUEST_TYPE: &str = "metacog.root.workflow_show.request.v1";
+pub const ROOT_WORKFLOW_SHOW_RESPONSE_TYPE: &str = "metacog.root.workflow_show.response.v1";
+pub const ROOT_WORKFLOW_CANCEL_REQUEST_TYPE: &str = "metacog.root.workflow_cancel.request.v1";
+pub const ROOT_WORKFLOW_CANCEL_RESPONSE_TYPE: &str = "metacog.root.workflow_cancel.response.v1";
 const ROOT_SESSION_FILE: &str = "root-ipc-session.json";
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -218,9 +225,79 @@ where
 /// Returns an error for unavailable transport, invalid session proof, malformed
 /// response, correlation mismatch, or unsupported protocol data.
 pub async fn query_root_status(data_directory: &Path) -> Result<RootStatus, PlatformError> {
+    query_root(
+        data_directory,
+        ROOT_STATUS_REQUEST_TYPE,
+        ROOT_STATUS_RESPONSE_TYPE,
+        &serde_json::json!({}),
+    )
+    .await
+}
+
+/// Lists the latest attempt for every canonical workflow over authenticated local IPC.
+///
+/// # Errors
+/// Returns an error for unavailable transport or invalid/correlated protocol data.
+pub async fn query_root_workflows(
+    data_directory: &Path,
+) -> Result<Vec<WorkflowAttempt>, PlatformError> {
+    query_root(
+        data_directory,
+        ROOT_WORKFLOW_LIST_REQUEST_TYPE,
+        ROOT_WORKFLOW_LIST_RESPONSE_TYPE,
+        &serde_json::json!({}),
+    )
+    .await
+}
+
+/// Loads one canonical workflow and its ordered evidence over authenticated local IPC.
+///
+/// # Errors
+/// Returns an error for unavailable transport or invalid/correlated protocol data.
+pub async fn query_root_workflow(
+    data_directory: &Path,
+    workflow_id: WorkflowId,
+) -> Result<Option<WorkflowInspection>, PlatformError> {
+    query_root(
+        data_directory,
+        ROOT_WORKFLOW_SHOW_REQUEST_TYPE,
+        ROOT_WORKFLOW_SHOW_RESPONSE_TYPE,
+        &serde_json::json!({"workflow_id": workflow_id}),
+    )
+    .await
+}
+
+/// Requests durable, generation-fenced cancellation over authenticated local IPC.
+///
+/// # Errors
+/// Returns an error for unavailable transport, invalid protocol data, or rejected cancellation.
+pub async fn cancel_root_workflow(
+    data_directory: &Path,
+    request: &WorkflowCancelRequest,
+) -> Result<WorkflowAttempt, PlatformError> {
+    query_root(
+        data_directory,
+        ROOT_WORKFLOW_CANCEL_REQUEST_TYPE,
+        ROOT_WORKFLOW_CANCEL_RESPONSE_TYPE,
+        request,
+    )
+    .await
+}
+
+async fn query_root<TRequest, TResponse>(
+    data_directory: &Path,
+    request_type: &str,
+    response_type: &str,
+    payload: &TRequest,
+) -> Result<TResponse, PlatformError>
+where
+    TRequest: Serialize,
+    TResponse: DeserializeOwned,
+{
     let session = load_root_ipc_session(data_directory)?;
     let request_id = RequestId::new();
     let correlation_id = CorrelationId::new();
+    let payload_value = serde_json::to_value(payload)?;
     let request = AuthenticatedRpcRequest {
         envelope: RpcEnvelope {
             protocol_version: PROTOCOL_V1,
@@ -228,11 +305,11 @@ pub async fn query_root_status(data_directory: &Path) -> Result<RootStatus, Plat
             correlation_id,
             session_id: session.session_id,
             caller_instance: RuntimeInstanceId::new(),
-            message_type: StableTypeId::parse(ROOT_STATUS_REQUEST_TYPE)?,
+            message_type: StableTypeId::parse(request_type)?,
             expires_at: Some(Utc::now() + Duration::seconds(5)),
             payload: VersionedPayload::canonical_v1(
-                StableTypeId::parse(ROOT_STATUS_REQUEST_TYPE)?,
-                &serde_json::json!({}),
+                StableTypeId::parse(request_type)?,
+                &payload_value,
             )?,
         },
         session_capability: session.capability.clone(),
@@ -242,7 +319,7 @@ pub async fn query_root_status(data_directory: &Path) -> Result<RootStatus, Plat
     if response.request_id != request_id
         || response.correlation_id != correlation_id
         || response.session_id != session.session_id
-        || response.message_type.as_str() != ROOT_STATUS_RESPONSE_TYPE
+        || response.message_type.as_str() != response_type
     {
         return Err(PlatformError::InvalidSession);
     }

@@ -57,7 +57,10 @@ use mcg_config::{
     AppConfig, AutonomyPreset, CliTuiPreferences, InterfaceComplexity, UserSettings,
     UserSettingsRevision,
 };
-use mcg_contracts::{CorrelationId, RuntimeIdentity};
+use mcg_contracts::{
+    CorrelationId, RuntimeIdentity, WorkflowAttempt, WorkflowCancelRequest, WorkflowId,
+    WorkflowInspection, WorkflowState,
+};
 use mcg_domain::{
     AgentContextCheckpoint, AgentContextCheckpointCause, AgentContextCheckpointId,
     AgentCredentialAudit, AgentCredentialAuditId, AgentCredentialAuditKind, AgentDelegation,
@@ -3426,6 +3429,60 @@ impl AppRuntime {
         Ok(self
             .store()?
             .recover_expired_workflow_leases(CorrelationId::new(), now)?)
+    }
+
+    /// Lists the latest authoritative attempt for every canonical workflow.
+    ///
+    /// # Errors
+    /// Returns a runtime error when workflow projections cannot be read.
+    pub fn canonical_workflows(&self) -> Result<Vec<WorkflowAttempt>, RuntimeError> {
+        Ok(self.store()?.workflow_attempts()?)
+    }
+
+    /// Loads one canonical workflow with its exact TaskContract and ordered event history.
+    ///
+    /// # Errors
+    /// Returns a runtime error when workflow evidence cannot be read.
+    pub fn canonical_workflow(
+        &self,
+        workflow_id: WorkflowId,
+    ) -> Result<Option<WorkflowInspection>, RuntimeError> {
+        let store = self.store()?;
+        let Some(attempt) = store.workflow_attempt_for_workflow(workflow_id)? else {
+            return Ok(None);
+        };
+        let task_contract = store
+            .task_contract_version(attempt.task_contract.id, attempt.task_contract.version)?
+            .ok_or_else(|| {
+                StorageError::InvalidData(
+                    "workflow attempt references a missing task-contract version".into(),
+                )
+            })?;
+        let events = store.workflow_events(workflow_id)?;
+        Ok(Some(WorkflowInspection {
+            attempt,
+            task_contract,
+            events,
+        }))
+    }
+
+    /// Durably requests cancellation under exact attempt revision/generation fencing.
+    ///
+    /// # Errors
+    /// Returns a runtime error for stale, terminal, invalid-state, or storage failures.
+    pub fn cancel_canonical_workflow(
+        &self,
+        request: &WorkflowCancelRequest,
+    ) -> Result<WorkflowAttempt, RuntimeError> {
+        Ok(self.store()?.transition_workflow_attempt(
+            request.attempt_id,
+            request.expected_revision,
+            request.expected_generation,
+            WorkflowState::CancelRequested,
+            CorrelationId::new(),
+            &request.idempotency_key,
+            Utc::now(),
+        )?)
     }
 
     /// Creates an isolated runtime for tests and embedded deterministic fixtures.

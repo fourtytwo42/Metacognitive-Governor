@@ -40,9 +40,9 @@ This matrix is updated as implementation lands. `Implemented / cumulative UAT pe
 | Windows named pipes and Unix-domain sockets | 2 | Platform IPC tests | Native Windows/macOS/Linux process E2E | Implemented / native process E2E passes on all three platforms |
 | Versioned length-framed bounded protocol | 1, 2 | Frame/property tests | Cross-process compatibility | Implemented / cumulative cross-platform UAT pending |
 | OS peer identity and per-launch capability | 2 | Wrong-peer/session tests | Forged client attack | Capability/session rejection implemented / cross-platform peer UAT pending |
-| Replay/idempotency protection | 2–4 | Duplicate request tests | Replayed action request | Root status replay rejection implemented / action coverage grows in Stage 4 |
+| Replay/idempotency protection | 2–4 | Duplicate request tests | Replayed action request | Root request-ID replay rejection plus durable exact workflow cancellation replay/substitution rejection implemented / action coverage grows in Stage 4 |
 | Oversized/malformed/unknown-version messages fail closed | 2 | Fuzz/boundary tests | Hostile client process | Boundary/version rejection implemented / hostile-process UAT pending |
-| Cancellation and late responses are safe | 3–5 | State/process tests | Cancel during execution | Stage 3 generation fencing and stale-result rejection implemented / propagation and process E2E pending |
+| Cancellation and late responses are safe | 3–5 | State/process tests | Cancel during execution | Stage 3 generation fencing, stale-result rejection, and authenticated IPC/CLI cancellation request implemented / child/effect propagation pending |
 | Root/Runtime/Evaluator death has an explicit restart story | 3–7 | Crash matrix | Packaged kill/restart UAT | Root startup scanner handles expired Running/Verifying leases / complete process and action matrix pending |
 
 ## 4. Workflow and Leases
@@ -54,7 +54,7 @@ This matrix is updated as implementation lands. `Implemented / cumulative UAT pe
 | Terminal workflows do not ordinarily reactivate | 3 | Property tests | Retry creates explicit new attempt | Terminal monotonicity and explicit parent-linked retry attempts pass / cumulative process UAT pending |
 | Generation-fenced leases prevent stale commit | 3 | Race/property tests | Kill owner, reassign, deliver stale result | Claim/heartbeat/cancel/recovery CAS, concurrent-claim winner, and stale-result tests pass / delayed-worker process E2E pending |
 | Restart scanner resumes only satisfied work | 3 | Recovery integration | Process/application restart | Root startup fences expired Running work to reconciliation and requeues expired Verifying work; dependency claim gating passes / complete waiting-condition and process matrix pending |
-| Cancellation is durable and propagated | 3–5 | Cancellation tests | UI/CLI cancel and restart | Durable CancelRequested fencing implemented / child and external-effect propagation plus UI/CLI E2E pending |
+| Cancellation is durable and propagated | 3–5 | Cancellation tests | UI/CLI cancel and restart | Durable CancelRequested fencing plus authenticated `mcg workflow cancel` implemented and IPC-tested / child, external-effect, packaged CLI, and GUI E2E pending |
 | UI reconnect cannot alter backend truth | 3 | Projection tests | Close/reopen during work | Planned |
 
 ## 5. Actions and External Effects
@@ -158,7 +158,7 @@ This matrix is updated as implementation lands. `Implemented / cumulative UAT pe
 | Simple avoids research ontology and raw protected data | 7 onward | UI visibility tests | Native Simple audit | Planned |
 | Advanced exposes practical workflows/evidence | 3 onward | UI tests | Native Advanced workflows | Planned |
 | Developer exposes manifests/diagnostics and authorized research summaries | 1 onward | UI contract tests | Native Developer workflows | Root compatibility inspector passes Windows portable and Linux AppImage native UAT / expands by stage |
-| Existing CLI compatibility remains functional | Every stage | Parser/process regression | Real terminal UAT | Stage 1 parser regression passes / cumulative |
+| Existing CLI compatibility remains functional | Every stage | Parser/process regression | Real terminal UAT | Canonical `mcg workflow list/show/cancel` parser and cumulative CLI/process suites pass / packaged terminal UAT pending |
 | Existing conversations/projects/history remain accessible | 2 onward | Migration/integration tests | Packaged upgrade UAT | Planned |
 
 ## 12. Research and Later Gates

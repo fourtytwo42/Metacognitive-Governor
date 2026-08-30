@@ -598,6 +598,23 @@ impl WorkflowEvent {
     pub const TYPE_ID: &'static str = "mcg.workflow_event.v1";
 }
 
+/// Canonical Root inspection of one workflow's current attempt and immutable history.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowInspection {
+    pub attempt: WorkflowAttempt,
+    pub task_contract: TaskContract,
+    pub events: Vec<WorkflowEvent>,
+}
+
+/// Revision/generation-bound request to durably begin cancellation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowCancelRequest {
+    pub attempt_id: AttemptId,
+    pub expected_revision: u64,
+    pub expected_generation: u64,
+    pub idempotency_key: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Event {
     pub id: EventId,

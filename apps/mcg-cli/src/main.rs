@@ -69,6 +69,7 @@ use mcg_codex_app_server::{
     CodexResumeCwd, CodexStableDiscovery,
 };
 use mcg_config::{AppConfig, AutonomyPreset, CliTuiPreferences, InterfaceComplexity, UserSettings};
+use mcg_contracts::{WorkflowCancelRequest, WorkflowId, WorkflowState};
 use mcg_domain::{
     AgentWakeState, ApprovalMode, CloudDiffApply, CodexConfigOverride, ComposerMentionInput,
     ComputerUseCapability, ComputerUseRegion, ComputerUseTarget, Conversation,
@@ -300,6 +301,11 @@ enum Command {
     Runtime {
         #[command(subcommand)]
         command: RuntimeCommand,
+    },
+    /// Inspect and cancel canonical Protected Root workflows.
+    Workflow {
+        #[command(subcommand)]
+        command: WorkflowCommand,
     },
     /// Inspect or change restart-safe owner settings.
     Settings {
@@ -1284,6 +1290,30 @@ enum RuntimeCommand {
     /// Show Root identity, protocol, session, schema, queue, and migration evidence.
     Inspect {
         /// Emit the versioned status contract as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum WorkflowCommand {
+    /// List the latest authoritative attempt for every workflow.
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show the exact contract, current attempt, and ordered event history.
+    Show {
+        id: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Durably request cancellation using current revision/generation fencing.
+    Cancel {
+        id: String,
+        /// Stable key to reuse when retrying an uncertain cancellation request.
+        #[arg(long)]
+        idempotency_key: Option<String>,
         #[arg(long)]
         json: bool,
     },
@@ -2809,6 +2839,10 @@ async fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
         run_root_runtime(&config.data_directory, command).await?;
         return Ok(());
     }
+    if let Some(Command::Workflow { command }) = &cli.command {
+        run_root_workflow(&config.data_directory, command).await?;
+        return Ok(());
+    }
     if let Some(Command::Backup { command }) = &cli.command {
         match command {
             BackupCommand::Verify { bundle, json } => {
@@ -2918,6 +2952,9 @@ async fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
         }
         Some(Command::Runtime { .. }) => {
             unreachable!("runtime inspection handled before bearer-token loading")
+        }
+        Some(Command::Workflow { .. }) => {
+            unreachable!("workflow commands handled before bearer-token loading")
         }
         Some(Command::Settings { command }) => {
             run_settings(&client, host, token.trim(), command).await?;
@@ -10901,6 +10938,93 @@ async fn run_root_runtime(
     Ok(())
 }
 
+async fn run_root_workflow(
+    data_directory: &Path,
+    command: &WorkflowCommand,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match command {
+        WorkflowCommand::List { json } => {
+            let attempts = mcg_platform::query_root_workflows(data_directory).await?;
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&attempts)?);
+            } else if attempts.is_empty() {
+                println!("No canonical workflows.");
+            } else {
+                for attempt in attempts {
+                    println!(
+                        "{}  {:?}  attempt {}  revision {}  generation {}",
+                        attempt.workflow_id,
+                        attempt.state,
+                        attempt.attempt_number,
+                        attempt.revision,
+                        attempt.lease_generation
+                    );
+                }
+            }
+        }
+        WorkflowCommand::Show { id, json } => {
+            let workflow_id = WorkflowId(uuid::Uuid::parse_str(id)?);
+            let inspection = mcg_platform::query_root_workflow(data_directory, workflow_id)
+                .await?
+                .ok_or_else(|| format!("canonical workflow {workflow_id} was not found"))?;
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&inspection)?);
+            } else {
+                println!("Workflow {}", inspection.attempt.workflow_id);
+                println!("  objective: {}", inspection.task_contract.objective);
+                println!("  state: {:?}", inspection.attempt.state);
+                println!("  attempt: {}", inspection.attempt.attempt_number);
+                println!("  revision: {}", inspection.attempt.revision);
+                println!("  generation: {}", inspection.attempt.lease_generation);
+                println!("  events: {}", inspection.events.len());
+            }
+        }
+        WorkflowCommand::Cancel {
+            id,
+            idempotency_key,
+            json,
+        } => {
+            let workflow_id = WorkflowId(uuid::Uuid::parse_str(id)?);
+            let inspection = mcg_platform::query_root_workflow(data_directory, workflow_id)
+                .await?
+                .ok_or_else(|| format!("canonical workflow {workflow_id} was not found"))?;
+            if matches!(
+                inspection.attempt.state,
+                WorkflowState::Ready
+                    | WorkflowState::CancelRequested
+                    | WorkflowState::Succeeded
+                    | WorkflowState::Failed
+                    | WorkflowState::Cancelled
+                    | WorkflowState::Quarantined
+            ) {
+                return Err(format!(
+                    "workflow {workflow_id} cannot request cancellation from {:?}",
+                    inspection.attempt.state
+                )
+                .into());
+            }
+            let request = WorkflowCancelRequest {
+                attempt_id: inspection.attempt.attempt_id,
+                expected_revision: inspection.attempt.revision,
+                expected_generation: inspection.attempt.lease_generation,
+                idempotency_key: idempotency_key
+                    .clone()
+                    .unwrap_or_else(|| format!("cli-cancel-{}", uuid::Uuid::new_v4())),
+            };
+            let cancelled = mcg_platform::cancel_root_workflow(data_directory, &request).await?;
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&cancelled)?);
+            } else {
+                println!(
+                    "Workflow {} cancellation requested at revision {} (generation {}).",
+                    cancelled.workflow_id, cancelled.revision, cancelled.lease_generation
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 async fn run_status(
     client: &reqwest::Client,
     host: &str,
@@ -15790,6 +15914,47 @@ mod tests {
             Command::Runtime {
                 command: RuntimeCommand::Inspect { json: false }
             }
+        ));
+    }
+
+    #[test]
+    fn workflow_commands_expose_canonical_root_inspection_and_cancellation() {
+        let id = "00000000-0000-4000-8000-000000000501";
+        let list = Cli::try_parse_from(["mcg", "workflow", "list", "--json"])
+            .expect("workflow list command");
+        assert!(matches!(
+            list.command.expect("command"),
+            Command::Workflow {
+                command: WorkflowCommand::List { json: true }
+            }
+        ));
+        let show =
+            Cli::try_parse_from(["mcg", "workflow", "show", id]).expect("workflow show command");
+        assert!(matches!(
+            show.command.expect("command"),
+            Command::Workflow {
+                command: WorkflowCommand::Show { json: false, .. }
+            }
+        ));
+        let cancel = Cli::try_parse_from([
+            "mcg",
+            "workflow",
+            "cancel",
+            id,
+            "--idempotency-key",
+            "owner-cancel-1",
+            "--json",
+        ])
+        .expect("workflow cancel command");
+        assert!(matches!(
+            cancel.command.expect("command"),
+            Command::Workflow {
+                command: WorkflowCommand::Cancel {
+                    idempotency_key: Some(key),
+                    json: true,
+                    ..
+                }
+            } if key == "owner-cancel-1"
         ));
     }
 

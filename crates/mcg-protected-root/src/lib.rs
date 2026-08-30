@@ -16,9 +16,13 @@ use mcg_config::AppConfig;
 use mcg_contracts::{
     AuthenticatedRpcRequest, ContentHash, ContractError, HashAlgorithm, PROTOCOL_V1, RequestId,
     RootStatus, RpcEnvelope, RuntimeIdentity, RuntimeInstanceId, StableTypeId, VersionedPayload,
+    WorkflowCancelRequest, WorkflowId, decode_canonical_cbor_v1,
 };
 use mcg_platform::{
-    PlatformError, ROOT_STATUS_REQUEST_TYPE, ROOT_STATUS_RESPONSE_TYPE, RootIpcSession,
+    PlatformError, ROOT_STATUS_REQUEST_TYPE, ROOT_STATUS_RESPONSE_TYPE,
+    ROOT_WORKFLOW_CANCEL_REQUEST_TYPE, ROOT_WORKFLOW_CANCEL_RESPONSE_TYPE,
+    ROOT_WORKFLOW_LIST_REQUEST_TYPE, ROOT_WORKFLOW_LIST_RESPONSE_TYPE,
+    ROOT_WORKFLOW_SHOW_REQUEST_TYPE, ROOT_WORKFLOW_SHOW_RESPONSE_TYPE, RootIpcSession,
     create_root_ipc_session, read_canonical_frame, remove_root_ipc_session, write_canonical_frame,
 };
 use mcg_runtime::{AppRuntime, RuntimeError};
@@ -138,6 +142,11 @@ struct ReplayWindow {
     seen: BTreeSet<RequestId>,
 }
 
+#[derive(serde::Deserialize)]
+struct WorkflowShowRequest {
+    workflow_id: WorkflowId,
+}
+
 impl ReplayWindow {
     fn insert(&mut self, request_id: RequestId) -> bool {
         if !self.seen.insert(request_id) {
@@ -254,10 +263,18 @@ where
 {
     let mut request: AuthenticatedRpcRequest = read_canonical_frame(&mut stream).await?;
     request.envelope.validate()?;
+    let request_type = request.envelope.message_type.as_str().to_owned();
+    let supported = matches!(
+        request_type.as_str(),
+        ROOT_STATUS_REQUEST_TYPE
+            | ROOT_WORKFLOW_LIST_REQUEST_TYPE
+            | ROOT_WORKFLOW_SHOW_REQUEST_TYPE
+            | ROOT_WORKFLOW_CANCEL_REQUEST_TYPE
+    );
     if !session.verifies(&request.session_capability)
         || request.envelope.session_id != session.session_id
-        || request.envelope.message_type.as_str() != ROOT_STATUS_REQUEST_TYPE
-        || request.envelope.payload.type_id.as_str() != ROOT_STATUS_REQUEST_TYPE
+        || !supported
+        || request.envelope.payload.type_id.as_str() != request_type
         || request
             .envelope
             .expires_at
@@ -276,16 +293,41 @@ where
     let ownership = runtime
         .root_ownership()?
         .ok_or_else(|| StorageError::InvalidData("Root ownership is not initialized".into()))?;
-    let status = RootStatus {
-        schema_version: 1,
-        service: "protected-root".to_owned(),
-        process_id: std::process::id(),
-        protocol_version: PROTOCOL_V1,
-        session_id: session.session_id,
-        runtime_identity: ownership.runtime_identity.clone(),
-        storage_schema_version: STORAGE_SCHEMA_VERSION,
-        writer_queue_capacity: ROOT_WRITER_QUEUE_CAPACITY,
-        migration_receipt: ownership.migration_receipt,
+    let request_value = decode_canonical_cbor_v1(&request.envelope.payload.bytes)?;
+    let (response_type, response_value) = match request_type.as_str() {
+        ROOT_STATUS_REQUEST_TYPE => (
+            ROOT_STATUS_RESPONSE_TYPE,
+            serde_json::to_value(RootStatus {
+                schema_version: 1,
+                service: "protected-root".to_owned(),
+                process_id: std::process::id(),
+                protocol_version: PROTOCOL_V1,
+                session_id: session.session_id,
+                runtime_identity: ownership.runtime_identity.clone(),
+                storage_schema_version: STORAGE_SCHEMA_VERSION,
+                writer_queue_capacity: ROOT_WRITER_QUEUE_CAPACITY,
+                migration_receipt: ownership.migration_receipt,
+            })?,
+        ),
+        ROOT_WORKFLOW_LIST_REQUEST_TYPE => (
+            ROOT_WORKFLOW_LIST_RESPONSE_TYPE,
+            serde_json::to_value(runtime.canonical_workflows()?)?,
+        ),
+        ROOT_WORKFLOW_SHOW_REQUEST_TYPE => {
+            let show: WorkflowShowRequest = serde_json::from_value(request_value)?;
+            (
+                ROOT_WORKFLOW_SHOW_RESPONSE_TYPE,
+                serde_json::to_value(runtime.canonical_workflow(show.workflow_id)?)?,
+            )
+        }
+        ROOT_WORKFLOW_CANCEL_REQUEST_TYPE => {
+            let cancel: WorkflowCancelRequest = serde_json::from_value(request_value)?;
+            (
+                ROOT_WORKFLOW_CANCEL_RESPONSE_TYPE,
+                serde_json::to_value(runtime.cancel_canonical_workflow(&cancel)?)?,
+            )
+        }
+        _ => return Err(PlatformError::InvalidSession.into()),
     };
     let response = RpcEnvelope {
         protocol_version: PROTOCOL_V1,
@@ -293,11 +335,11 @@ where
         correlation_id: request.envelope.correlation_id,
         session_id: session.session_id,
         caller_instance: ownership.runtime_identity.instance_id,
-        message_type: StableTypeId::parse(ROOT_STATUS_RESPONSE_TYPE)?,
+        message_type: StableTypeId::parse(response_type)?,
         expires_at: Some(Utc::now() + chrono::Duration::seconds(5)),
         payload: VersionedPayload::canonical_v1(
-            StableTypeId::parse(ROOT_STATUS_RESPONSE_TYPE)?,
-            &serde_json::to_value(status)?,
+            StableTypeId::parse(response_type)?,
+            &response_value,
         )?,
     };
     write_canonical_frame(&mut stream, &response).await?;
@@ -409,7 +451,10 @@ mod tests {
         RetryPolicy, RuntimeActorId, SessionId, SourceRef, TaskContract, TaskContractId,
         TaskContractStatus, VersionedRef, WaitReason, WorkflowAttempt, WorkflowId, WorkflowState,
     };
-    use mcg_platform::{exchange_root_rpc, query_root_status, root_ipc_session_path};
+    use mcg_platform::{
+        cancel_root_workflow, exchange_root_rpc, query_root_status, query_root_workflow,
+        query_root_workflows, root_ipc_session_path,
+    };
     use mcg_storage::{SqliteEventStore, task_contract_content_hash, verify_backup_bundle};
 
     fn workflow_hash(label: &str) -> ContentHash {
@@ -717,6 +762,79 @@ mod tests {
         )
         .expect("replace client session");
         assert!(query_root_status(temporary.path()).await.is_err());
+
+        server.abort();
+        remove_root_ipc_session(temporary.path(), session.session_id);
+    }
+
+    #[tokio::test]
+    async fn authenticated_local_ipc_lists_shows_and_fences_workflow_cancellation() {
+        let temporary = tempfile::tempdir().expect("temporary Root data directory");
+        let config = AppConfig::default().with_data_directory(temporary.path());
+        let seeded_at = Utc::now();
+        let (contract, attempt) = expired_workflow_fixture(seeded_at);
+        let owner = RuntimeActorId::new();
+        {
+            let mut store = SqliteEventStore::open(config.database_path()).expect("workflow store");
+            store
+                .create_workflow(&contract, &attempt, CorrelationId::new(), seeded_at)
+                .expect("create workflow");
+            store
+                .claim_workflow_attempt(
+                    attempt.attempt_id,
+                    1,
+                    0,
+                    owner,
+                    seeded_at + chrono::Duration::minutes(5),
+                    CorrelationId::new(),
+                    "ipc-workflow-claim",
+                    seeded_at,
+                )
+                .expect("claim workflow");
+        }
+        let runtime = open(config).expect("Protected Root open");
+        let session = create_root_ipc_session(temporary.path()).expect("IPC session");
+        let server = start_root_ipc(runtime, session.clone()).expect("IPC server");
+
+        let listed = query_root_workflows(temporary.path())
+            .await
+            .expect("workflow list");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].workflow_id, attempt.workflow_id);
+        let shown = query_root_workflow(temporary.path(), attempt.workflow_id)
+            .await
+            .expect("workflow show")
+            .expect("workflow inspection");
+        assert_eq!(shown.task_contract, contract);
+        assert_eq!(shown.attempt.state, WorkflowState::Running);
+        assert_eq!(shown.events.len(), 2);
+
+        let request = WorkflowCancelRequest {
+            attempt_id: shown.attempt.attempt_id,
+            expected_revision: shown.attempt.revision,
+            expected_generation: shown.attempt.lease_generation,
+            idempotency_key: "ipc-workflow-cancel".into(),
+        };
+        let cancelling = cancel_root_workflow(temporary.path(), &request)
+            .await
+            .expect("cancel workflow");
+        assert_eq!(cancelling.state, WorkflowState::CancelRequested);
+        assert_eq!(
+            cancelling.lease_generation,
+            shown.attempt.lease_generation + 1
+        );
+        assert_eq!(
+            cancel_root_workflow(temporary.path(), &request)
+                .await
+                .expect("exact cancellation replay"),
+            cancelling
+        );
+        let after = query_root_workflow(temporary.path(), attempt.workflow_id)
+            .await
+            .expect("workflow after cancellation")
+            .expect("workflow inspection after cancellation");
+        assert_eq!(after.attempt, cancelling);
+        assert_eq!(after.events.len(), 3);
 
         server.abort();
         remove_root_ipc_session(temporary.path(), session.session_id);

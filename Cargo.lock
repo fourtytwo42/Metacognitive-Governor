@@ -4003,6 +4003,7 @@ dependencies = [
  "mcg-api",
  "mcg-codex-app-server",
  "mcg-config",
+ "mcg-contracts",
  "mcg-domain",
  "mcg-events",
  "mcg-mcp",
