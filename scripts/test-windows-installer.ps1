@@ -252,7 +252,17 @@ if (-not (Test-Path -LiteralPath $nativeReviewedTopologyVerifier -PathType Leaf)
     throw "Native reviewed-topology verifier is missing: $nativeReviewedTopologyVerifier"
 }
 if ([string]::IsNullOrWhiteSpace($InstallerPath)) {
-    $InstallerPath = Join-Path $repositoryRoot "target/release/bundle/nsis/MCG_0.1.0_x64-setup.exe"
+    $tauriConfig = Get-Content -LiteralPath (Join-Path $repositoryRoot "apps/desktop/src-tauri/tauri.conf.json") -Raw | ConvertFrom-Json
+    $productName = [string]$tauriConfig.productName
+    $version = [string]$tauriConfig.version
+    if ([string]::IsNullOrWhiteSpace($productName) -or $version -notmatch '^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$') {
+        throw "Tauri package identity is missing or invalid."
+    }
+    $InstallerPath = Join-Path $repositoryRoot "target/release/bundle/nsis/${productName}_${version}_x64-setup.exe"
+    $compatibilityInstaller = Join-Path $repositoryRoot "target/release/bundle/nsis/MCG_${version}_x64-setup.exe"
+    if (-not (Test-Path -LiteralPath $InstallerPath -PathType Leaf) -and (Test-Path -LiteralPath $compatibilityInstaller -PathType Leaf)) {
+        $InstallerPath = $compatibilityInstaller
+    }
 }
 if (-not (Test-Path -LiteralPath $InstallerPath -PathType Leaf)) {
     throw "Windows installer does not exist: $InstallerPath"

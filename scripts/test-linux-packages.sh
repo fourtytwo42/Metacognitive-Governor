@@ -11,8 +11,16 @@ if [[ "$EUID" -ne 0 ]]; then
 fi
 
 repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-deb="${1:-$repository_root/target/release/bundle/deb/MCG_0.1.0_amd64.deb}"
-appimage="${2:-$repository_root/target/release/bundle/appimage/MCG_0.1.0_amd64.AppImage}"
+cd "$repository_root"
+version="$(node -p "require('./apps/desktop/src-tauri/tauri.conf.json').version")"
+product_name="$(node -p "require('./apps/desktop/src-tauri/tauri.conf.json').productName")"
+case "$(uname -m)" in
+  x86_64) deb_arch=amd64; appimage_arch=amd64 ;;
+  arm64|aarch64) deb_arch=arm64; appimage_arch=aarch64 ;;
+  *) echo "Unsupported Linux architecture: $(uname -m)" >&2; exit 1 ;;
+esac
+deb="${1:-$repository_root/target/release/bundle/deb/${product_name}_${version}_${deb_arch}.deb}"
+appimage="${2:-$repository_root/target/release/bundle/appimage/${product_name}_${version}_${appimage_arch}.AppImage}"
 uat_user="${MCG_UAT_USER:-${SUDO_USER:-$(stat -c '%U' "$repository_root")}}"
 codex_executable="${MCG_CODEX_APP_SERVER_EXECUTABLE:-$(command -v codex || true)}"
 

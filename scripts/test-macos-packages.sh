@@ -26,7 +26,8 @@ case "$(uname -m)" in
   arm64|aarch64) bundle_arch=aarch64 ;;
   *) echo "Unsupported macOS architecture: $(uname -m)" >&2; exit 1 ;;
 esac
-dmg="${2:-$repository_root/target/release/bundle/dmg/MetaCog_0.1.0_${bundle_arch}.dmg}"
+version="$(node -p "require('./apps/desktop/src-tauri/tauri.conf.json').version")"
+dmg="${2:-$repository_root/target/release/bundle/dmg/MetaCog_${version}_${bundle_arch}.dmg}"
 
 [[ -d "$source_app" ]] || { echo "Missing app bundle: $source_app" >&2; exit 1; }
 [[ -f "$dmg" ]] || { echo "Missing disk image: $dmg" >&2; exit 1; }
