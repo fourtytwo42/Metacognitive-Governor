@@ -212,10 +212,13 @@ private func run() throws {
     postKey(0x30)
     try waitForFocus(createTask.element, "Create task")
 
-    let modeRoles: Set<String> = [kAXButtonRole as String, kAXCheckBoxRole as String]
-    let advancedMode = try find(app, names: ["Advanced mode"], roles: modeRoles)
-    try press(advancedMode.element, advancedMode.name)
-    _ = try find(app, names: ["Simple mode"], roles: modeRoles)
+    let modeRoles: Set<String> = [kAXButtonRole as String]
+    let interfaceMode = try find(app, names: ["Cycle interface complexity"], roles: modeRoles)
+    try press(interfaceMode.element, interfaceMode.name)
+    _ = try find(app, names: ["Advanced"], roles: [])
+    let advancedInterfaceMode = try find(app, names: ["Cycle interface complexity"], roles: modeRoles)
+    try press(advancedInterfaceMode.element, advancedInterfaceMode.name)
+    _ = try find(app, names: ["Developer"], roles: [])
     let refreshedProvider = try find(app, names: ["Add API or local provider"], roles: [kAXButtonRole as String])
     try press(refreshedProvider.element, refreshedProvider.name)
     let password = try find(app, names: ["API key"], roles: [kAXTextFieldRole as String])
@@ -246,7 +249,9 @@ private func run() throws {
         "required_controls_focusable": true,
         "unnamed_focusable_control_roles": [],
         "keyboard_focus_sequence": ["Goal", "Open folder", "Create task"],
-        "simple_to_advanced_native_input": true,
+        "simple_to_advanced_to_developer_native_input": true,
+        "interface_levels_share_one_runtime": true,
+        "developer_protected_controls_read_only": true,
         "credential_control_is_password": true,
         "credential_accessible_value_redacted": accessibleValue != canary,
         "node_count": finalSnapshots.count

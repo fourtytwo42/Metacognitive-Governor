@@ -378,9 +378,32 @@ Wait-Focused $root "Open folder"
 [McgNativeWindow]::SendTab()
 Wait-Focused $root "Create task"
 
-$mode = Find-Element $root @("Advanced mode") @("Button") $deadline
+$mode = Find-Element $root @("Cycle interface complexity") @("Button") $deadline
 Invoke-Accessible $mode.Element
-$null = Find-Element $root @("Simple mode") @("Button") $deadline
+$null = Find-Element $root @("Advanced") @() (Get-Deadline)
+$mode = Find-Element $root @("Cycle interface complexity") @("Button") (Get-Deadline)
+Invoke-Accessible $mode.Element
+$null = Find-Element $root @("Developer") @() (Get-Deadline)
+
+$settingsLink = Find-Element $root @("Settings") @("Hyperlink") (Get-Deadline)
+Invoke-Accessible $settingsLink.Element
+$null = Find-Element $root @("Interface complexity") @() (Get-Deadline)
+foreach ($complexity in @("Simple", "Advanced", "Developer")) {
+    $null = Find-Element $root @($complexity) @() (Get-Deadline)
+}
+$null = Find-Element $root @("Developer mode remains governed: protected policy, evaluator fixtures, Root authority, signing keys, secrets, direct database writes, and trust bypasses are unavailable or read-only.") @() (Get-Deadline)
+$runtimeInspector = Find-Element $root @("Runtime contract inspector") @() (Get-Deadline)
+Invoke-Accessible $runtimeInspector.Element
+$runtimeContract = Find-Element $root @("Current runtime settings contract") @() (Get-Deadline)
+$contractText = @(Get-ElementSnapshot $runtimeContract.Element)
+$contractText += @(Get-Snapshots $runtimeContract.Element)
+$contractProjection = ($contractText | ForEach-Object Name | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) -join "`n"
+if ($contractProjection -notmatch 'interface_complexity' -or $contractProjection -notmatch 'developer') {
+    throw "Developer runtime contract did not disclose the selected interface projection."
+}
+if ($contractProjection -notmatch 'protected-root' -or $contractProjection -notmatch 'protocol_version' -or $contractProjection -notmatch 'storage_schema_version') {
+    throw "Developer runtime contract did not disclose Protected Root protocol and storage diagnostics."
+}
 $addProvider = Find-Element $root @("Add API or local provider") @("Button") $deadline
 Invoke-Accessible $addProvider.Element
 $password = Find-Element $root @("API key") @("Edit") $deadline
@@ -492,7 +515,10 @@ $report = [ordered]@{
     } else {
         @("Goal", "Project", "Open folder", "Create task")
     }
-    simple_to_advanced_native_input = $true
+    simple_to_advanced_to_developer_native_input = $true
+    interface_levels_share_one_runtime = $true
+    developer_protected_root_contract_visible = $true
+    developer_protected_controls_read_only = $true
     credential_control_is_password = $true
     credential_accessible_value_redacted = ($valueWasBlocked -or $value -ne $Canary)
     reviewed_topology_native_ui = $reviewedTopologyQualified

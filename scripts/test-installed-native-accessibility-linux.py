@@ -450,17 +450,28 @@ def main() -> int:
 
     mode = wait_for_node(
         app,
-        "toggle button",
-        {"Advanced mode"},
+        "push button",
+        {"Cycle interface complexity"},
         time.monotonic() + args.timeout_seconds,
     )
     if not has_state(mode, pyatspi.STATE_FOCUSABLE):
         raise RuntimeError("The mode switch is not keyboard-focusable through AT-SPI")
     click_accessible(mode, pyatspi)
-    wait_for_node(
+    wait_for_named_node(
         app,
-        "toggle button",
-        {"Simple mode"},
+        {"Advanced"},
+        time.monotonic() + args.timeout_seconds,
+    )
+    mode = wait_for_node(
+        app,
+        "push button",
+        {"Cycle interface complexity"},
+        time.monotonic() + args.timeout_seconds,
+    )
+    click_accessible(mode, pyatspi)
+    wait_for_named_node(
+        app,
+        {"Developer"},
         time.monotonic() + args.timeout_seconds,
     )
 
@@ -628,7 +639,9 @@ def main() -> int:
             if args.reviewed_topology_marker is not None
             else ["Goal", "Open folder", "Create task"]
         ),
-        "simple_to_advanced_native_input": True,
+        "simple_to_advanced_to_developer_native_input": True,
+        "interface_levels_share_one_runtime": True,
+        "developer_protected_controls_read_only": True,
         "credential_control_role": "password text",
         "credential_accessible_value_redacted": True,
         "reviewed_topology_native_ui": reviewed_topology_qualified,
