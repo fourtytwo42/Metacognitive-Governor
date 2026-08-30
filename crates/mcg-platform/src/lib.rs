@@ -11,10 +11,11 @@ use std::fmt::Write as _;
 
 use chrono::{DateTime, Duration, Utc};
 use mcg_contracts::{
-    ActionId, ActionInspection, ActionSummary, AuthenticatedRpcRequest, ContractError,
-    CorrelationId, PROTOCOL_V1, RequestId, RootStatus, RpcEnvelope, RuntimeInstanceId, SessionId,
-    StableTypeId, VersionedPayload, WorkflowAttempt, WorkflowCancelRequest, WorkflowId,
-    WorkflowInspection, canonical_cbor_v1, decode_canonical_cbor_v1,
+    ActionId, ActionInspection, ActionSummary, AuthenticatedRpcRequest, ContentHash, ContractError,
+    CorrelationId, PROTOCOL_V1, RequestId, RootStatus, RpcEnvelope, RuntimeInstanceId,
+    RuntimeWorkerRole, SessionId, StableTypeId, VersionedPayload, WorkflowAttempt,
+    WorkflowCancelRequest, WorkflowId, WorkflowInspection, canonical_cbor_v1,
+    decode_canonical_cbor_v1,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 #[cfg(windows)]
@@ -27,6 +28,7 @@ use zeroize::{Zeroize, Zeroizing};
 
 pub const MAX_ROOT_IPC_FRAME_BYTES: usize = 1024 * 1024;
 pub const ROOT_IPC_SESSION_SCHEMA_VERSION: u16 = 1;
+pub const RUNTIME_WORKER_SESSION_SCHEMA_VERSION: u16 = 1;
 pub const ROOT_STATUS_REQUEST_TYPE: &str = "metacog.root.status.request.v1";
 pub const ROOT_STATUS_RESPONSE_TYPE: &str = "metacog.root.status.response.v1";
 pub const ROOT_WORKFLOW_LIST_REQUEST_TYPE: &str = "metacog.root.workflow_list.request.v1";
@@ -78,6 +80,164 @@ impl RootIpcSession {
     }
 }
 
+#[derive(Clone, Serialize, Deserialize)]
+pub struct RuntimeWorkerSession {
+    pub schema_version: u16,
+    pub protocol_version: u16,
+    pub session_id: SessionId,
+    pub endpoint: String,
+    pub capability: String,
+    pub role: RuntimeWorkerRole,
+    pub worker_generation: u64,
+    pub expected_executable_hash: ContentHash,
+    pub root_process_id: u32,
+    pub expires_at: DateTime<Utc>,
+}
+
+impl fmt::Debug for RuntimeWorkerSession {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RuntimeWorkerSession")
+            .field("schema_version", &self.schema_version)
+            .field("protocol_version", &self.protocol_version)
+            .field("session_id", &self.session_id)
+            .field("endpoint", &self.endpoint)
+            .field("role", &self.role)
+            .field("worker_generation", &self.worker_generation)
+            .field("expected_executable_hash", &self.expected_executable_hash)
+            .field("root_process_id", &self.root_process_id)
+            .field("expires_at", &self.expires_at)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for RuntimeWorkerSession {
+    fn drop(&mut self) {
+        self.capability.zeroize();
+    }
+}
+
+impl RuntimeWorkerSession {
+    #[must_use]
+    pub fn verifies(&self, candidate: &str) -> bool {
+        candidate.len() == self.capability.len()
+            && bool::from(candidate.as_bytes().ct_eq(self.capability.as_bytes()))
+    }
+
+    /// Validates one short-lived, executable- and generation-bound launch session.
+    ///
+    /// # Errors
+    /// Returns an error for a malformed, expired, weak, or unsupported session.
+    pub fn validate(&self, now: DateTime<Utc>) -> Result<(), PlatformError> {
+        if self.schema_version != RUNTIME_WORKER_SESSION_SCHEMA_VERSION
+            || self.protocol_version != PROTOCOL_V1
+            || self.worker_generation == 0
+            || self.root_process_id == 0
+            || self.capability.len() < 64
+            || self.endpoint.is_empty()
+            || self.expires_at <= now
+            || self.expected_executable_hash.validate().is_err()
+        {
+            return Err(PlatformError::InvalidSession);
+        }
+        Ok(())
+    }
+}
+
+pub trait LocalIpcIo: AsyncRead + AsyncWrite + Unpin + Send {}
+
+impl<T> LocalIpcIo for T where T: AsyncRead + AsyncWrite + Unpin + Send {}
+
+pub type LocalIpcStream = Box<dyn LocalIpcIo>;
+
+pub struct RuntimeWorkerListener {
+    endpoint: String,
+    #[cfg(windows)]
+    next: Option<tokio::net::windows::named_pipe::NamedPipeServer>,
+    #[cfg(unix)]
+    listener: tokio::net::UnixListener,
+    #[cfg(unix)]
+    owner_uid: u32,
+}
+
+impl RuntimeWorkerListener {
+    /// Binds an owner-local Runtime endpoint before the child is launched.
+    ///
+    /// # Errors
+    /// Returns an error when the endpoint cannot be exclusively bound or protected.
+    pub fn bind(endpoint: &str) -> Result<Self, PlatformError> {
+        #[cfg(windows)]
+        {
+            use tokio::net::windows::named_pipe::ServerOptions;
+
+            let next = ServerOptions::new()
+                .first_pipe_instance(true)
+                .reject_remote_clients(true)
+                .create(endpoint)?;
+            Ok(Self {
+                endpoint: endpoint.to_owned(),
+                next: Some(next),
+            })
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+            let path = PathBuf::from(endpoint);
+            match fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+            let listener = tokio::net::UnixListener::bind(&path)?;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+            let parent = path.parent().ok_or(PlatformError::InvalidSession)?;
+            let owner_uid = fs::metadata(parent)?.uid();
+            Ok(Self {
+                endpoint: endpoint.to_owned(),
+                listener,
+                owner_uid,
+            })
+        }
+    }
+
+    /// Accepts one same-owner worker connection.
+    ///
+    /// # Errors
+    /// Returns an error for transport failure or a peer-credential mismatch.
+    pub async fn accept(&mut self) -> Result<LocalIpcStream, PlatformError> {
+        #[cfg(windows)]
+        {
+            use tokio::net::windows::named_pipe::ServerOptions;
+
+            let server = self.next.take().ok_or(PlatformError::InvalidSession)?;
+            server.connect().await?;
+            self.next = Some(
+                ServerOptions::new()
+                    .reject_remote_clients(true)
+                    .create(&self.endpoint)?,
+            );
+            Ok(Box::new(server))
+        }
+        #[cfg(unix)]
+        {
+            let (stream, _) = self.listener.accept().await?;
+            let credential = stream.peer_cred()?;
+            if credential.uid() != self.owner_uid {
+                return Err(PlatformError::InvalidSession);
+            }
+            Ok(Box::new(stream))
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for RuntimeWorkerListener {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.endpoint);
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum PlatformError {
     #[error("local IPC I/O failed: {0}")]
@@ -114,6 +274,91 @@ pub fn root_ipc_endpoint(data_directory: &Path) -> String {
             .join("root.sock")
             .to_string_lossy()
             .into_owned()
+    }
+}
+
+/// Derives a unique local endpoint for one Root-launched Runtime generation.
+#[must_use]
+pub fn runtime_worker_ipc_endpoint(data_directory: &Path, session_id: SessionId) -> String {
+    #[cfg(windows)]
+    {
+        let material = format!(
+            "{}:{}",
+            data_directory.to_string_lossy().to_lowercase(),
+            session_id
+        );
+        let digest = Sha256::digest(material.as_bytes());
+        let suffix = digest[..12]
+            .iter()
+            .fold(String::with_capacity(24), |mut output, byte| {
+                write!(output, "{byte:02x}").expect("writing to String cannot fail");
+                output
+            });
+        format!(r"\\.\pipe\metacog-runtime-{suffix}")
+    }
+    #[cfg(not(windows))]
+    {
+        data_directory
+            .join(format!("runtime-{}.sock", session_id.0.simple()))
+            .to_string_lossy()
+            .into_owned()
+    }
+}
+
+/// Creates an in-memory, launch-scoped Runtime capability. It is never published to disk.
+///
+/// # Errors
+/// Returns an error for a zero generation or invalid executable identity.
+pub fn create_runtime_worker_session(
+    data_directory: &Path,
+    worker_generation: u64,
+    expected_executable_hash: ContentHash,
+    expires_at: DateTime<Utc>,
+) -> Result<RuntimeWorkerSession, PlatformError> {
+    let session_id = SessionId::new();
+    let session = RuntimeWorkerSession {
+        schema_version: RUNTIME_WORKER_SESSION_SCHEMA_VERSION,
+        protocol_version: PROTOCOL_V1,
+        session_id,
+        endpoint: runtime_worker_ipc_endpoint(data_directory, session_id),
+        capability: format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple()),
+        role: RuntimeWorkerRole::Cognition,
+        worker_generation,
+        expected_executable_hash,
+        root_process_id: std::process::id(),
+        expires_at,
+    };
+    session.validate(Utc::now())?;
+    Ok(session)
+}
+
+/// Connects a worker to the Root-bound endpoint before the launch deadline.
+///
+/// # Errors
+/// Returns an error when the endpoint remains unavailable or the deadline elapses.
+pub async fn connect_runtime_worker(
+    endpoint: &str,
+    deadline: DateTime<Utc>,
+) -> Result<LocalIpcStream, PlatformError> {
+    loop {
+        if Utc::now() >= deadline {
+            return Err(PlatformError::InvalidSession);
+        }
+        #[cfg(windows)]
+        {
+            use tokio::net::windows::named_pipe::ClientOptions;
+
+            if let Ok(pipe) = ClientOptions::new().open(endpoint) {
+                return Ok(Box::new(pipe));
+            }
+        }
+        #[cfg(unix)]
+        {
+            if let Ok(stream) = tokio::net::UnixStream::connect(endpoint).await {
+                return Ok(Box::new(stream));
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
 }
 
@@ -437,5 +682,39 @@ mod tests {
         assert!(!loaded.verifies("wrong"));
         remove_root_ipc_session(temporary.path(), session.session_id);
         assert!(!root_ipc_session_path(temporary.path()).exists());
+    }
+
+    #[test]
+    fn runtime_worker_sessions_are_unique_private_and_executable_bound() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let executable_hash = VersionedPayload::canonical_v1(
+            StableTypeId::parse("test.runtime_executable.v1").unwrap(),
+            &json!({"binary": "worker"}),
+        )
+        .unwrap()
+        .content_hash("TestRuntimeExecutable")
+        .unwrap();
+        let first = create_runtime_worker_session(
+            directory.path(),
+            1,
+            executable_hash.clone(),
+            Utc::now() + Duration::seconds(30),
+        )
+        .unwrap();
+        let second = create_runtime_worker_session(
+            directory.path(),
+            2,
+            executable_hash,
+            Utc::now() + Duration::seconds(30),
+        )
+        .unwrap();
+        assert_ne!(first.session_id, second.session_id);
+        assert_ne!(first.endpoint, second.endpoint);
+        assert_ne!(first.capability, second.capability);
+        assert!(!format!("{first:?}").contains(&first.capability));
+        assert!(first.verifies(&first.capability));
+        assert!(!first.verifies(&second.capability));
+        assert_eq!(first.worker_generation, 1);
+        assert_eq!(second.worker_generation, 2);
     }
 }

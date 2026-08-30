@@ -23,6 +23,14 @@ pub const MAX_CONTEXT_TRANSFORMATIONS: usize = 64;
 pub const MAX_CONTEXT_EXPANSION_STEPS: usize = 256;
 pub const MAX_REFERENCE_LOCATOR_BYTES: usize = 4_096;
 pub const MAX_MANIFEST_TEXT_BYTES: usize = 4_096;
+pub const RUNTIME_INVOCATION_REQUEST_HASH_DOMAIN: &str = "MetaCog.RuntimeInvocationRequest";
+pub const RUNTIME_INVOCATION_RESPONSE_HASH_DOMAIN: &str = "MetaCog.RuntimeInvocationResponse";
+pub const RUNTIME_WORKER_HELLO_MESSAGE_TYPE: &str = "metacog.runtime.hello.v1";
+pub const RUNTIME_WORKER_INVOKE_MESSAGE_TYPE: &str = "metacog.runtime.invoke.v1";
+pub const RUNTIME_WORKER_RESULT_MESSAGE_TYPE: &str = "metacog.runtime.result.v1";
+pub const RUNTIME_WORKER_CANCEL_MESSAGE_TYPE: &str = "metacog.runtime.cancel.v1";
+pub const RUNTIME_WORKER_SHUTDOWN_MESSAGE_TYPE: &str = "metacog.runtime.shutdown.v1";
+pub const RUNTIME_WORKER_ACK_MESSAGE_TYPE: &str = "metacog.runtime.ack.v1";
 
 macro_rules! stable_uuid {
     ($name:ident) => {
@@ -294,6 +302,22 @@ pub fn canonical_cbor_v1(value: &Value) -> Result<Vec<u8>, ContractError> {
         return Err(ContractError::PayloadTooLarge);
     }
     Ok(output)
+}
+
+/// Produces a canonical, domain-separated hash for one typed contract value.
+///
+/// # Errors
+/// Returns a contract error when the type ID, value, or semantic hash domain is invalid.
+pub fn canonical_contract_hash<T: Serialize>(
+    type_id: &str,
+    semantic_domain: &str,
+    value: &T,
+) -> Result<ContentHash, ContractError> {
+    VersionedPayload::canonical_v1(
+        StableTypeId::parse(type_id)?,
+        &serde_json::to_value(value).map_err(|_| ContractError::MalformedPayload)?,
+    )?
+    .content_hash(semantic_domain)
 }
 
 /// Decodes only the canonical v1 subset and rejects alternate encodings.
@@ -1325,6 +1349,254 @@ impl ModelRun {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeWorkerRole {
+    Cognition,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeWorkerHello {
+    pub schema_version: u32,
+    pub role: RuntimeWorkerRole,
+    pub worker_generation: u64,
+    pub process_id: u32,
+    pub runtime_identity: RuntimeIdentity,
+    pub executable_hash: ContentHash,
+}
+
+impl RuntimeWorkerHello {
+    pub const SCHEMA_VERSION: u32 = 1;
+    pub const TYPE_ID: &'static str = "mcg.runtime_worker_hello.v1";
+
+    /// Validates one executable- and generation-bound worker identity assertion.
+    ///
+    /// # Errors
+    /// Returns a contract error for an invalid schema, generation, process, protocol, or hash.
+    pub fn validate(&self) -> Result<(), ContractError> {
+        if self.schema_version != Self::SCHEMA_VERSION
+            || self.worker_generation == 0
+            || self.process_id == 0
+        {
+            return Err(ContractError::InvalidContract(
+                "runtime worker hello has an invalid schema, generation, or process id",
+            ));
+        }
+        negotiate_protocol(&[self.runtime_identity.protocol_version])?;
+        self.runtime_identity.build_hash.validate()?;
+        self.executable_hash.validate()?;
+        if self.runtime_identity.build_hash != self.executable_hash {
+            return Err(ContractError::InvalidContract(
+                "runtime worker identity does not bind its executable hash",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeInvocationRequest {
+    pub worker_generation: u64,
+    pub attempt_revision: u64,
+    pub lease_generation: u64,
+    pub context_manifest: ContextManifest,
+    pub invocation_manifest: InvocationManifest,
+    pub model_run_id: ModelRunId,
+    pub input: VersionedPayload,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeterministicCriterionEvidence {
+    pub clause_id: String,
+    pub passed: bool,
+    pub evidence_refs: Vec<SourceRef>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeterministicVerifyInput {
+    pub work_response_hash: ContentHash,
+    pub criteria: Vec<DeterministicCriterionEvidence>,
+}
+
+impl DeterministicVerifyInput {
+    pub const SCHEMA_VERSION: u32 = 1;
+    pub const TYPE_ID: &'static str = "mcg.deterministic_verify_input.v1";
+
+    /// Validates bounded independent verification input.
+    ///
+    /// # Errors
+    /// Returns a contract error for invalid work evidence, duplicate criteria, or bad refs.
+    pub fn validate(&self) -> Result<(), ContractError> {
+        self.work_response_hash.validate()?;
+        validate_item_count(
+            self.criteria.len(),
+            "deterministic Verify input contains too many criteria",
+        )?;
+        let mut clauses = BTreeSet::new();
+        for criterion in &self.criteria {
+            validate_text(
+                &criterion.clause_id,
+                MAX_MANIFEST_TEXT_BYTES,
+                "deterministic Verify criterion id is invalid",
+            )?;
+            if !clauses.insert(criterion.clause_id.as_str()) {
+                return Err(ContractError::InvalidContract(
+                    "deterministic Verify criterion is duplicated",
+                ));
+            }
+            validate_item_count(
+                criterion.evidence_refs.len(),
+                "deterministic Verify criterion has too many evidence refs",
+            )?;
+            for evidence in &criterion.evidence_refs {
+                evidence.validate()?;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl RuntimeInvocationRequest {
+    pub const SCHEMA_VERSION: u32 = 1;
+    pub const TYPE_ID: &'static str = "mcg.runtime_invocation_request.v1";
+
+    /// Validates a fully reconstructable and workflow-fenced Runtime request.
+    ///
+    /// # Errors
+    /// Returns a contract error for invalid generations, manifest substitution, or request hash.
+    pub fn validate(&self) -> Result<(), ContractError> {
+        if self.worker_generation == 0 || self.attempt_revision == 0 {
+            return Err(ContractError::InvalidContract(
+                "runtime invocation request has an invalid generation or attempt revision",
+            ));
+        }
+        self.context_manifest.validate()?;
+        self.invocation_manifest.validate()?;
+        if self.context_manifest.attempt_id != self.invocation_manifest.attempt_id {
+            return Err(ContractError::InvalidContract(
+                "runtime invocation context belongs to another attempt",
+            ));
+        }
+        let context_hash = canonical_contract_hash(
+            ContextManifest::TYPE_ID,
+            "MetaCog.ContextManifest",
+            &self.context_manifest,
+        )?;
+        if context_hash != self.invocation_manifest.context_manifest {
+            return Err(ContractError::InvalidContract(
+                "runtime invocation context hash does not match its manifest",
+            ));
+        }
+        self.input.validate()?;
+        if self
+            .input
+            .content_hash(RUNTIME_INVOCATION_REQUEST_HASH_DOMAIN)?
+            != self.invocation_manifest.request_hash
+        {
+            return Err(ContractError::InvalidContract(
+                "runtime invocation input does not match its request hash",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeInvocationResult {
+    pub worker_generation: u64,
+    pub invocation_id: InvocationId,
+    pub model_run_id: ModelRunId,
+    pub role: InvocationRole,
+    pub request_hash: ContentHash,
+    pub response: VersionedPayload,
+    pub response_hash: ContentHash,
+    pub criterion_results: Vec<CriterionResult>,
+    pub verdict: Option<CompletionVerdict>,
+}
+
+impl RuntimeInvocationResult {
+    pub const SCHEMA_VERSION: u32 = 1;
+    pub const TYPE_ID: &'static str = "mcg.runtime_invocation_result.v1";
+
+    /// Validates deterministic Runtime output without granting it commit authority.
+    ///
+    /// # Errors
+    /// Returns a contract error for invalid hashes, bounds, or Work/Verify result shape.
+    pub fn validate(&self) -> Result<(), ContractError> {
+        if self.worker_generation == 0 {
+            return Err(ContractError::InvalidContract(
+                "runtime invocation result generation is zero",
+            ));
+        }
+        self.request_hash.validate()?;
+        self.response.validate()?;
+        if self
+            .response
+            .content_hash(RUNTIME_INVOCATION_RESPONSE_HASH_DOMAIN)?
+            != self.response_hash
+        {
+            return Err(ContractError::InvalidContract(
+                "runtime invocation response hash does not match its payload",
+            ));
+        }
+        validate_item_count(
+            self.criterion_results.len(),
+            "runtime result contains too many criterion results",
+        )?;
+        for criterion in &self.criterion_results {
+            validate_text(
+                &criterion.clause_id,
+                MAX_MANIFEST_TEXT_BYTES,
+                "runtime criterion id is empty, oversized, or contains controls",
+            )?;
+            validate_item_count(
+                criterion.evidence_refs.len(),
+                "runtime criterion contains too many evidence references",
+            )?;
+            for evidence in &criterion.evidence_refs {
+                evidence.validate()?;
+            }
+            criterion.detail_hash.validate()?;
+        }
+        match self.role {
+            InvocationRole::Work
+                if !self.criterion_results.is_empty() || self.verdict.is_some() =>
+            {
+                Err(ContractError::InvalidContract(
+                    "Work result cannot assert independent verification",
+                ))
+            }
+            InvocationRole::Verify if self.verdict.is_none() => Err(
+                ContractError::InvalidContract("Verify result must propose a completion verdict"),
+            ),
+            _ => Ok(()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeWorkerControl {
+    pub worker_generation: u64,
+}
+
+impl RuntimeWorkerControl {
+    pub const SCHEMA_VERSION: u32 = 1;
+    pub const TYPE_ID: &'static str = "mcg.runtime_worker_control.v1";
+
+    /// Validates a generation-fenced worker control message.
+    ///
+    /// # Errors
+    /// Returns a contract error when the generation is zero.
+    pub fn validate(&self) -> Result<(), ContractError> {
+        if self.worker_generation == 0 {
+            return Err(ContractError::InvalidContract(
+                "runtime worker control generation is zero",
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CriterionResult {
     pub clause_id: String,
@@ -2141,6 +2413,70 @@ mod tests {
                 "satisfied completion contains a failed criterion"
             ))
         );
+    }
+
+    #[test]
+    fn runtime_worker_contracts_bind_generation_context_request_and_role_semantics() {
+        let attempt_id = AttemptId::new();
+        let context = fixture_context_manifest(attempt_id);
+        let input = fixture_payload("test.runtime_input.v1", "deterministic");
+        let mut invocation = fixture_invocation_manifest(attempt_id, &context);
+        invocation.context_manifest = canonical_contract_hash(
+            ContextManifest::TYPE_ID,
+            "MetaCog.ContextManifest",
+            &context,
+        )
+        .unwrap();
+        invocation.request_hash = input
+            .content_hash(RUNTIME_INVOCATION_REQUEST_HASH_DOMAIN)
+            .unwrap();
+        invocation.response_hash = None;
+        let request = RuntimeInvocationRequest {
+            worker_generation: 1,
+            attempt_revision: 1,
+            lease_generation: 0,
+            context_manifest: context.clone(),
+            invocation_manifest: invocation.clone(),
+            model_run_id: ModelRunId::new(),
+            input,
+        };
+        request.validate().unwrap();
+
+        let mut substituted = request.clone();
+        substituted.context_manifest.approximate_tokens += 1;
+        assert!(substituted.validate().is_err());
+        let mut stale = request.clone();
+        stale.worker_generation = 0;
+        assert!(stale.validate().is_err());
+
+        let response = fixture_payload("test.runtime_response.v1", "complete");
+        let mut result = RuntimeInvocationResult {
+            worker_generation: 1,
+            invocation_id: invocation.id,
+            model_run_id: request.model_run_id,
+            role: InvocationRole::Work,
+            request_hash: invocation.request_hash,
+            response_hash: response
+                .content_hash(RUNTIME_INVOCATION_RESPONSE_HASH_DOMAIN)
+                .unwrap(),
+            response,
+            criterion_results: Vec::new(),
+            verdict: None,
+        };
+        result.validate().unwrap();
+        result.verdict = Some(CompletionVerdict::Satisfied);
+        assert!(result.validate().is_err());
+
+        let evidence = DeterministicCriterionEvidence {
+            clause_id: "criterion-1".to_owned(),
+            passed: true,
+            evidence_refs: vec![fixture_source("test-evidence")],
+        };
+        let verify = DeterministicVerifyInput {
+            work_response_hash: result.response_hash,
+            criteria: vec![evidence.clone(), evidence],
+        };
+        assert!(verify.validate().is_err());
     }
 
     fn fixture_hash(label: &str) -> ContentHash {

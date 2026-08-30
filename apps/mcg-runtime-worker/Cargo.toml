@@ -1,0 +1,23 @@
+[package]
+name = "mcg-runtime-worker"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+chrono.workspace = true
+mcg-contracts = { path = "../../crates/mcg-contracts" }
+mcg-platform = { path = "../../crates/mcg-platform" }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
