@@ -2,6 +2,15 @@
 
 Durable project context lives here. Update this file whenever information should survive chat context compression or future agent handoff.
 
+### 2026-08-30 - Real-child action-runner fault matrix
+
+- Context: Stage 4 had simulated Root failure classification and normal separate-process coverage, but no deterministic child that could fail before/after an effect or cross the parent's deadline.
+- Decision: Keep fault behavior out of the supported sidecar. Build a distinct integration fixture, copy it under the fixed trusted runner name only inside an isolated temporary directory, and exercise the unmodified production client supervision path. Release packaging continues to allowlist and copy only `mcg-action-runner`.
+- Files: `apps/mcg-action-runner/{Cargo.toml,src/bin/fault_fixture.rs,tests/process.rs}`; Stage 4, traceability, status report, and `MEMORY.md`.
+- Commands/tests: Action runner 13/13; strict runner all-target Clippy; Protected Root 10/10; formatting passed.
+- Result: Product checkpoint `6a094ee` now proves deterministic Windows pre-effect exit, post-effect lost response, timeout before and after an effect, conservative unknown-effect classification, bounded return, child PID reaping, and rejection of work scheduled after the deadline.
+- Follow-up: Combine these faults with real Root restart/reconciliation and changed-target ambiguity, run them in packaged Windows/Linux/macOS lanes, and finish the broader sandbox/resource/process-tree adversarial matrix.
+
 ### 2026-08-30 - Human CLI inspection of immutable action sources
 
 - Context: Canonical action JSON and Desktop exposed `ActionOrigin`, but ordinary `mcg action show` did not reveal the safe source identity needed for CLI-first investigation.

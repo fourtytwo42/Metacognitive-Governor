@@ -88,6 +88,9 @@ OS sandboxing, process-tree confinement, or the action ledger.
 - Contracts and platform strict all-target Clippy: passed.
 - Runtime tests: 108 passed with two explicit native Windows Sandbox package gates ignored.
 - Protected Root migration-process test: passed.
+- Action runner tests: 13 passed (5 unit and 8 separate-process), including deterministic
+  pre-effect exit, post-effect lost response, timeout-before-effect, timeout-after-effect,
+  PID reaping, and rejection of work scheduled after the deadline.
 - Strict runner all-target Clippy: passed with `-D warnings`.
 - Strict client-only runner Clippy and dependency-shape checks: passed; `cap-fs-ext` and
   `cap-std` are absent from the Root-linked feature graph.
@@ -106,15 +109,19 @@ OS sandboxing, process-tree confinement, or the action ledger.
 The unit suite covers create/inspect/duplicate/compensate behavior, operation and hash-domain
 substitution, traversal rejection, changed-target preservation, empty-root qualification,
 and cleanup. Separate-process coverage proves one-shot request/response behavior, malformed
-input failure, and the package qualification contract. Unix additionally compiles a symlink
-escape test, which must run on the native Linux and macOS lanes.
+input failure, the package qualification contract, uncertain classification after a lost
+response, and bounded kill/reap behavior before and after an effect. The fault fixture is a
+separate executable used only from tests; release packaging's exact sidecar allowlist copies
+only `mcg-action-runner`. Unix additionally compiles a symlink escape test, which must run on
+the native Linux and macOS lanes.
 
 ## Remaining exit gates
 
 Stage 4 is not complete until all of the following pass:
 
-1. Lost response, crash-before-effect, crash-after-effect, timeout, late response, and
-   killed-process cases pass real process injection without blind redispatch.
+1. Extend the passing real-child exit/lost-response/timeout/kill/reap matrix through Root
+   restart and packaged-process tests, including changed-target ambiguity, without blind
+   redispatch.
 2. Exact approval-to-source navigation reaches the originating conversation, agent,
    command, approval, and evidence, and compensation history/controls become owner-visible.
    Authenticated local IPC, CLI list/show, and progressive Desktop status/evidence are
