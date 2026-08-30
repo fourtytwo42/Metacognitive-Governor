@@ -4,7 +4,7 @@
 
 **Branch:** `codex/v34-updater-version-binding`
 
-**Pushed checkpoint:** `24b3de4` (`Resume only satisfied workflow waits`)
+**Pushed implementation checkpoint:** `f7ef0ee` (`Establish Root-owned action reconciliation`)
 
 **Audit boundary:** pushed Stage 3 base plus the verified schema-54 governed-action checkpoint. The concurrent untracked `STAGE_3_DURABLE_WORKFLOW.md` is excluded from this audit's changes and commits.
 

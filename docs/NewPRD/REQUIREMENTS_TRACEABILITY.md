@@ -188,4 +188,4 @@ This matrix is updated as implementation lands. `Implemented / cumulative UAT pe
 | Migration + backup/restore receipt | Every schema/ownership change | Schema 50→54 protected-root migration-process test passes / packaged backup/restore UAT pending |
 | Golden payload/hash compatibility receipt | Every codec/schema release | TaskContract v1 fixture/hash plus existing canonical-v1 fixtures pass / cross-version package replay pending |
 | Experiment artifact set | Every protected experiment | Planned |
-| Commit/remote parity and artifact manifest | Every verified major stage | Stage 3 kernel, TaskContract head CAS, Root IPC/CLI, Desktop projection, and objective wait recovery are pushed through `24b3de4`; schema-54 action/reconciliation checkpoint is verified, with cumulative release artifacts pending |
+| Commit/remote parity and artifact manifest | Every verified major stage | Stage 3 kernel, TaskContract head CAS, Root IPC/CLI, Desktop projection, objective wait recovery, and schema-54 action reconciliation are pushed through `f7ef0ee`; cumulative release artifacts remain pending |
