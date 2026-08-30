@@ -170,7 +170,7 @@ test.beforeEach(async ({ page }) => {
       updated_at: now
     };
     const canonicalActionInspection = {
-      envelope: { id: canonicalActionId, workflow_id: canonicalWorkflowId, attempt_id: canonicalAttemptId, actor: canonicalAction.actor, effect_class: canonicalAction.effect_class, operation: actionPayload, operation_hash: { algorithm: "blake3-256", domain: "MetaCog.ActionOperation", digest_hex: "f".repeat(64) }, created_at: now },
+      envelope: { id: canonicalActionId, workflow_id: canonicalWorkflowId, attempt_id: canonicalAttemptId, actor: canonicalAction.actor, origin: { conversation: { source_type: "mcg.conversation.v1", locator: "00000000-0000-4000-8000-00000000060d", content_hash: { algorithm: "blake3-256", domain: "MetaCog.Conversation", digest_hex: "1".repeat(64) } }, invocation: { source_type: "mcg.invocation_manifest.v1", locator: "00000000-0000-4000-8000-00000000060e", content_hash: { algorithm: "blake3-256", domain: "MetaCog.Invocation", digest_hex: "2".repeat(64) } }, command: { source_type: "mcg.command_execution.v1", locator: "command-60f", content_hash: { algorithm: "blake3-256", domain: "MetaCog.Command", digest_hex: "3".repeat(64) } }, approval: { source_type: "mcg.approval_request.v1", locator: "00000000-0000-4000-8000-000000000610", content_hash: { algorithm: "blake3-256", domain: "MetaCog.Approval", digest_hex: "4".repeat(64) } }, agent: { source_type: "mcg.runtime_actor.v1", locator: canonicalAction.actor, content_hash: { algorithm: "blake3-256", domain: "MetaCog.Actor", digest_hex: "5".repeat(64) } }, evidence: [{ source_type: "mcg.action_evidence.v1", locator: "artifact-611", content_hash: { algorithm: "blake3-256", domain: "MetaCog.Evidence", digest_hex: "6".repeat(64) } }] }, effect_class: canonicalAction.effect_class, operation: actionPayload, operation_hash: { algorithm: "blake3-256", domain: "MetaCog.ActionOperation", digest_hex: "f".repeat(64) }, created_at: now },
       executions: [{ id: canonicalExecutionId, action_id: canonicalActionId, attempt_number: 1, state: canonicalAction.state, revision: 3, lease_generation: 2, executor: canonicalAction.actor, outcome: canonicalAction.outcome, created_at: now, updated_at: now }],
       receipts: [],
       reconciliation_jobs: [{ id: "00000000-0000-4000-8000-00000000060a", action_id: canonicalActionId, execution_id: canonicalExecutionId, adapter: actionPayload, state: "pending", revision: 1, lease_generation: 0, lease_owner: null, lease_expires_at: null, next_attempt_at: now, attempts: 0, deadline: "2026-08-18T01:00:00Z", last_hint: null, created_at: now, updated_at: now }],
@@ -572,6 +572,9 @@ test("governed actions keep one Root truth across Simple Advanced and Developer"
   await actions.getByRole("button", { name: "Inspect" }).click();
   await expect(actions.getByText("mcg.governed_filesystem_operation.v1")).toBeVisible();
   await expect(actions.getByText("Reconciliation: pending")).toBeVisible();
+  await expect(actions.getByRole("region", { name: "Bound action origin" })).toContainText("command-60f");
+  await expect(actions.getByRole("region", { name: "Bound action origin" })).toContainText("artifact-611");
+  await expect(actions.getByRole("button", { name: /Open originating conversation/ })).toBeDisabled();
   await expect(actions.getByRole("button", { name: "Canonical action evidence" })).toHaveCount(0);
 
   await openOwnerSurface(page, "Settings");

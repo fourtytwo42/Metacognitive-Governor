@@ -1254,12 +1254,28 @@ export interface CanonicalVersionedPayload {
   bytes: number[];
 }
 
+export interface CanonicalSourceRef {
+  source_type: string;
+  locator: string;
+  content_hash: { algorithm: string; domain: string; digest_hex: string };
+}
+
+export interface CanonicalActionOrigin {
+  conversation: CanonicalSourceRef | null;
+  invocation: CanonicalSourceRef | null;
+  command: CanonicalSourceRef | null;
+  approval: CanonicalSourceRef | null;
+  agent: CanonicalSourceRef | null;
+  evidence: CanonicalSourceRef[];
+}
+
 export interface CanonicalActionInspection {
   envelope: {
     id: string;
     workflow_id: string;
     attempt_id: string;
     actor: string;
+    origin?: CanonicalActionOrigin | null;
     effect_class: ActionEffectClass;
     operation: CanonicalVersionedPayload;
     operation_hash: { algorithm: string; domain: string; digest_hex: string };

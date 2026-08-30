@@ -1859,6 +1859,7 @@ mod tests {
                 content_hash: task_contract_content_hash(&contract).expect("contract hash"),
             },
             actor,
+            origin: None,
             authority,
             elevated_authority: None,
             expected_versions: vec![],

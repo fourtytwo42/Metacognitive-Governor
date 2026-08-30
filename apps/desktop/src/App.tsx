@@ -8933,6 +8933,20 @@ export function App() {
                       <p><strong>Operation</strong> <code>{inspection.envelope.operation.type_id}</code></p>
                       <p>{inspection.executions.length} execution record{inspection.executions.length === 1 ? "" : "s"} · {inspection.receipts.length} receipt{inspection.receipts.length === 1 ? "" : "s"} · {inspection.events.length} ordered event{inspection.events.length === 1 ? "" : "s"}</p>
                       <p>Source workflow <code>{inspection.envelope.workflow_id}</code></p>
+                      {inspection.envelope.origin && <div className="action-origin" aria-label="Bound action origin" role="region">
+                        <p><strong>Bound origin</strong> · immutable source locators and content hashes</p>
+                        <ul>
+                          {([
+                            ["Conversation", inspection.envelope.origin.conversation],
+                            ["Invocation", inspection.envelope.origin.invocation],
+                            ["Command", inspection.envelope.origin.command],
+                            ["Approval", inspection.envelope.origin.approval],
+                            ["Agent", inspection.envelope.origin.agent]
+                          ] as const).filter((entry) => entry[1] !== null).map(([label, source]) => <li key={`${label}-${source!.source_type}-${source!.locator}`}><strong>{label}</strong> <code>{source!.locator}</code> <small>{source!.content_hash.digest_hex.slice(0, 12)}…</small></li>)}
+                          {inspection.envelope.origin.evidence.map((source) => <li key={`Evidence-${source.source_type}-${source.locator}`}><strong>Evidence</strong> <code>{source.locator}</code> <small>{source.content_hash.digest_hex.slice(0, 12)}…</small></li>)}
+                        </ul>
+                        {inspection.envelope.origin.conversation && <button className="link-button" type="button" disabled={!conversations.some((conversation) => conversation.id === inspection.envelope.origin?.conversation?.locator)} title={conversations.some((conversation) => conversation.id === inspection.envelope.origin?.conversation?.locator) ? "Open the exact originating conversation" : "The originating conversation has not been projected into this compatibility session yet"} onClick={() => openChat(inspection.envelope.origin!.conversation!.locator)}>Open originating conversation →</button>}
+                      </div>}
                       {inspection.reconciliation_jobs.length > 0 && <p>Reconciliation: {inspection.reconciliation_jobs.map((job) => job.state.replaceAll("_", " ")).join(", ")}</p>}
                       <button className="link-button" type="button" disabled={workflowBusy !== null} onClick={() => void inspectCanonicalWorkflow(inspection.envelope.workflow_id)}>Load source workflow evidence →</button>
                       {userSettings?.interface_complexity === "developer" && <TechnicalDetails title="Canonical action evidence" summary={`${inspection.events.length} Root-owned events`}>

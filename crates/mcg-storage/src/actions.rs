@@ -7,6 +7,7 @@ use mcg_contracts::{
     WorkflowState, decode_canonical_cbor_v1,
 };
 use rusqlite::{OptionalExtension, Transaction, params};
+use std::collections::BTreeSet;
 
 use crate::{SqliteEventStore, StorageError};
 
@@ -1762,6 +1763,9 @@ fn validate_action_authorization(
         ));
     }
     validate_policy_binding(&envelope.authority)?;
+    if let Some(origin) = &envelope.origin {
+        validate_action_origin(origin)?;
+    }
     if envelope.effect_class == EffectClass::Irreversible && envelope.elevated_authority.is_none() {
         return Err(StorageError::InvalidData(
             "an irreversible action requires a separate elevated authority binding".into(),
@@ -1805,6 +1809,57 @@ fn validate_action_authorization(
     if let Some(reconciler) = &envelope.reconciler {
         decode_canonical_cbor_v1(&reconciler.bytes)
             .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+    }
+    Ok(())
+}
+
+fn validate_action_origin(origin: &mcg_contracts::ActionOrigin) -> Result<(), StorageError> {
+    const MAX_ORIGIN_LOCATOR_BYTES: usize = 2_048;
+    const MAX_ORIGIN_EVIDENCE: usize = 64;
+
+    if origin.evidence.len() > MAX_ORIGIN_EVIDENCE {
+        return Err(StorageError::InvalidData(
+            "action origin contains too many evidence references".into(),
+        ));
+    }
+    let sources = [
+        origin.conversation.as_ref(),
+        origin.invocation.as_ref(),
+        origin.command.as_ref(),
+        origin.approval.as_ref(),
+        origin.agent.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    .chain(origin.evidence.iter())
+    .collect::<Vec<_>>();
+    if sources.is_empty() {
+        return Err(StorageError::InvalidData(
+            "action origin must contain at least one source reference".into(),
+        ));
+    }
+    let mut identities = BTreeSet::new();
+    for source in sources {
+        let locator = source.locator.trim();
+        if locator.is_empty()
+            || locator.len() > MAX_ORIGIN_LOCATOR_BYTES
+            || source.content_hash.domain.trim().is_empty()
+            || source.content_hash.digest_hex.len() != 64
+            || !source
+                .content_hash
+                .digest_hex
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err(StorageError::InvalidData(
+                "action origin contains an invalid source locator or content hash".into(),
+            ));
+        }
+        if !identities.insert((source.source_type.as_str(), locator)) {
+            return Err(StorageError::InvalidData(
+                "action origin repeats the same source reference".into(),
+            ));
+        }
     }
     Ok(())
 }
@@ -2393,9 +2448,9 @@ fn increment(value: u64, label: &str) -> Result<u64, StorageError> {
 mod tests {
     use chrono::TimeZone;
     use mcg_contracts::{
-        ActionExecutionId, ActionId, ActionReceiptId, ConfigurationId, ContentHash, ContractClause,
-        HashAlgorithm, PolicyBinding, RetryPolicy, SourceRef, TaskContract, TaskContractId,
-        TaskContractStatus, VersionedRef, WorkflowAttempt, WorkflowId,
+        ActionExecutionId, ActionId, ActionOrigin, ActionReceiptId, ConfigurationId, ContentHash,
+        ContractClause, HashAlgorithm, PolicyBinding, RetryPolicy, SourceRef, TaskContract,
+        TaskContractId, TaskContractStatus, VersionedRef, WorkflowAttempt, WorkflowId,
     };
 
     use super::*;
@@ -2425,6 +2480,14 @@ mod tests {
         PolicyBinding {
             payload,
             content_hash,
+        }
+    }
+
+    fn origin_source(source_type: &str, locator: &str, label: &str) -> SourceRef {
+        SourceRef {
+            source_type: StableTypeId::parse(source_type).unwrap(),
+            locator: locator.into(),
+            content_hash: hash(label),
         }
     }
 
@@ -2536,6 +2599,7 @@ mod tests {
             attempt_id: workflow.attempt_id,
             task_contract: workflow.task_contract.clone(),
             actor,
+            origin: None,
             authority: policy("exact-worktree-write"),
             elevated_authority: (effect_class == EffectClass::Irreversible)
                 .then(|| policy("explicit-irreversible-approval")),
@@ -3855,6 +3919,113 @@ mod tests {
                 now(),
             ),
             Err(StorageError::Conflict(_))
+        ));
+    }
+
+    #[test]
+    fn action_origin_is_backward_compatible_bounded_and_replay_immutable() {
+        let mut store = SqliteEventStore::open_in_memory().unwrap();
+        let (_contract, workflow, actor) = running_workflow(&mut store);
+        let (mut envelope, execution) = action_fixture(&workflow, actor, EffectClass::Reversible);
+        let origin = ActionOrigin {
+            conversation: Some(origin_source(
+                "mcg.conversation.v1",
+                "00000000-0000-4000-8000-000000000101",
+                "conversation",
+            )),
+            invocation: Some(origin_source(
+                "mcg.invocation_manifest.v1",
+                "00000000-0000-4000-8000-000000000102",
+                "invocation",
+            )),
+            command: Some(origin_source(
+                "mcg.command_execution.v1",
+                "command-103",
+                "command",
+            )),
+            approval: Some(origin_source(
+                "mcg.approval_request.v1",
+                "00000000-0000-4000-8000-000000000104",
+                "approval",
+            )),
+            agent: Some(origin_source(
+                "mcg.runtime_actor.v1",
+                &actor.to_string(),
+                "actor",
+            )),
+            evidence: vec![origin_source(
+                "mcg.action_evidence.v1",
+                "artifact-105",
+                "evidence",
+            )],
+        };
+        envelope.origin = Some(origin.clone());
+        store
+            .authorize_action(
+                &envelope,
+                &execution,
+                workflow.revision,
+                workflow.lease_generation,
+                CorrelationId::new(),
+                now(),
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .action_inspection(envelope.id, 10)
+                .unwrap()
+                .unwrap()
+                .envelope
+                .origin,
+            Some(origin)
+        );
+
+        let mut substituted = envelope.clone();
+        substituted
+            .origin
+            .as_mut()
+            .unwrap()
+            .approval
+            .as_mut()
+            .unwrap()
+            .locator = "00000000-0000-4000-8000-000000000999".into();
+        assert!(matches!(
+            store.authorize_action(
+                &substituted,
+                &execution,
+                workflow.revision,
+                workflow.lease_generation,
+                CorrelationId::new(),
+                now(),
+            ),
+            Err(StorageError::Conflict(_))
+        ));
+
+        let mut legacy_json = serde_json::to_value(&envelope).unwrap();
+        legacy_json.as_object_mut().unwrap().remove("origin");
+        let legacy: ActionEnvelope = serde_json::from_value(legacy_json).unwrap();
+        assert!(legacy.origin.is_none());
+
+        let (mut invalid, invalid_execution) =
+            action_fixture(&workflow, actor, EffectClass::Reversible);
+        invalid.origin = Some(ActionOrigin {
+            conversation: None,
+            invocation: None,
+            command: None,
+            approval: None,
+            agent: None,
+            evidence: Vec::new(),
+        });
+        assert!(matches!(
+            store.authorize_action(
+                &invalid,
+                &invalid_execution,
+                workflow.revision,
+                workflow.lease_generation,
+                CorrelationId::new(),
+                now(),
+            ),
+            Err(StorageError::InvalidData(_))
         ));
     }
 }

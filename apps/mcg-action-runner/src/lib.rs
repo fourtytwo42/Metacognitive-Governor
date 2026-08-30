@@ -1555,6 +1555,7 @@ mod tests {
                 content_hash: operation_hash.clone(),
             },
             actor,
+            origin: None,
             authority,
             elevated_authority: None,
             expected_versions: vec![],

@@ -640,6 +640,21 @@ pub struct ExpectedVersion {
     pub expected_hash: ContentHash,
 }
 
+/// Immutable links from an action to the owner-visible records that caused it.
+///
+/// Older and non-interactive actions may omit this structure. When present, each source
+/// reference binds both a stable locator and the exact content hash observed at authorization.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActionOrigin {
+    pub conversation: Option<SourceRef>,
+    pub invocation: Option<SourceRef>,
+    pub command: Option<SourceRef>,
+    pub approval: Option<SourceRef>,
+    pub agent: Option<SourceRef>,
+    #[serde(default)]
+    pub evidence: Vec<SourceRef>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActionEnvelope {
     pub id: ActionId,
@@ -647,6 +662,8 @@ pub struct ActionEnvelope {
     pub attempt_id: AttemptId,
     pub task_contract: VersionedRef<TaskContractId>,
     pub actor: RuntimeActorId,
+    #[serde(default)]
+    pub origin: Option<ActionOrigin>,
     pub authority: PolicyBinding,
     #[serde(default)]
     pub elevated_authority: Option<PolicyBinding>,
