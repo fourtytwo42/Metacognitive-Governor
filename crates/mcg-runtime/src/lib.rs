@@ -54,7 +54,8 @@ use mcg_codex_app_server::{
     validate_transport, verify_pinned_two_agent_conformance,
 };
 use mcg_config::{
-    AppConfig, AutonomyPreset, CliTuiPreferences, UserSettings, UserSettingsRevision,
+    AppConfig, AutonomyPreset, CliTuiPreferences, InterfaceComplexity, UserSettings,
+    UserSettingsRevision,
 };
 use mcg_domain::{
     AgentContextCheckpoint, AgentContextCheckpointCause, AgentContextCheckpointId,
@@ -4010,7 +4011,7 @@ impl AppRuntime {
             service: "mcg-daemon".to_owned(),
             version: env!("CARGO_PKG_VERSION").to_owned(),
             state: RuntimeState::Ready,
-            advanced_mode: settings.advanced_mode,
+            advanced_mode: settings.interface_complexity.exposes_advanced(),
             autonomy: settings.autonomy,
             shadow_experiments: settings.shadow_experiments,
             recovered_events: self.recovery.events_replayed,
@@ -14779,7 +14780,7 @@ impl AppRuntime {
     pub fn update_user_settings(
         &self,
         expected_revision: u64,
-        advanced_mode: bool,
+        interface_complexity: InterfaceComplexity,
         autonomy: AutonomyPreset,
         shadow_experiments: bool,
         reason: &str,
@@ -14787,7 +14788,7 @@ impl AppRuntime {
     ) -> Result<UserSettings, RuntimeError> {
         let settings = self.store()?.update_user_settings(
             expected_revision,
-            advanced_mode,
+            interface_complexity,
             autonomy,
             shadow_experiments,
             reason,
@@ -32884,7 +32885,7 @@ mod tests {
         runtime
             .update_user_settings(
                 current.revision,
-                current.advanced_mode,
+                current.interface_complexity,
                 AutonomyPreset::Guided,
                 current.shadow_experiments,
                 "provider host tool test",

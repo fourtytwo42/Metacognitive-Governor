@@ -407,6 +407,7 @@ import {
   type UpdateConfiguration,
   type TaskEventsResponse,
   type ToolAuditResponse,
+  type InterfaceComplexity,
   type UserSettings,
   type UserSettingsRevision,
   transitionTask,
@@ -3980,7 +3981,7 @@ export function App() {
       .then((settings) => {
         if (active) {
           setUserSettings(settings);
-          setAdvanced(settings.advanced_mode);
+          setAdvanced(settings.interface_complexity !== "simple");
           setCodexRemoteEndpoint(settings.codex_remote_endpoint ?? "");
           setCodexRemoteAuthTokenEnv(settings.codex_remote_auth_token_env ?? "");
         }
@@ -4251,31 +4252,30 @@ export function App() {
     try {
       const saved = await updateUserSettings({
         expected_revision: userSettings.revision,
-        advanced_mode: next.advanced_mode,
+        interface_complexity: next.interface_complexity,
         autonomy: next.autonomy,
         shadow_experiments: next.shadow_experiments,
         reason
       });
       setUserSettings(saved);
-      setAdvanced(saved.advanced_mode);
+      setAdvanced(saved.interface_complexity !== "simple");
       setSettingsHistory((current) => [...current, { settings: saved, reason, changed_at: saved.updated_at }]);
     } catch (error) {
       setSettingsError(errorMessage(error));
       const current = await getUserSettings().catch(() => null);
       if (current) {
         setUserSettings(current);
-        setAdvanced(current.advanced_mode);
+        setAdvanced(current.interface_complexity !== "simple");
       }
     } finally {
       setSettingsBusy(false);
     }
   }
 
-  async function toggleAdvancedMode() {
+  async function setInterfaceComplexity(nextComplexity: InterfaceComplexity) {
     if (!userSettings || settingsBusy) return;
     const restoreFocus = document.activeElement === modeButtonRef.current;
-    const nextAdvanced = !advanced;
-    if (!nextAdvanced) {
+    if (nextComplexity === "simple") {
       setBackupPassphrase("");
       setBackupConfirmation("");
       setProviderCredential("");
@@ -4283,12 +4283,20 @@ export function App() {
       setCodexCredential("");
     }
     await saveUserSettings(
-      { ...userSettings, advanced_mode: nextAdvanced },
-      nextAdvanced ? "Enabled advanced interface" : "Enabled simple interface"
+      { ...userSettings, interface_complexity: nextComplexity },
+      `Enabled ${nextComplexity} interface`
     );
     if (restoreFocus) {
       window.requestAnimationFrame(() => modeButtonRef.current?.focus());
     }
+  }
+
+  async function cycleInterfaceComplexity() {
+    if (!userSettings) return;
+    const next: InterfaceComplexity = userSettings.interface_complexity === "simple"
+      ? "advanced"
+      : userSettings.interface_complexity === "advanced" ? "developer" : "simple";
+    await setInterfaceComplexity(next);
   }
 
   async function saveCodexTransport() {
@@ -7872,7 +7880,7 @@ export function App() {
                 <button type="button" onClick={() => { setWorkspaceBottomPanelOpen(true); setDesktopMenu(null); window.requestAnimationFrame(() => terminalInputRef.current?.focus()); }}><span>Open Terminal</span><span className="menu-shortcut">Ctrl+`</span></button>
                 <button type="button" onClick={() => { setProjectTreeOpen((current) => !current); setDesktopMenu(null); }}><span>Toggle File Tree</span><span className="menu-shortcut">Ctrl+Shift+E</span></button>
                 <button type="button" onClick={() => { setWorkspaceSidePanelOpen((current) => !current); setDesktopMenu(null); }}><span>Toggle Side Panel</span><span className="menu-shortcut">Ctrl+Alt+B</span></button>
-                <button type="button" disabled={!userSettings || settingsBusy} onClick={() => { setDesktopMenu(null); void toggleAdvancedMode(); }}><span>{advanced ? "Use Simple Interface" : "Use Advanced Interface"}</span></button>
+                <button type="button" disabled={!userSettings || settingsBusy} onClick={() => { setDesktopMenu(null); void cycleInterfaceComplexity(); }}><span>Interface: {userSettings?.interface_complexity ?? "simple"}</span></button>
                 <hr />
                 <div className="desktop-menu-submenu">
                   <button type="button" aria-haspopup="menu"><span>Browser</span><span className="menu-arrow" aria-hidden="true">›</span></button>
@@ -7920,6 +7928,7 @@ export function App() {
       <div
         className={`app-shell ${advanced ? "advanced-mode" : "simple-mode"}`}
         data-active-surface={activeSurface}
+        data-interface-complexity={userSettings?.interface_complexity ?? "simple"}
       >
       <aside className="sidebar" aria-label="Primary navigation">
         <div className="sidebar-heading">
@@ -7980,7 +7989,7 @@ export function App() {
               </span>
             </button>
             <button type="button" aria-label="Settings" onClick={() => { setSettingsTab("general"); navigateSurface("settings"); }}><span aria-hidden="true">⚙</span><span>Settings</span><small>Ctrl+,</small></button>
-            <button className="owner-menu-mode" type="button" aria-label={advanced ? "Use simple mode from owner menu" : "Use advanced mode from owner menu"} aria-pressed={advanced} disabled={!userSettings || settingsBusy} onClick={() => { setOwnerMenuOpen(false); void toggleAdvancedMode(); }}><span aria-hidden="true">{advanced ? "◐" : "◑"}</span><span>{advanced ? "Use simple mode" : "Use advanced mode"}</span></button>
+            <button className="owner-menu-mode" type="button" aria-label="Cycle interface complexity from owner menu" disabled={!userSettings || settingsBusy} onClick={() => { setOwnerMenuOpen(false); void cycleInterfaceComplexity(); }}><span aria-hidden="true">◐</span><span>Interface: {userSettings?.interface_complexity ?? "simple"}</span></button>
             {signedInWithOpenAi
               ? <button className="owner-menu-session" type="button" disabled={busy} onClick={() => void logOutOfOpenAi()}><span aria-hidden="true">↪</span><span>{busy ? "Logging out…" : "Log out"}</span></button>
               : <button className="owner-menu-session" type="button" disabled={busy || Boolean(login || codexLogin)} onClick={() => { setOwnerMenuOpen(false); setSettingsTab("account"); navigateSurface("settings"); void startLogin("browser"); }}><span aria-hidden="true">↪</span><span>{busy ? "Opening sign-in…" : "Sign in with ChatGPT"}</span></button>}
@@ -8058,7 +8067,7 @@ export function App() {
             <p className="topbar-subtitle">Build, review, and run work with a local AI team.</p>
           </div>
           <div className="workspace-toolbar" aria-label="Workspace controls">
-            <button className={`workspace-mode-toggle${advanced ? " advanced" : ""}`} type="button" aria-label={advanced ? "Use simple mode" : "Use advanced mode"} aria-pressed={advanced} disabled={!userSettings || settingsBusy} onClick={() => void toggleAdvancedMode()}><SlidersHorizontal aria-hidden="true" />{advanced ? "Advanced" : "Simple"}</button>
+            <button ref={modeButtonRef} className={`workspace-mode-toggle${advanced ? " advanced" : ""}`} type="button" aria-label="Cycle interface complexity" disabled={!userSettings || settingsBusy} onClick={() => void cycleInterfaceComplexity()}><SlidersHorizontal aria-hidden="true" />{userSettings?.interface_complexity === "developer" ? "Developer" : advanced ? "Advanced" : "Simple"}</button>
             <span className={`runtime-dot${localService && !localService.ready ? " status-error" : ""}`} title={localService?.detail} role="status"><i />{localService?.ready ? `v${localService.version}` : "Local runtime needs attention"}</span>
             <div className="workspace-toolbar-menu" data-transient-popover-root="workspace-menu">
               <button className="workspace-icon-button" type="button" aria-label="Share" title="Share" aria-expanded={workspacePopover === "share"} onClick={() => setWorkspacePopover((current) => current === "share" ? null : "share")}><Share2 aria-hidden="true" /></button>
@@ -10036,10 +10045,15 @@ export function App() {
               {userSettings.autonomy === "balanced" && "Act independently for low-risk work and ask for higher-risk actions."}
               {userSettings.autonomy === "autonomous" && "Act independently within the owner constitution and capability limits."}
             </p>
-            <div className="settings-mode-row">
-              <span><strong>Interface mode</strong><small>Simple mode keeps everyday choices compact. Advanced mode reveals exact runtime controls and evidence.</small></span>
-              <button ref={modeButtonRef} className="secondary" type="button" aria-label={advanced ? "Use simple mode from settings" : "Use advanced mode from settings"} aria-pressed={advanced} disabled={settingsBusy} onClick={toggleAdvancedMode}>{advanced ? "Use simple mode" : "Use advanced mode"}</button>
-            </div>
+            <fieldset className="settings-card settings-card-stack" aria-label="Interface complexity">
+              <legend><strong>Interface complexity</strong></legend>
+              <p className="form-note">All three choices use the same governed runtime. Higher levels reveal more controls and evidence; they never grant more authority.</p>
+              {(["simple", "advanced", "developer"] as const).map((complexity) => <label className="check-row" key={complexity}>
+                <input type="radio" name="interface-complexity" value={complexity} checked={userSettings.interface_complexity === complexity} disabled={settingsBusy} onChange={() => void setInterfaceComplexity(complexity)} />
+                <span><strong>{complexity[0].toUpperCase() + complexity.slice(1)}</strong><small>{complexity === "simple" ? "Everyday chat, projects, approvals, progress, and verified outcomes." : complexity === "advanced" ? "Practical engineering controls, commands, diffs, hooks, policies, and detailed verification." : "Under-the-hood contracts, manifests, lineage, experiments, IPC, sandbox, and diagnostic state."}</small></span>
+              </label>)}
+              {userSettings.interface_complexity === "developer" && <p className="form-note" role="note">Developer mode remains governed: protected policy, evaluator fixtures, Root authority, signing keys, secrets, direct database writes, and trust bypasses are unavailable or read-only.</p>}
+            </fieldset>
             {advanced && <label className="check-row">
               <input
                 type="checkbox"
@@ -10063,11 +10077,22 @@ export function App() {
               <ul className="history-list" aria-label="Settings revision history">
                 {settingsHistory.slice().reverse().slice(0, 12).map((revision) => <li key={revision.settings.revision}>
                   <strong>Revision {revision.settings.revision}</strong>
-                  <span>{revision.settings.autonomy} · {revision.settings.advanced_mode ? "advanced" : "simple"} · shadow {revision.settings.shadow_experiments ? "on" : "off"}</span>
+                  <span>{revision.settings.autonomy} · {revision.settings.interface_complexity} · shadow {revision.settings.shadow_experiments ? "on" : "off"}</span>
                   <small>{revision.reason}</small>
                 </li>)}
               </ul>
             </div>}
+            {userSettings.interface_complexity === "developer" && <TechnicalDetails title="Runtime contract inspector" summary="Current compatibility projection">
+              <p className="form-note">This read-only projection exposes the versioned settings contract currently shared by the GUI, CLI, API, and runtime. Protected Root and evaluator internals remain outside this client.</p>
+              <pre aria-label="Current runtime settings contract">{JSON.stringify({
+                stable_type_id: "metacog.user_settings.v2",
+                schema_version: userSettings.schema_version,
+                revision: userSettings.revision,
+                interface_complexity: userSettings.interface_complexity,
+                authority: "presentation_only",
+                protected_mutation: "root_required"
+              }, null, 2)}</pre>
+            </TechnicalDetails>}
                 </div><h3>General</h3><div className="settings-card settings-card-stack">
                   <div className="settings-control"><span><strong>Default file destination</strong><small>Files and folders remain in their attached project or explicit global folder.</small></span><span className="count-badge">Project</span></div>
                   <div className="settings-control"><span><strong>Agent environment</strong><small>MetaCog runs locally on this computer through the governed daemon.</small></span><span className="count-badge">Local</span></div>

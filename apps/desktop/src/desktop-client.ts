@@ -79,10 +79,12 @@ export interface DiagnosticReport {
   };
 }
 
+export type InterfaceComplexity = "simple" | "advanced" | "developer";
+
 export interface UserSettings {
   schema_version: number;
   revision: number;
-  advanced_mode: boolean;
+  interface_complexity: InterfaceComplexity;
   autonomy: AutonomyPreset;
   shadow_experiments: boolean;
   codex_remote_endpoint?: string;
@@ -92,7 +94,9 @@ export interface UserSettings {
 
 export interface UpdateUserSettingsRequest {
   expected_revision: number;
-  advanced_mode: boolean;
+  interface_complexity: InterfaceComplexity;
+  /** Legacy compatibility input; new clients always send interface_complexity. */
+  advanced_mode?: boolean;
   autonomy: AutonomyPreset;
   shadow_experiments: boolean;
   reason: string;

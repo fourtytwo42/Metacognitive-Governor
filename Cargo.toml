@@ -12,6 +12,7 @@ members = [
     "crates/mcg-agents",
     "crates/mcg-browser-contracts",
     "crates/mcg-config",
+    "crates/mcg-contracts",
     "crates/mcg-codex-app-server",
     "crates/mcg-domain",
     "crates/mcg-events",
@@ -37,6 +38,7 @@ default-members = [
     "crates/mcg-agents",
     "crates/mcg-browser-contracts",
     "crates/mcg-config",
+    "crates/mcg-contracts",
     "crates/mcg-codex-app-server",
     "crates/mcg-domain",
     "crates/mcg-events",
@@ -65,8 +67,10 @@ arboard = "3.6.1"
 argon2 = { version = "0.5.3", default-features = false, features = ["alloc"] }
 axum = "0.8.9"
 base64 = "0.22.1"
+blake3 = "1.8.2"
 cap-std = "4.0.2"
 chrono = { version = "0.4.42", features = ["serde"] }
+ciborium = "0.2.2"
 chromiumoxide = "0.9.1"
 mcg-browser-contracts = { path = "crates/mcg-browser-contracts" }
 chacha20poly1305 = { version = "0.11.0", default-features = false, features = ["alloc"] }
@@ -103,6 +107,7 @@ tempfile = "3.23.0"
 minisign-verify = "0.2.5"
 object = { version = "0.39.1", default-features = false, features = ["pe", "read_core", "std"] }
 quick-xml = "0.41.0"
+proptest = "1.9.0"
 tokio = { version = "1.53.1", features = ["io-std", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-stream = { version = "0.1.18", features = ["sync"] }
 toml = "0.9.12"
@@ -112,6 +117,7 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
 uuid = { version = "1.24.0", features = ["serde", "v4"] }
 url = "2.5.8"
+unicode-normalization = "0.1.25"
 yaml-rust2 = "0.11.0"
 wasmtime = { version = "=45.0.3", default-features = false, features = ["cranelift", "runtime", "std", "wat"] }
 wasmtime-wasi = { version = "=45.0.3", default-features = false, features = ["p1"] }

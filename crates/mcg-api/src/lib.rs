@@ -33,7 +33,9 @@ use mcg_agents::{
     SupervisionObservation, TaskComplexity, TrustedOrganizationPublisher,
 };
 pub use mcg_codex_app_server::CodexHookStateUpdate;
-use mcg_config::{AutonomyPreset, CliTuiPreferences, UserSettings, UserSettingsRevision};
+use mcg_config::{
+    AutonomyPreset, CliTuiPreferences, InterfaceComplexity, UserSettings, UserSettingsRevision,
+};
 use mcg_domain::{
     AgentDelegationId, ApprovalId, BlackboardEntryId, BlackboardEntryKind, CloudDiffApply,
     CloudDiffApplyId, ComposerMentionInput, ComputerActionBatchId, ComputerUseCapability,
@@ -485,6 +487,11 @@ pub struct ReviewedTopologyPlanListResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UpdateUserSettingsRequest {
     pub expected_revision: u64,
+    /// Stable v2 presentation preference. New clients should send this field.
+    #[serde(default)]
+    pub interface_complexity: Option<InterfaceComplexity>,
+    /// Legacy v1 compatibility input. Ignored when `interface_complexity` is present.
+    #[serde(default)]
     pub advanced_mode: bool,
     pub autonomy: AutonomyPreset,
     pub shadow_experiments: bool,
@@ -2676,7 +2683,13 @@ async fn update_user_settings(
         .runtime
         .update_user_settings(
             request.expected_revision,
-            request.advanced_mode,
+            request
+                .interface_complexity
+                .unwrap_or(if request.advanced_mode {
+                    InterfaceComplexity::Advanced
+                } else {
+                    InterfaceComplexity::Simple
+                }),
             request.autonomy,
             request.shadow_experiments,
             &request.reason,
@@ -10697,6 +10710,7 @@ form.addEventListener('submit', (event) => {
 
         let update = UpdateUserSettingsRequest {
             expected_revision: initial.revision,
+            interface_complexity: None,
             advanced_mode: true,
             autonomy: AutonomyPreset::Guided,
             shadow_experiments: false,
@@ -10715,10 +10729,11 @@ form.addEventListener('submit', (event) => {
             .await
             .expect("update response");
         assert_eq!(updated.status(), StatusCode::OK);
-        let updated: UserSettings =
-            serde_json::from_value(response_json(updated).await).expect("updated settings");
+        let updated_json = response_json(updated).await;
+        assert_eq!(updated_json["advanced_mode"], true);
+        let updated: UserSettings = serde_json::from_value(updated_json).expect("updated settings");
         assert_eq!(updated.revision, initial.revision + 1);
-        assert!(updated.advanced_mode);
+        assert_eq!(updated.interface_complexity, InterfaceComplexity::Advanced);
         assert_eq!(updated.autonomy, AutonomyPreset::Guided);
         assert!(!updated.shadow_experiments);
 
@@ -19348,7 +19363,7 @@ form.addEventListener('submit', (event) => {
         runtime
             .update_user_settings(
                 current.revision,
-                current.advanced_mode,
+                current.interface_complexity,
                 AutonomyPreset::Guided,
                 current.shadow_experiments,
                 "managed provider integration",
@@ -19781,7 +19796,7 @@ form.addEventListener('submit', (event) => {
         runtime
             .update_user_settings(
                 current.revision,
-                current.advanced_mode,
+                current.interface_complexity,
                 AutonomyPreset::Guided,
                 true,
                 "managed shadow restart integration",
@@ -20053,7 +20068,7 @@ form.addEventListener('submit', (event) => {
         runtime
             .update_user_settings(
                 current.revision,
-                current.advanced_mode,
+                current.interface_complexity,
                 current.autonomy,
                 false,
                 "shadow integration disabled",
@@ -20135,7 +20150,7 @@ form.addEventListener('submit', (event) => {
         runtime
             .update_user_settings(
                 current.revision,
-                current.advanced_mode,
+                current.interface_complexity,
                 current.autonomy,
                 true,
                 "shadow integration enabled",
@@ -20414,7 +20429,7 @@ form.addEventListener('submit', (event) => {
         runtime
             .update_user_settings(
                 current.revision,
-                current.advanced_mode,
+                current.interface_complexity,
                 current.autonomy,
                 true,
                 "shadow failure integration",
@@ -20505,7 +20520,7 @@ form.addEventListener('submit', (event) => {
         runtime
             .update_user_settings(
                 current.revision,
-                current.advanced_mode,
+                current.interface_complexity,
                 current.autonomy,
                 true,
                 "shadow secondary requirement",
@@ -21078,7 +21093,7 @@ form.addEventListener('submit', (event) => {
         runtime
             .update_user_settings(
                 current.revision,
-                current.advanced_mode,
+                current.interface_complexity,
                 AutonomyPreset::Guided,
                 current.shadow_experiments,
                 "ensemble managed integration",

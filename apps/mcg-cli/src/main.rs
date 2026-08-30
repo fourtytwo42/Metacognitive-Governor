@@ -68,7 +68,7 @@ use mcg_codex_app_server::{
     CodexConfigurationStatus, CodexHookMetadata, CodexHookStateUpdate, CodexHooksListEntry,
     CodexResumeCwd, CodexStableDiscovery,
 };
-use mcg_config::{AppConfig, AutonomyPreset, CliTuiPreferences, UserSettings};
+use mcg_config::{AppConfig, AutonomyPreset, CliTuiPreferences, InterfaceComplexity, UserSettings};
 use mcg_domain::{
     AgentWakeState, ApprovalMode, CloudDiffApply, CodexConfigOverride, ComposerMentionInput,
     ComputerUseCapability, ComputerUseRegion, ComputerUseTarget, Conversation,
@@ -1248,6 +1248,10 @@ enum SettingsCommand {
     },
     /// Change one or more live settings with optimistic revision protection.
     Set {
+        /// Select Simple, Advanced, or Developer presentation density.
+        #[arg(long, value_enum)]
+        interface_complexity: Option<InterfaceComplexityArg>,
+        /// Legacy compatibility alias; prefer --interface-complexity.
         #[arg(long)]
         advanced_mode: Option<bool>,
         #[arg(long, value_enum)]
@@ -1366,6 +1370,23 @@ enum AutonomyArg {
     Guided,
     Balanced,
     Autonomous,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum InterfaceComplexityArg {
+    Simple,
+    Advanced,
+    Developer,
+}
+
+impl From<InterfaceComplexityArg> for InterfaceComplexity {
+    fn from(value: InterfaceComplexityArg) -> Self {
+        match value {
+            InterfaceComplexityArg::Simple => Self::Simple,
+            InterfaceComplexityArg::Advanced => Self::Advanced,
+            InterfaceComplexityArg::Developer => Self::Developer,
+        }
+    }
 }
 
 impl From<AutonomyArg> for AutonomyPreset {
@@ -11067,12 +11088,17 @@ async fn run_settings(
             print_user_settings(&settings, json)?;
         }
         SettingsCommand::Set {
+            interface_complexity,
             advanced_mode,
             autonomy,
             shadow_experiments,
             reason,
         } => {
-            if advanced_mode.is_none() && autonomy.is_none() && shadow_experiments.is_none() {
+            if interface_complexity.is_none()
+                && advanced_mode.is_none()
+                && autonomy.is_none()
+                && shadow_experiments.is_none()
+            {
                 return Err("settings set requires at least one changed field".into());
             }
             let current = load_user_settings(client, host, token).await?;
@@ -11081,7 +11107,19 @@ async fn run_settings(
                 .bearer_auth(token)
                 .json(&UpdateUserSettingsRequest {
                     expected_revision: current.revision,
-                    advanced_mode: advanced_mode.unwrap_or(current.advanced_mode),
+                    interface_complexity: Some(interface_complexity.map_or_else(
+                        || {
+                            advanced_mode.map_or(current.interface_complexity, |enabled| {
+                                if enabled {
+                                    InterfaceComplexity::Advanced
+                                } else {
+                                    InterfaceComplexity::Simple
+                                }
+                            })
+                        },
+                        Into::into,
+                    )),
+                    advanced_mode: false,
                     autonomy: autonomy.map_or(current.autonomy, Into::into),
                     shadow_experiments: shadow_experiments.unwrap_or(current.shadow_experiments),
                     reason,
@@ -11111,11 +11149,7 @@ async fn run_settings(
                         "revision {}  {:?}  {}  shadow={}  {}  {}",
                         settings.revision,
                         settings.autonomy,
-                        if settings.advanced_mode {
-                            "advanced"
-                        } else {
-                            "simple"
-                        },
+                        format!("{:?}", settings.interface_complexity).to_lowercase(),
                         settings.shadow_experiments,
                         revision.changed_at,
                         revision.reason,
@@ -11294,11 +11328,7 @@ fn print_user_settings(
             "revision {}: {:?}, {} mode, shadow experiments {}",
             settings.revision,
             settings.autonomy,
-            if settings.advanced_mode {
-                "advanced"
-            } else {
-                "simple"
-            },
+            format!("{:?}", settings.interface_complexity).to_lowercase(),
             if settings.shadow_experiments {
                 "enabled"
             } else {
@@ -15521,6 +15551,23 @@ mod tests {
                     advanced_mode: Some(true),
                     autonomy: Some(AutonomyArg::Guided),
                     shadow_experiments: Some(false),
+                    ..
+                }
+            }
+        ));
+        let developer = Cli::try_parse_from([
+            "mcg",
+            "settings",
+            "set",
+            "--interface-complexity",
+            "developer",
+        ])
+        .expect("developer interface setting");
+        assert!(matches!(
+            developer.command.expect("command"),
+            Command::Settings {
+                command: SettingsCommand::Set {
+                    interface_complexity: Some(InterfaceComplexityArg::Developer),
                     ..
                 }
             }

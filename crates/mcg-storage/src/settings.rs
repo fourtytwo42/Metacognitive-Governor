@@ -1,6 +1,10 @@
 use chrono::{DateTime, Duration, Utc};
-use mcg_config::{AppConfig, USER_SETTINGS_SCHEMA_VERSION, UserSettings, UserSettingsRevision};
+use mcg_config::{
+    AppConfig, InterfaceComplexity, USER_SETTINGS_SCHEMA_VERSION, UserSettings,
+    UserSettingsRevision,
+};
 use rusqlite::{OptionalExtension, params};
+use serde::Serialize;
 
 use crate::{SqliteEventStore, StorageError};
 
@@ -21,7 +25,7 @@ impl SqliteEventStore {
             return Ok(settings);
         }
         let settings = UserSettings::initial(config, now);
-        let json = serde_json::to_string(&settings)?;
+        let json = persisted_settings_json(&settings)?;
         let revision = revision_i64(settings.revision)?;
         let transaction = self.connection.transaction()?;
         transaction.execute(
@@ -66,7 +70,7 @@ impl SqliteEventStore {
     pub fn update_user_settings(
         &mut self,
         expected_revision: u64,
-        advanced_mode: bool,
+        interface_complexity: InterfaceComplexity,
         autonomy: mcg_config::AutonomyPreset,
         shadow_experiments: bool,
         reason: &str,
@@ -92,7 +96,7 @@ impl SqliteEventStore {
             revision: current.revision.checked_add(1).ok_or_else(|| {
                 StorageError::InvalidData("user settings revision overflow".into())
             })?,
-            advanced_mode,
+            interface_complexity,
             autonomy,
             shadow_experiments,
             codex_remote_endpoint: current.codex_remote_endpoint,
@@ -100,7 +104,7 @@ impl SqliteEventStore {
             updated_at,
         };
         validate_settings(&settings)?;
-        let json = serde_json::to_string(&settings)?;
+        let json = persisted_settings_json(&settings)?;
         let revision = revision_i64(settings.revision)?;
         let expected_revision = revision_i64(expected_revision)?;
         let transaction = self.connection.transaction()?;
@@ -164,7 +168,7 @@ impl SqliteEventStore {
             revision: current.revision.checked_add(1).ok_or_else(|| {
                 StorageError::InvalidData("user settings revision overflow".into())
             })?,
-            advanced_mode: current.advanced_mode,
+            interface_complexity: current.interface_complexity,
             autonomy: current.autonomy,
             shadow_experiments: current.shadow_experiments,
             codex_remote_endpoint: endpoint,
@@ -216,7 +220,7 @@ fn persist_settings_revision(
     settings: &UserSettings,
     reason: &str,
 ) -> Result<UserSettings, StorageError> {
-    let json = serde_json::to_string(settings)?;
+    let json = persisted_settings_json(settings)?;
     let revision = revision_i64(settings.revision)?;
     let expected_revision = revision_i64(expected_revision)?;
     let transaction = store.connection.transaction()?;
@@ -259,6 +263,33 @@ fn validate_settings(settings: &UserSettings) -> Result<(), StorageError> {
     Ok(())
 }
 
+#[derive(Serialize)]
+struct PersistedUserSettings<'a> {
+    schema_version: u16,
+    revision: u64,
+    interface_complexity: InterfaceComplexity,
+    autonomy: mcg_config::AutonomyPreset,
+    shadow_experiments: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    codex_remote_endpoint: &'a Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    codex_remote_auth_token_env: &'a Option<String>,
+    updated_at: DateTime<Utc>,
+}
+
+fn persisted_settings_json(settings: &UserSettings) -> Result<String, StorageError> {
+    Ok(serde_json::to_string(&PersistedUserSettings {
+        schema_version: settings.schema_version,
+        revision: settings.revision,
+        interface_complexity: settings.interface_complexity,
+        autonomy: settings.autonomy,
+        shadow_experiments: settings.shadow_experiments,
+        codex_remote_endpoint: &settings.codex_remote_endpoint,
+        codex_remote_auth_token_env: &settings.codex_remote_auth_token_env,
+        updated_at: settings.updated_at,
+    })?)
+}
+
 fn revision_i64(revision: u64) -> Result<i64, StorageError> {
     i64::try_from(revision)
         .map_err(|_| StorageError::InvalidData("user settings revision exceeds i64".into()))
@@ -295,7 +326,7 @@ mod tests {
         let updated = store
             .update_user_settings(
                 1,
-                true,
+                InterfaceComplexity::Advanced,
                 AutonomyPreset::Guided,
                 true,
                 "owner enabled advanced controls",
@@ -303,9 +334,20 @@ mod tests {
             )
             .expect("update");
         assert_eq!(updated.revision, 2);
-        assert!(updated.advanced_mode);
+        assert_eq!(updated.interface_complexity, InterfaceComplexity::Advanced);
         assert_eq!(updated.autonomy, AutonomyPreset::Guided);
         assert!(updated.updated_at > initial.updated_at);
+        let persisted: serde_json::Value = store
+            .connection
+            .query_row(
+                "SELECT settings_json FROM user_settings WHERE owner_key = ?1",
+                [OWNER_KEY],
+                |row| row.get::<_, String>(0),
+            )
+            .map(|json| serde_json::from_str(&json).expect("persisted settings JSON"))
+            .expect("persisted settings");
+        assert_eq!(persisted["interface_complexity"], "advanced");
+        assert!(persisted.get("advanced_mode").is_none());
         let transported = store
             .update_codex_transport_settings(
                 2,
@@ -323,7 +365,7 @@ mod tests {
         assert!(matches!(
             store.update_user_settings(
                 1,
-                false,
+                InterfaceComplexity::Simple,
                 AutonomyPreset::Autonomous,
                 false,
                 "stale update",

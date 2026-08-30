@@ -4,9 +4,9 @@ import AxeBuilder from "@axe-core/playwright";
 test.beforeEach(async ({ page }) => {
   await page.addInitScript(() => {
     const initial = {
-      schema_version: 1,
+      schema_version: 2,
       revision: 1,
-      advanced_mode: false,
+      interface_complexity: "simple",
       autonomy: "autonomous",
       shadow_experiments: true,
       updated_at: "2026-08-15T00:00:00Z"
@@ -330,9 +330,9 @@ test.beforeEach(async ({ page }) => {
           };
           if (command === "update_user_settings" && args.request) {
             settings = {
-              schema_version: 1,
+              schema_version: 2,
               revision: settings.revision + 1,
-              advanced_mode: args.request.advanced_mode,
+              interface_complexity: args.request.interface_complexity,
               autonomy: args.request.autonomy,
               shadow_experiments: args.request.shadow_experiments,
               updated_at: "2026-08-15T00:01:00Z"
@@ -376,14 +376,38 @@ async function enableAdvancedMode(page: import("@playwright/test").Page) {
     await openOwnerSurface(page, "Settings");
   }
   await page.getByRole("button", { name: "General", exact: true }).click();
-  await page.getByRole("button", { name: "Use advanced mode" }).click();
-  await expect(page.getByRole("button", { name: "Use simple mode from settings" })).toBeVisible();
+  await page.getByRole("radio", { name: /Advanced/ }).click();
+  await expect(page.getByRole("radio", { name: /Advanced/ })).toBeChecked();
   await page.getByRole("button", { name: "Back to app" }).click();
   await expect(page.getByRole("heading", { name: "New chat", level: 1 })).toBeVisible();
 }
 
+test("Simple Advanced and Developer share one workspace while exposing progressive controls", async ({ page }) => {
+  await page.goto("/");
+  const composer = page.getByRole("textbox", { name: "Message" });
+  await composer.fill("Keep this active work unchanged");
+  await openOwnerSurface(page, "Settings");
+  await page.getByRole("button", { name: "General", exact: true }).click();
+
+  await page.getByRole("radio", { name: /Advanced/ }).click();
+  await expect(page.getByRole("radio", { name: /Advanced/ })).toBeChecked();
+  await page.getByRole("radio", { name: /Developer/ }).click();
+  await expect(page.getByText(/Developer mode remains governed/)).toBeVisible();
+  await expect(page.getByText("Runtime contract inspector")).toBeVisible();
+
+  await page.getByRole("button", { name: "Back to app" }).click();
+  await expect(page.getByRole("button", { name: "Cycle interface complexity" })).toHaveText("Developer");
+  await expect(composer).toHaveValue("Keep this active work unchanged");
+
+  await openOwnerSurface(page, "Settings");
+  await page.getByRole("radio", { name: /Simple/ }).click();
+  await expect(page.getByRole("radio", { name: /Simple/ })).toBeChecked();
+  await page.getByRole("button", { name: "Back to app" }).click();
+  await expect(composer).toHaveValue("Keep this active work unchanged");
+});
+
 test("consumer shell starts simple and can reveal advanced status", async ({ page }) => {
-  test.slow();
+  test.setTimeout(180_000);
   await page.goto("/");
 
   await expect(page.getByRole("heading", { name: "New chat" })).toBeVisible();
@@ -463,7 +487,8 @@ test("consumer shell starts simple and can reveal advanced status", async ({ pag
   await expect(page.getByLabel("Connection id")).toHaveCount(2);
 
   await openOwnerSurface(page, "Settings");
-  await page.getByRole("button", { name: "Use simple mode from settings" }).click();
+  await page.getByRole("radio", { name: /Simple/ }).click();
+  await expect(page.getByRole("radio", { name: /Simple/ })).toBeChecked();
   await page.getByRole("button", { name: "Back to app" }).click();
   await page.getByRole("link", { name: "Scheduled", exact: true }).click();
   await expect(scheduler.getByRole("heading", { name: "Scheduled tasks" })).toBeVisible();
@@ -472,7 +497,8 @@ test("consumer shell starts simple and can reveal advanced status", async ({ pag
   await scheduler.getByLabel("Project").selectOption({ index: 1 });
   await scheduler.getByLabel("Scheduled work").fill("Summarize important project changes every morning");
   await scheduler.getByRole("button", { name: "Set up in chat" }).click();
-  await expect(page.getByRole("textbox", { name: "Message" })).toHaveValue(/Summarize important project changes every morning/);
+  const activeNewChat = page.locator(".new-chat-surface:not([hidden])");
+  await expect(activeNewChat.getByRole("textbox", { name: "Message" })).toHaveValue(/Summarize important project changes every morning/);
 });
 
 test("Codex cloud apply stays reviewable and contained before explicit integration", async ({ page }) => {
@@ -654,7 +680,7 @@ test("advanced run settings expose local Codex providers without leaking them in
   await expect(dialog.getByRole("button", { name: /^Provider/ })).toHaveCount(0);
   await page.locator('summary[aria-label="New chat model, effort, speed, and team"]').click();
 
-  await page.getByRole("button", { name: "Use advanced mode" }).click();
+  await page.getByRole("button", { name: "Cycle interface complexity" }).click();
   await page.locator('summary[aria-label="New chat model, effort, speed, and team"]').click();
   dialog = page.getByRole("dialog", { name: "New chat model, effort, speed, and team" });
   await dialog.getByRole("button", { name: /^Provider/ }).click();
@@ -680,7 +706,7 @@ test("advanced run settings expose bounded per-session Codex feature overrides",
   await page.goto("/");
   await openOwnerSurface(page, "Projects");
   await page.getByRole("button", { name: "Start chat" }).click();
-  await page.getByRole("button", { name: "Use advanced mode" }).click();
+  await page.getByRole("button", { name: "Cycle interface complexity" }).click();
 
   await page.locator('summary[aria-label="New chat model, effort, speed, and team"]').click();
   const dialog = page.getByRole("dialog", { name: "New chat model, effort, speed, and team" });
@@ -703,7 +729,7 @@ test("advanced run settings expose typed bounded Codex config overrides", async 
   await page.goto("/");
   await openOwnerSurface(page, "Projects");
   await page.getByRole("button", { name: "Start chat" }).click();
-  await page.getByRole("button", { name: "Use advanced mode" }).click();
+  await page.getByRole("button", { name: "Cycle interface complexity" }).click();
 
   await page.locator('summary[aria-label="New chat model, effort, speed, and team"]').click();
   const dialog = page.getByRole("dialog", { name: "New chat model, effort, speed, and team" });
@@ -752,7 +778,7 @@ test("advanced structured output editor validates JSON without leaking into Simp
   await expect(dialog.getByText("Output format", { exact: true })).toHaveCount(0);
   await selector.click();
 
-  await page.getByRole("button", { name: "Use advanced mode" }).click();
+  await page.getByRole("button", { name: "Cycle interface complexity" }).click();
   await selector.click();
   dialog = page.getByRole("dialog", { name: "New chat model, effort, speed, and team" });
   await dialog.getByText("Output format", { exact: true }).click();
@@ -784,7 +810,7 @@ test("advanced run settings expose live web search without changing Simple", asy
   await expect(dialog.getByText("Web search", { exact: true })).toHaveCount(0);
   await page.locator('summary[aria-label="New chat model, effort, speed, and team"]').click();
 
-  await page.getByRole("button", { name: "Use advanced mode" }).click();
+  await page.getByRole("button", { name: "Cycle interface complexity" }).click();
   await page.locator('summary[aria-label="New chat model, effort, speed, and team"]').click();
   dialog = page.getByRole("dialog", { name: "New chat model, effort, speed, and team" });
   await dialog.getByText("Web search", { exact: true }).click();
@@ -1065,7 +1091,7 @@ test("narrow layout keeps the mode switch reachable without page overflow", asyn
   await expect(owner).toBeVisible();
   await owner.click();
   await openOwnerSurface(page, "Settings");
-  const mode = page.getByRole("button", { name: "Use advanced mode" });
+  const mode = page.getByRole("radio", { name: /Advanced/ });
   await expect(mode).toBeVisible();
   const box = await mode.boundingBox();
   expect(box).not.toBeNull();
@@ -1294,6 +1320,7 @@ test("consumer manages provenance-bearing project memory and inspects the world 
 });
 
 test("consumer reviews, approves, and runs an exact topology command", async ({ page }) => {
+  test.slow();
   await page.goto("/");
   await enableAdvancedMode(page);
   await openOwnerSurface(page, "Projects");

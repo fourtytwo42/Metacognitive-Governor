@@ -659,7 +659,7 @@ beforeEach(() => {
   client.listTasks.mockResolvedValue({ tasks: [] });
   client.listConversations.mockResolvedValue({ conversations: [] });
   client.createConversation.mockImplementation(async (request: { title?: string; project_id?: string; execution_preferences: Record<string, unknown> }) => ({
-    schema_version: 1,
+    schema_version: 2,
     id: "00000000-0000-4000-8000-000000000c01",
     title: request.title ?? "New chat",
     project_id: request.project_id,
@@ -669,7 +669,7 @@ beforeEach(() => {
     updated_at: "2026-08-22T00:00:00Z"
   }));
   client.updateConversation.mockImplementation(async (conversationId: string, request: { title: string; project_id?: string }) => ({
-    schema_version: 1,
+    schema_version: 2,
     id: conversationId,
     title: request.title,
     project_id: request.project_id,
@@ -872,7 +872,7 @@ beforeEach(() => {
   const settings = {
     schema_version: 1,
     revision: 1,
-    advanced_mode: false,
+    interface_complexity: "simple",
     autonomy: "autonomous" as const,
     shadow_experiments: true,
     updated_at: "2026-08-15T00:00:00Z"
@@ -919,7 +919,7 @@ beforeEach(() => {
   client.updateSettings.mockImplementation(async (request) => ({
     schema_version: 1,
     revision: request.expected_revision + 1,
-    advanced_mode: request.advanced_mode,
+    interface_complexity: request.interface_complexity,
     autonomy: request.autonomy,
     shadow_experiments: request.shadow_experiments,
     updated_at: "2026-08-15T00:01:00Z"
@@ -934,14 +934,16 @@ beforeEach(() => {
 });
 
 async function enableAdvancedMode() {
-  const button = await screen.findByRole("button", { name: "Use advanced mode", pressed: false });
+  const button = await screen.findByRole("button", { name: "Cycle interface complexity" });
   await waitFor(() => expect(button).toBeEnabled());
   fireEvent.click(button);
   await waitFor(() => expect(document.querySelector(".app-shell.advanced-mode")).toBeInTheDocument());
 }
 
 async function enableSimpleMode() {
-  const button = await screen.findByRole("button", { name: "Use simple mode", pressed: true });
+  const button = await screen.findByRole("button", { name: "Cycle interface complexity" });
+  fireEvent.click(button);
+  await waitFor(() => expect(button).toHaveTextContent("Developer"));
   fireEvent.click(button);
   await waitFor(() => expect(document.querySelector(".app-shell.simple-mode")).toBeInTheDocument());
 }
@@ -1309,13 +1311,40 @@ test("owner settings persist autonomy with optimistic revision control", async (
   fireEvent.click(within(panel).getByRole("button", { name: "Save settings" }));
   await waitFor(() => expect(client.updateSettings).toHaveBeenCalledWith({
     expected_revision: 1,
-    advanced_mode: false,
+    interface_complexity: "simple",
     autonomy: "guided",
     shadow_experiments: true,
     reason: "Updated owner settings from desktop"
   }));
   expect(await screen.findByText("Revision 2")).toBeInTheDocument();
   expect(within(panel).getByText("Ask before consequential local actions.")).toBeInTheDocument();
+});
+
+test("interface complexity exposes three presentation levels without changing runtime settings", async () => {
+  render(<App />);
+  const panel = await screen.findByLabelText("Owner settings");
+  const advancedChoice = within(panel).getByRole("radio", { name: /Advanced/ });
+  fireEvent.click(advancedChoice);
+  await waitFor(() => expect(client.updateSettings).toHaveBeenLastCalledWith({
+    expected_revision: 1,
+    interface_complexity: "advanced",
+    autonomy: "autonomous",
+    shadow_experiments: true,
+    reason: "Enabled advanced interface"
+  }));
+
+  const developerChoice = within(panel).getByRole("radio", { name: /Developer/ });
+  await waitFor(() => expect(developerChoice).toBeEnabled());
+  fireEvent.click(developerChoice);
+  await waitFor(() => expect(client.updateSettings).toHaveBeenLastCalledWith({
+    expected_revision: 2,
+    interface_complexity: "developer",
+    autonomy: "autonomous",
+    shadow_experiments: true,
+    reason: "Enabled developer interface"
+  }));
+  expect(within(panel).getByText(/Developer mode remains governed/)).toBeInTheDocument();
+  expect(within(panel).getByText("Runtime contract inspector")).toBeInTheDocument();
 });
 
 test("unsigned development builds fail closed instead of offering an update fallback", async () => {
@@ -2588,19 +2617,21 @@ test("mode persistence restores keyboard focus after the temporarily disabled co
 
   const draft = await screen.findByRole("textbox", { name: "Message" });
   fireEvent.change(draft, { target: { value: "Keep this ordinary draft while changing density" } });
-  const advanced = await screen.findByRole("button", { name: "Use advanced mode", pressed: false });
+  const advanced = await screen.findByRole("button", { name: "Cycle interface complexity" });
   await waitFor(() => expect(advanced).toBeEnabled());
   advanced.focus();
   expect(advanced).toHaveFocus();
   fireEvent.click(advanced);
 
-  const simple = await screen.findByRole("button", { name: "Use simple mode", pressed: true });
+  const simple = await screen.findByRole("button", { name: "Cycle interface complexity" });
   await waitFor(() => expect(simple).toBeEnabled());
   await waitFor(() => expect(simple).toHaveFocus());
   expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue("Keep this ordinary draft while changing density");
 
   fireEvent.click(simple);
-  await waitFor(() => expect(screen.getByRole("button", { name: "Use advanced mode", pressed: false })).toBeEnabled());
+  await waitFor(() => expect(simple).toHaveTextContent("Developer"));
+  fireEvent.click(simple);
+  await waitFor(() => expect(screen.getByRole("button", { name: "Cycle interface complexity" })).toHaveTextContent("Simple"));
   expect(screen.getByRole("textbox", { name: "Message" })).toHaveValue("Keep this ordinary draft while changing density");
 });
 
@@ -2608,7 +2639,7 @@ test("advanced mode keeps one routed workspace surface and exposes a persistent 
   render(<App />);
 
   await enableAdvancedMode();
-  const toolbar = screen.getByRole("button", { name: "Use simple mode", pressed: true });
+  const toolbar = screen.getByRole("button", { name: "Cycle interface complexity" });
   expect(toolbar).toHaveTextContent("Advanced");
   expect(screen.getByRole("heading", { name: "What should we build?" })).toBeInTheDocument();
   expect(screen.getAllByRole("textbox", { name: "Message" })).toHaveLength(1);
@@ -2625,8 +2656,10 @@ test("advanced mode keeps one routed workspace surface and exposes a persistent 
   expect(taskPanel).toHaveAttribute("hidden");
 
   fireEvent.click(toolbar);
+  await waitFor(() => expect(toolbar).toHaveTextContent("Developer"));
+  fireEvent.click(toolbar);
   await waitFor(() => expect(document.querySelector(".app-shell.simple-mode")).toBeInTheDocument());
-  expect(client.updateSettings).toHaveBeenLastCalledWith(expect.objectContaining({ advanced_mode: false }));
+  expect(client.updateSettings).toHaveBeenLastCalledWith(expect.objectContaining({ interface_complexity: "simple" }));
 });
 
 test("new chat presents project, workspace, branch, add, permission, and run settings as contextual controls", async () => {

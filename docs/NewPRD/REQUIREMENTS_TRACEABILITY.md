@@ -1,9 +1,9 @@
 # Cognitive Runtime Requirements Traceability
 
-**Status:** Initial Stage 0 matrix
+**Status:** Active implementation matrix; Stage 1 evidence recorded
 **Purpose:** Map normative requirements to implementation stages, automated evidence, E2E/UAT evidence, and release artifacts
 
-This matrix is updated as implementation lands. `Planned` means the requirement has a named stage and evidence route but is not yet claimed complete.
+This matrix is updated as implementation lands. `Implemented / cumulative UAT pending` means local implementation and its stage-level automated evidence pass, while final native/cross-platform evidence remains open.
 
 ## 1. Core Architecture and Ownership
 
@@ -15,17 +15,17 @@ This matrix is updated as implementation lands. `Planned` means the requirement 
 | Runtime proposes cognition but cannot commit authority | 2–5 | Authority/property tests | Proposed mutation must cross Root | Planned |
 | UI is presentation/approval carrier, not authority owner | 2–4 | Tauri/API boundary tests | Client-side tamper/stale approval UAT | Planned |
 | Evaluator cannot activate a configuration | 7 | Promotion transaction tests | Forged decision/activation attempt | Planned |
-| Production crates cannot depend on research implementation | 1, 7 | Cargo dependency rule | Packaging inspection | Planned |
+| Production crates cannot depend on research implementation | 1, 7 | Cargo dependency rule | Packaging inspection | Stage 1 boundary implemented / Stage 7 pending |
 | Runtime remains safe when treated as compromised within its OS identity | 2–7 | Security/adversarial suite | Protected path, DB, secret, IPC attacks | Planned |
 
 ## 2. Persistence and Compatibility
 
 | Requirement | Stage | Automated evidence | E2E/UAT evidence | Status |
 |---|---:|---|---|---|
-| Stable type/message discriminators | 1 | Golden fixtures | Cross-version process exchange | Planned |
-| Versioned canonical encoding and normalization | 1 | Codec/property tests | Old fixture replay | Planned |
-| Domain-separated canonical hashes | 1 | Golden hash tests | Upgrade verification | Planned |
-| Historical payload bytes remain interpretable | 1 onward | Decoder/upcaster corpus | Multi-version migration | Planned |
+| Stable type/message discriminators | 1 | Golden fixtures | Cross-version process exchange | Implemented / cumulative UAT pending |
+| Versioned canonical encoding and normalization | 1 | Codec/property tests | Old fixture replay | Implemented / cumulative UAT pending |
+| Domain-separated canonical hashes | 1 | Golden hash tests | Upgrade verification | Implemented / cumulative UAT pending |
+| Historical payload bytes remain interpretable | 1 onward | Decoder/upcaster corpus | Multi-version migration | Stage 1 chain implemented / corpus grows by stage |
 | Old canonical history is not rewritten during ordinary migration | 1, 2 | Byte-for-byte migration assertions | Backup/upgrade/restore | Planned |
 | Root and Evaluator maintain separate canonical histories | 7 | Cross-store reference tests | Disclosed-summary inspection | Planned |
 | Large immutable artifacts use verified atomic content-addressed storage | 2, 7 | Temp/flush/hash/rename tests | Crash during artifact creation | Planned |
@@ -150,15 +150,15 @@ This matrix is updated as implementation lands. `Planned` means the requirement 
 
 | Requirement | Stage | Automated evidence | E2E/UAT evidence | Status |
 |---|---:|---|---|---|
-| Simple, Advanced, and Developer use the same runtime | 1 onward | State/API comparison | Switch levels during active workflow | Planned |
-| Interface selection changes presentation only | 1 | UI/state tests | Switch and return without state change | Planned |
-| `advanced_mode=false` migrates to Simple | 1 | Settings migration test | Existing profile UAT | Planned |
-| `advanced_mode=true` migrates to Advanced, never Developer | 1 | Settings migration test | Existing advanced profile UAT | Planned |
+| Simple, Advanced, and Developer use the same runtime | 1 onward | State/API comparison | Switch levels during active workflow | Implemented / cumulative UAT pending |
+| Interface selection changes presentation only | 1 | UI/state tests | Switch and return without state change | Implemented / cumulative UAT pending |
+| `advanced_mode=false` migrates to Simple | 1 | Settings migration test | Existing profile UAT | Automated pass / packaged UAT pending |
+| `advanced_mode=true` migrates to Advanced, never Developer | 1 | Settings migration test | Existing advanced profile UAT | Automated pass / packaged UAT pending |
 | Protected controls remain locked in Developer | 1 onward | API rejection tests | Client-side tamper UAT | Planned |
 | Simple avoids research ontology and raw protected data | 7 onward | UI visibility tests | Native Simple audit | Planned |
 | Advanced exposes practical workflows/evidence | 3 onward | UI tests | Native Advanced workflows | Planned |
-| Developer exposes manifests/diagnostics and authorized research summaries | 1 onward | UI contract tests | Native Developer workflows | Planned |
-| Existing CLI compatibility remains functional | Every stage | Parser/process regression | Real terminal UAT | Planned |
+| Developer exposes manifests/diagnostics and authorized research summaries | 1 onward | UI contract tests | Native Developer workflows | Compatibility inspector implemented / expands by stage |
+| Existing CLI compatibility remains functional | Every stage | Parser/process regression | Real terminal UAT | Stage 1 parser regression passes / cumulative |
 | Existing conversations/projects/history remain accessible | 2 onward | Migration/integration tests | Packaged upgrade UAT | Planned |
 
 ## 12. Research and Later Gates

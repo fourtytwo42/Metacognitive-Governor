@@ -4,7 +4,7 @@ use std::{
     fs,
     process::{Command, Stdio},
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use mcg_updater::{
@@ -93,7 +93,10 @@ fn real_supervisor_waits_for_desktop_records_failure_and_cleans_staging() {
     let status = update_process.wait().unwrap();
     assert!(!status.success());
     let _ = desktop_process.wait();
-    thread::sleep(Duration::from_millis(500));
+    let cleanup_deadline = Instant::now() + Duration::from_secs(10);
+    while staged.supervisor_path.exists() && Instant::now() < cleanup_deadline {
+        thread::sleep(Duration::from_millis(100));
+    }
 
     let outcome_path = data
         .join("updates")

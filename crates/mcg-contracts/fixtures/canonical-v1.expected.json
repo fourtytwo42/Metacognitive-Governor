@@ -1,0 +1,9 @@
+{
+  "stable_type_id": "test.fixture.v1",
+  "schema_version": 1,
+  "canonical_encoding": "canonical-cbor-v1",
+  "canonical_normalization": "acar-normalization-v1",
+  "semantic_domain": "TestFixture",
+  "canonical_cbor_hex": "a3616101617a82f5f6666c6f6e67657262c3a9",
+  "blake3_256": "18bf9bbbb2121fd2e8350e97a7026356c204217473d07ab22f089a3f1d65990b"
+}
