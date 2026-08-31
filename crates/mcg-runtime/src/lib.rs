@@ -59,12 +59,12 @@ use mcg_config::{
 };
 use mcg_contracts::{
     ActionEnvelope, ActionExecution, ActionExecutionId, ActionId, ActionInspection, ActionReceipt,
-    ActionSummary, ArtifactRef, CompletionCertificate, CompletionVerdict, ContentHash,
-    CorrelationId, EffectOutcome, InvocationId, InvocationInspection, InvocationSummary, ModelRun,
-    ModelRunState, ReconciliationJob, ReconciliationJobId, ReconciliationObservation,
-    RuntimeActorId, RuntimeIdentity, RuntimeInvocationRequest, RuntimeInvocationResult, SourceRef,
-    StableTypeId, WorkflowAttempt, WorkflowCancelRequest, WorkflowId, WorkflowInspection,
-    WorkflowState, canonical_contract_hash,
+    ActionSummary, ActionValidation, ArtifactRef, CompletionCertificate, CompletionVerdict,
+    ContentHash, CorrelationId, EffectOutcome, InvocationId, InvocationInspection,
+    InvocationSummary, ModelRun, ModelRunState, ReconciliationJob, ReconciliationJobId,
+    ReconciliationObservation, RuntimeActorId, RuntimeIdentity, RuntimeInvocationRequest,
+    RuntimeInvocationResult, SourceRef, StableTypeId, WorkflowAttempt, WorkflowCancelRequest,
+    WorkflowId, WorkflowInspection, WorkflowState, canonical_contract_hash,
 };
 use mcg_domain::{
     AgentContextCheckpoint, AgentContextCheckpointCause, AgentContextCheckpointId,
@@ -3758,6 +3758,63 @@ impl AppRuntime {
             expected_generation,
             outcome,
             reconciliation_deadline,
+            correlation_id,
+            idempotency_key,
+            now,
+        )?)
+    }
+
+    /// Persists exact post-effect validation evidence for one confirmed canonical action.
+    ///
+    /// # Errors
+    /// Returns a runtime error for stale state, substituted validation evidence, or persistence
+    /// failure.
+    #[allow(clippy::too_many_arguments)]
+    pub fn validate_canonical_action_effect(
+        &self,
+        execution_id: ActionExecutionId,
+        expected_revision: u64,
+        expected_generation: u64,
+        validation: &ActionValidation,
+        correlation_id: CorrelationId,
+        idempotency_key: &str,
+        now: DateTime<Utc>,
+    ) -> Result<ActionExecution, RuntimeError> {
+        Ok(self.store()?.validate_action_effect(
+            execution_id,
+            expected_revision,
+            expected_generation,
+            validation,
+            correlation_id,
+            idempotency_key,
+            now,
+        )?)
+    }
+
+    /// Atomically commits a validated canonical action effect.
+    ///
+    /// A causal compensation commit also marks the original action compensated without rewriting
+    /// either action's immutable history.
+    ///
+    /// # Errors
+    /// Returns a runtime error for stale state, a substituted validation event, an ineligible
+    /// original action, or persistence failure.
+    #[allow(clippy::too_many_arguments)]
+    pub fn commit_canonical_action_effect(
+        &self,
+        execution_id: ActionExecutionId,
+        expected_revision: u64,
+        expected_generation: u64,
+        expected_validation_event: mcg_contracts::EventId,
+        correlation_id: CorrelationId,
+        idempotency_key: &str,
+        now: DateTime<Utc>,
+    ) -> Result<mcg_storage::ActionCommitReceipt, RuntimeError> {
+        Ok(self.store()?.commit_action_effect(
+            execution_id,
+            expected_revision,
+            expected_generation,
+            expected_validation_event,
             correlation_id,
             idempotency_key,
             now,

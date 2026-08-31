@@ -176,6 +176,25 @@ test.beforeEach(async ({ page }) => {
       reconciliation_jobs: [{ id: "00000000-0000-4000-8000-00000000060a", action_id: canonicalActionId, execution_id: canonicalExecutionId, adapter: actionPayload, state: "pending", revision: 1, lease_generation: 0, lease_owner: null, lease_expires_at: null, next_attempt_at: now, attempts: 0, deadline: "2026-08-18T01:00:00Z", last_hint: null, created_at: now, updated_at: now }],
       events: [{ id: "00000000-0000-4000-8000-00000000060b", type_id: "mcg.action_classified.v1", schema_version: 1, sequence: 4, action_id: canonicalActionId, execution_id: canonicalExecutionId, correlation_id: "00000000-0000-4000-8000-00000000060c", causation_id: null, idempotency_key: "action-classify-1", occurred_at: now, payload: actionPayload }]
     };
+    const compensatableActionId = "00000000-0000-4000-8000-000000000629";
+    const compensatableExecutionId = "00000000-0000-4000-8000-000000000630";
+    const compensationActionId = "00000000-0000-4000-8000-000000000631";
+    let compensationInitiated = false;
+    const compensatableAction = { ...canonicalAction, action_id: compensatableActionId, execution_id: compensatableExecutionId, actor: "runtime-worker-1", state: "committed", outcome: { outcome: "effect_confirmed", evidence: [] }, revision: 7, lease_generation: 6 };
+    const compensatableInspection = {
+      ...canonicalActionInspection,
+      envelope: { ...canonicalActionInspection.envelope, id: compensatableActionId, actor: "runtime-worker-1", origin: null, compensation: actionPayload, compensates_action: null },
+      compensation_actions: [],
+      executions: [{ ...canonicalActionInspection.executions[0], id: compensatableExecutionId, action_id: compensatableActionId, state: "committed", revision: 7, lease_generation: 6, executor: null, outcome: compensatableAction.outcome }],
+      reconciliation_jobs: [],
+      events: []
+    };
+    const compensationInspection = {
+      ...compensatableInspection,
+      envelope: { ...compensatableInspection.envelope, id: compensationActionId, compensation: null, compensates_action: compensatableActionId },
+      compensation_actions: [],
+      executions: [{ ...compensatableInspection.executions[0], id: "00000000-0000-4000-8000-000000000632", action_id: compensationActionId, state: "effect_confirmed", revision: 4, lease_generation: 3 }]
+    };
     const approvalConversationId = "00000000-0000-4000-8000-00000000060d";
     const approvalTurnId = "00000000-0000-4000-8000-000000000626";
     const approvalAgentId = "00000000-0000-4000-8000-000000000627";
@@ -286,8 +305,21 @@ test.beforeEach(async ({ page }) => {
             if (args.workflowId !== canonicalWorkflowId) return null;
             return { attempt: canonicalWorkflow, task_contract: canonicalTaskContract, events: canonicalEvents };
           }
-          if (command === "protected_root_actions") return [canonicalAction];
-          if (command === "protected_root_action") return args.actionId === canonicalActionId ? canonicalActionInspection : null;
+          if (command === "protected_root_actions") return [canonicalAction, compensatableAction, ...(compensationInitiated ? [{ ...compensatableAction, action_id: compensationActionId, execution_id: compensationInspection.executions[0].id, state: "effect_confirmed", revision: 4, lease_generation: 3 }] : [])];
+          if (command === "protected_root_action") {
+            if (args.actionId === canonicalActionId) return canonicalActionInspection;
+            if (args.actionId === compensatableActionId) return { ...compensatableInspection, compensation_actions: compensationInitiated ? [compensationActionId] : [] };
+            if (args.actionId === compensationActionId && compensationInitiated) return compensationInspection;
+            return null;
+          }
+          if (command === "compensate_protected_root_action") {
+            if (args.request.action_id !== compensatableActionId || args.request.execution_id !== compensatableExecutionId || args.request.expected_action_revision !== 7 || args.request.expected_action_generation !== 6 || args.request.expected_workflow_revision !== 7 || args.request.expected_workflow_generation !== 3 || args.request.confirmed !== true || typeof args.request.reason !== "string" || !args.request.reason.trim() || "operation" in args.request || "authority" in args.request || "capability_root" in args.request) {
+              throw new Error("invalid owner compensation request");
+            }
+            const replayed = compensationInitiated;
+            compensationInitiated = true;
+            return { original_action_id: compensatableActionId, original_execution: compensatableInspection.executions[0], compensation: compensationInspection, replayed };
+          }
           if (command === "protected_root_invocations") return [canonicalInvocation];
           if (command === "protected_root_invocation") return args.invocationId === canonicalInvocationId ? canonicalInvocationInspection : null;
           if (command === "list_global_agent_sessions") return { sessions: globalAgentSessions };
@@ -670,7 +702,8 @@ test("governed actions keep one Root truth across Simple Advanced and Developer"
   await page.getByRole("link", { name: "Agents", exact: true }).click();
   actions = page.getByRole("article", { name: "Governed actions" });
   await expect(actions.getByText(/Checking what happened · reversible · revision 3 · generation 2/)).toBeVisible();
-  await actions.getByRole("button", { name: "Inspect" }).click();
+  const canonicalActionRow = actions.locator(`[data-action-id="00000000-0000-4000-8000-000000000608"]`);
+  await canonicalActionRow.getByRole("button", { name: "Inspect" }).click();
   await expect(actions.getByText("mcg.governed_filesystem_operation.v1")).toBeVisible();
   await expect(actions.getByText("Reconciliation: pending")).toBeVisible();
   await expect(actions.getByRole("region", { name: "Bound action origin" })).toContainText("command-60f");
@@ -703,6 +736,18 @@ test("governed actions keep one Root truth across Simple Advanced and Developer"
   await expect(invocationFocus).toContainText("00000000-0000-4000-8000-000000000612");
   await expect(invocationFocus).toContainText("governed-provider / deterministic-work-v1");
   await expect(page.locator('[data-invocation-id="00000000-0000-4000-8000-000000000612"]')).toHaveAttribute("aria-current", "true");
+
+  const compensatableRow = actions.locator(`[data-action-id="00000000-0000-4000-8000-000000000629"]`);
+  await compensatableRow.getByRole("button", { name: "Inspect" }).click();
+  const compensationReason = compensatableRow.getByRole("textbox", { name: /Compensation reason for action/ });
+  await compensationReason.fill("Remove the exact owner-approved file from this completed action.");
+  const compensationAccessibility = await new AxeBuilder({ page }).include(".action-compensation-control").analyze();
+  expect(compensationAccessibility.violations, "owner-compensation accessibility violations").toEqual([]);
+  page.once("dialog", (dialog) => dialog.accept());
+  await compensatableRow.getByRole("button", { name: "Initiate exact compensation" }).click();
+  await expect(actions.getByRole("status")).toContainText(`Compensation 00000000-0000-4000-8000-000000000631 was initiated from the exact bound plan.`);
+  await expect(compensatableRow.getByRole("region", { name: "Compensation history" })).toContainText("00000000-0000-4000-8000-000000000631");
+  await expect(compensatableRow.getByRole("textbox", { name: /Compensation reason/ })).toHaveCount(0);
 
   await openOwnerSurface(page, "Settings");
   await page.getByRole("button", { name: "General", exact: true }).click();

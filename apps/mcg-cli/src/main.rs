@@ -70,7 +70,10 @@ use mcg_codex_app_server::{
     CodexResumeCwd, CodexStableDiscovery,
 };
 use mcg_config::{AppConfig, AutonomyPreset, CliTuiPreferences, InterfaceComplexity, UserSettings};
-use mcg_contracts::{ActionId, InvocationId, WorkflowCancelRequest, WorkflowId, WorkflowState};
+use mcg_contracts::{
+    ActionId, InvocationId, OwnerActionCompensationRequest, WorkflowCancelRequest, WorkflowId,
+    WorkflowState,
+};
 use mcg_domain::{
     AgentWakeState, ApprovalMode, CloudDiffApply, CodexConfigOverride, ComposerMentionInput,
     ComputerUseCapability, ComputerUseRegion, ComputerUseTarget, Conversation,
@@ -1351,6 +1354,21 @@ enum ActionCommand {
         id: String,
         #[arg(long, default_value_t = 500)]
         event_limit: usize,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Initiate the exact compensation already bound to a committed reversible action.
+    Compensate {
+        id: String,
+        /// Owner-visible reason retained in the immutable authorization evidence.
+        #[arg(long)]
+        reason: String,
+        /// Explicitly confirm that the exact bound compensation should be executed.
+        #[arg(long)]
+        confirm: bool,
+        /// Stable key to reuse when retrying an uncertain compensation request.
+        #[arg(long)]
+        idempotency_key: Option<String>,
         #[arg(long)]
         json: bool,
     },
@@ -11229,6 +11247,68 @@ async fn run_root_action(
                 println!("  events returned: {}", inspection.events.len());
             }
         }
+        ActionCommand::Compensate {
+            id,
+            reason,
+            confirm,
+            idempotency_key,
+            json,
+        } => {
+            if !confirm {
+                return Err("action compensation requires --confirm".into());
+            }
+            let action_id = ActionId(uuid::Uuid::parse_str(id)?);
+            let inspection = mcg_platform::query_root_action(data_directory, action_id, 500)
+                .await?
+                .ok_or_else(|| format!("canonical action {action_id} was not found"))?;
+            let execution = inspection
+                .executions
+                .last()
+                .ok_or_else(|| format!("canonical action {action_id} has no execution"))?;
+            let workflow =
+                mcg_platform::query_root_workflow(data_directory, inspection.envelope.workflow_id)
+                    .await?
+                    .ok_or_else(|| {
+                        format!(
+                            "source workflow {} was not found",
+                            inspection.envelope.workflow_id
+                        )
+                    })?;
+            let request = OwnerActionCompensationRequest {
+                action_id,
+                execution_id: execution.id,
+                expected_action_revision: execution.revision,
+                expected_action_generation: execution.lease_generation,
+                expected_workflow_revision: workflow.attempt.revision,
+                expected_workflow_generation: workflow.attempt.lease_generation,
+                reason: reason.clone(),
+                confirmed: true,
+                idempotency_key: idempotency_key
+                    .clone()
+                    .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+            };
+            let receipt = mcg_platform::compensate_root_action(data_directory, &request).await?;
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&receipt)?);
+            } else {
+                println!(
+                    "Compensation {} for action {} is {:?}{}.",
+                    receipt.compensation.envelope.id,
+                    receipt.original_action_id,
+                    receipt
+                        .compensation
+                        .executions
+                        .last()
+                        .map(|execution| execution.state)
+                        .ok_or("compensation receipt has no execution")?,
+                    if receipt.replayed {
+                        " (exact replay; no redispatch)"
+                    } else {
+                        ""
+                    }
+                );
+            }
+        }
     }
     Ok(())
 }
@@ -16295,6 +16375,30 @@ mod tests {
                     json: true
                 }
             }
+        ));
+        let compensate = Cli::try_parse_from([
+            "mcg",
+            "action",
+            "compensate",
+            id,
+            "--reason",
+            "Remove the exact owner-approved created file",
+            "--confirm",
+            "--idempotency-key",
+            "owner-compensate-1",
+            "--json",
+        ])
+        .expect("action compensate command");
+        assert!(matches!(
+            compensate.command.expect("command"),
+            Command::Action {
+                command: ActionCommand::Compensate {
+                    confirm: true,
+                    idempotency_key: Some(key),
+                    json: true,
+                    ..
+                }
+            } if key == "owner-compensate-1"
         ));
         let show = Cli::try_parse_from(["mcg", "action", "show", id, "--event-limit", "75"])
             .expect("action show command");

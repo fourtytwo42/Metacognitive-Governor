@@ -982,6 +982,65 @@ pub struct ActionInspection {
     pub events: Vec<ActionEvent>,
 }
 
+/// Owner-confirmed request to initiate the exact compensation plan already bound to an action.
+///
+/// The request intentionally contains no operation, actor, capability, authority, or filesystem
+/// location. Protected Root derives those fields from the committed original envelope and refuses
+/// stale identities before creating a new causal action.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OwnerActionCompensationRequest {
+    pub action_id: ActionId,
+    pub execution_id: ActionExecutionId,
+    pub expected_action_revision: u64,
+    pub expected_action_generation: u64,
+    pub expected_workflow_revision: u64,
+    pub expected_workflow_generation: u64,
+    pub reason: String,
+    pub confirmed: bool,
+    pub idempotency_key: String,
+}
+
+impl OwnerActionCompensationRequest {
+    pub const SCHEMA_VERSION: u32 = 1;
+    pub const TYPE_ID: &'static str = "mcg.owner_action_compensation_request.v1";
+    pub const HASH_DOMAIN: &'static str = "MetaCog.OwnerActionCompensationRequest";
+
+    /// Validates the bounded owner intent before it crosses into Root authority derivation.
+    ///
+    /// # Errors
+    /// Returns an invalid-contract error unless confirmation is explicit and the reason and
+    /// idempotency key are nonempty bounded strings.
+    pub fn validate(&self) -> Result<(), ContractError> {
+        let reason = self.reason.trim();
+        let idempotency_key = self.idempotency_key.trim();
+        if !self.confirmed {
+            return Err(ContractError::InvalidContract(
+                "owner compensation confirmation is required",
+            ));
+        }
+        if reason.is_empty() || reason.len() > MAX_MANIFEST_TEXT_BYTES {
+            return Err(ContractError::InvalidContract(
+                "owner compensation reason is empty or oversized",
+            ));
+        }
+        if idempotency_key.is_empty() || idempotency_key.len() > MAX_MANIFEST_TEXT_BYTES {
+            return Err(ContractError::InvalidContract(
+                "owner compensation idempotency key is empty or oversized",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Root-owned result of initiating or replaying one exact causal compensation action.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActionCompensationReceipt {
+    pub original_action_id: ActionId,
+    pub original_execution: ActionExecution,
+    pub compensation: ActionInspection,
+    pub replayed: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReconciliationJobState {
@@ -2685,6 +2744,35 @@ mod tests {
             payload,
             content_hash,
         }
+    }
+
+    #[test]
+    fn owner_compensation_requires_bounded_explicit_confirmation() {
+        let mut request = OwnerActionCompensationRequest {
+            action_id: ActionId::new(),
+            execution_id: ActionExecutionId::new(),
+            expected_action_revision: 7,
+            expected_action_generation: 6,
+            expected_workflow_revision: 11,
+            expected_workflow_generation: 9,
+            reason: "Remove the exact resource using its pre-authorized compensation plan.".into(),
+            confirmed: true,
+            idempotency_key: "owner-compensation-contract-1".into(),
+        };
+        assert_eq!(request.validate(), Ok(()));
+        request.confirmed = false;
+        assert!(matches!(
+            request.validate(),
+            Err(ContractError::InvalidContract(
+                "owner compensation confirmation is required"
+            ))
+        ));
+        request.confirmed = true;
+        request.reason = " ".into();
+        assert!(request.validate().is_err());
+        request.reason = "valid".into();
+        request.idempotency_key = " ".into();
+        assert!(request.validate().is_err());
     }
 
     proptest! {

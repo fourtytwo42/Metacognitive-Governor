@@ -21,22 +21,29 @@ use std::{
 use chrono::{Duration, Utc};
 use mcg_action_runner::{
     ActionRunnerClient, ActionRunnerClientError, ActionRunnerProtocolError, ActionRunnerRequest,
-    ActionRunnerResponse, GOVERNED_FILESYSTEM_OPERATION_TYPE, GovernedFilesystemObservation,
-    GovernedFilesystemOperation, RunnerEffectOutcome, decode_governed_filesystem_observation,
-    decode_governed_filesystem_operation, request_from_authorized_action,
+    ActionRunnerResponse, GOVERNED_ACTION_OPERATION_HASH_DOMAIN,
+    GOVERNED_FILESYSTEM_AUTHORITY_HASH_DOMAIN, GOVERNED_FILESYSTEM_OPERATION_TYPE,
+    GovernedFilesystemAuthority, GovernedFilesystemObservation, GovernedFilesystemOperation,
+    RunnerEffectOutcome, decode_governed_filesystem_authority,
+    decode_governed_filesystem_observation, decode_governed_filesystem_operation,
+    governed_filesystem_authority_binding, request_from_authorized_action,
     request_from_reconciliation_job, validate_governed_filesystem_envelope,
 };
 use mcg_config::AppConfig;
 use mcg_contracts::{
-    ActionExecution, ActionExecutionId, ActionId, ActionReceipt, ActionReceiptId,
+    ActionCompensationReceipt, ActionEnvelope, ActionExecution, ActionExecutionId,
+    ActionExecutionState, ActionId, ActionOrigin, ActionReceipt, ActionReceiptId,
     AuthenticatedRpcRequest, ContentHash, ContractError, CorrelationId, EffectClass, EffectOutcome,
-    HashAlgorithm, InvocationId, PROTOCOL_V1, ReconciliationJob, ReconciliationJobId,
-    ReconciliationObservation, RequestId, RootStatus, RpcEnvelope, RuntimeActorId, RuntimeIdentity,
-    RuntimeInstanceId, RuntimeInvocationRequest, RuntimeInvocationResult, StableTypeId,
-    VersionedPayload, WorkflowAttempt, WorkflowCancelRequest, WorkflowId, decode_canonical_cbor_v1,
+    HashAlgorithm, InvocationId, OwnerActionCompensationRequest, PROTOCOL_V1, PolicyBinding,
+    ReconciliationJob, ReconciliationJobId, ReconciliationObservation, RequestId, RootStatus,
+    RpcEnvelope, RuntimeActorId, RuntimeIdentity, RuntimeInstanceId, RuntimeInvocationRequest,
+    RuntimeInvocationResult, SourceRef, StableTypeId, VersionedPayload, WorkflowAttempt,
+    WorkflowCancelRequest, WorkflowId, WorkflowState, canonical_contract_hash,
+    decode_canonical_cbor_v1,
 };
 use mcg_platform::{
     MAX_ROOT_INVOCATION_MODEL_RUNS, MAX_ROOT_INVOCATION_SUMMARIES, PlatformError,
+    ROOT_ACTION_COMPENSATE_REQUEST_TYPE, ROOT_ACTION_COMPENSATE_RESPONSE_TYPE,
     ROOT_ACTION_LIST_REQUEST_TYPE, ROOT_ACTION_LIST_RESPONSE_TYPE, ROOT_ACTION_SHOW_REQUEST_TYPE,
     ROOT_ACTION_SHOW_RESPONSE_TYPE, ROOT_INVOCATION_LIST_REQUEST_TYPE,
     ROOT_INVOCATION_LIST_RESPONSE_TYPE, ROOT_INVOCATION_SHOW_REQUEST_TYPE,
@@ -79,6 +86,8 @@ pub enum ProtectedRootError {
     Serialization(#[from] serde_json::Error),
     #[error(transparent)]
     ActionProtocol(#[from] ActionRunnerProtocolError),
+    #[error(transparent)]
+    ActionRunnerClient(#[from] ActionRunnerClientError),
     #[error(transparent)]
     RuntimeWorker(#[from] RuntimeWorkerClientError),
     #[error("authorized action execution was not found")]
@@ -383,9 +392,392 @@ pub async fn execute_authorized_filesystem_action(
             &dispatched,
             correlation_id,
             request_id,
-            error,
+            &error,
         ),
     }
+}
+
+const OWNER_COMPENSATION_EVENT_LIMIT: usize = 100;
+const OWNER_COMPENSATION_AUTHORITY_TYPE: &str = "mcg.owner_action_compensation_authorization.v1";
+const OWNER_COMPENSATION_AUTHORITY_DOMAIN: &str = "MetaCog.OwnerActionCompensationAuthorization";
+const OWNER_COMPENSATION_BUDGET_TYPE: &str = "mcg.owner_action_compensation_budget.v1";
+const OWNER_COMPENSATION_BUDGET_DOMAIN: &str = "MetaCog.OwnerActionCompensationBudget";
+const ACTION_ENVELOPE_HASH_DOMAIN: &str = "MetaCog.ActionEnvelope";
+
+/// Initiates one separately authorized compensation using only Root-derived immutable intent.
+///
+/// The owner request cannot choose an operation, actor, capability root, effect class, authority,
+/// or reconciliation adapter. Exact idempotent replay returns the existing causal action and never
+/// redispatches an action whose durable state has advanced beyond `Authorized`.
+///
+/// # Errors
+/// Returns an error for missing, stale, ineligible, substituted, or unconfirmed intent and for
+/// action-runner or durable-state failures.
+pub async fn execute_owner_authorized_filesystem_compensation(
+    runtime: &AppRuntime,
+    client: &dyn GovernedActionRunnerGateway,
+    request: &OwnerActionCompensationRequest,
+    now: chrono::DateTime<Utc>,
+) -> Result<ActionCompensationReceipt, ProtectedRootError> {
+    request.validate()?;
+    let original = runtime
+        .canonical_action(request.action_id, OWNER_COMPENSATION_EVENT_LIMIT)?
+        .ok_or(ProtectedRootError::ActionNotFound)?;
+    let request_binding = owner_compensation_authority_binding(request)?;
+    let (compensation_action_id, compensation_execution_id) =
+        deterministic_compensation_ids(request);
+
+    if let Some(existing) =
+        runtime.canonical_action(compensation_action_id, OWNER_COMPENSATION_EVENT_LIMIT)?
+    {
+        validate_existing_compensation(&original, &existing, request, &request_binding)?;
+        let execution = latest_action_execution(&existing)?;
+        if execution.state == ActionExecutionState::Authorized {
+            execute_authorized_filesystem_action(
+                runtime,
+                client,
+                execution.id,
+                execution.revision,
+                execution.lease_generation,
+                existing.envelope.actor,
+                now,
+            )
+            .await?;
+        }
+        return compensation_receipt(runtime, request.action_id, true);
+    }
+
+    let original_authority = validate_owner_compensation_target(runtime, &original, request)?;
+    let (envelope, execution) = owner_compensation_authorization(
+        &original,
+        original_authority,
+        request,
+        (compensation_action_id, compensation_execution_id),
+        request_binding.clone(),
+        now,
+    )?;
+    if let Err(error) = runtime.authorize_canonical_action(
+        &envelope,
+        &execution,
+        request.expected_workflow_revision,
+        request.expected_workflow_generation,
+        CorrelationId::new(),
+        now,
+    ) {
+        if let Some(existing) =
+            runtime.canonical_action(compensation_action_id, OWNER_COMPENSATION_EVENT_LIMIT)?
+        {
+            validate_existing_compensation(&original, &existing, request, &request_binding)?;
+            return compensation_receipt(runtime, request.action_id, true);
+        }
+        return Err(error.into());
+    }
+    execute_authorized_filesystem_action(
+        runtime,
+        client,
+        execution.id,
+        execution.revision,
+        execution.lease_generation,
+        envelope.actor,
+        now,
+    )
+    .await?;
+    compensation_receipt(runtime, request.action_id, false)
+}
+
+fn validate_owner_compensation_target(
+    runtime: &AppRuntime,
+    original: &mcg_contracts::ActionInspection,
+    request: &OwnerActionCompensationRequest,
+) -> Result<GovernedFilesystemAuthority, ProtectedRootError> {
+    let original_execution = latest_action_execution(original)?;
+    if original_execution.id != request.execution_id
+        || original_execution.revision != request.expected_action_revision
+        || original_execution.lease_generation != request.expected_action_generation
+        || original_execution.state != ActionExecutionState::Committed
+        || original.envelope.effect_class != EffectClass::Reversible
+        || original.envelope.compensation.is_none()
+        || original.envelope.reconciler.is_none()
+        || !original.compensation_actions.is_empty()
+    {
+        return Err(StorageError::Conflict(
+            "owner compensation request is stale or the original action is ineligible".into(),
+        )
+        .into());
+    }
+    let workflow = runtime
+        .canonical_workflow(original.envelope.workflow_id)?
+        .ok_or_else(|| StorageError::Conflict("compensated workflow was not found".into()))?;
+    if workflow.attempt.attempt_id != original.envelope.attempt_id
+        || workflow.attempt.revision != request.expected_workflow_revision
+        || workflow.attempt.lease_generation != request.expected_workflow_generation
+        || workflow.attempt.lease_owner != Some(original.envelope.actor)
+        || !matches!(
+            workflow.attempt.state,
+            WorkflowState::Running | WorkflowState::Verifying
+        )
+    {
+        return Err(StorageError::Conflict(
+            "owner compensation workflow fence is stale or no longer active".into(),
+        )
+        .into());
+    }
+    decode_original_filesystem_authority(&original.envelope)
+}
+
+fn owner_compensation_authorization(
+    original: &mcg_contracts::ActionInspection,
+    original_authority: GovernedFilesystemAuthority,
+    request: &OwnerActionCompensationRequest,
+    ids: (ActionId, ActionExecutionId),
+    request_binding: PolicyBinding,
+    now: chrono::DateTime<Utc>,
+) -> Result<(ActionEnvelope, ActionExecution), ProtectedRootError> {
+    let (action_id, execution_id) = ids;
+    let operation =
+        original.envelope.compensation.clone().ok_or_else(|| {
+            StorageError::Conflict("original action has no compensation plan".into())
+        })?;
+    let operation_hash = operation.content_hash(GOVERNED_ACTION_OPERATION_HASH_DOMAIN)?;
+    let authority = governed_filesystem_authority_binding(&GovernedFilesystemAuthority {
+        action_id,
+        actor: original.envelope.actor,
+        capability_root: original_authority.capability_root,
+        operation_hash: operation_hash.clone(),
+        effect_class: EffectClass::Reversible,
+        expires_at: now + Duration::minutes(5),
+    })
+    .map_err(|_| ActionRunnerProtocolError::Invalid("compensation authority"))?;
+    let envelope = ActionEnvelope {
+        id: action_id,
+        workflow_id: original.envelope.workflow_id,
+        attempt_id: original.envelope.attempt_id,
+        task_contract: original.envelope.task_contract.clone(),
+        actor: original.envelope.actor,
+        origin: Some(owner_compensation_origin(&original.envelope, request)?),
+        authority,
+        elevated_authority: Some(request_binding),
+        expected_versions: Vec::new(),
+        operation,
+        operation_hash,
+        effect_class: EffectClass::Reversible,
+        preconditions: vec![VersionedPayload::canonical_v1(
+            StableTypeId::parse(OwnerActionCompensationRequest::TYPE_ID)?,
+            &serde_json::to_value(request)?,
+        )?],
+        budget_reservation: owner_compensation_budget_binding(request)?,
+        idempotency_key: format!("owner-compensation:{}", request.idempotency_key.trim()),
+        compensation: None,
+        compensates_action: Some(original.envelope.id),
+        reconciler: original.envelope.reconciler.clone(),
+        reconciliation_deadline: Some(now + Duration::minutes(5)),
+        created_at: now,
+    };
+    validate_governed_filesystem_envelope(&envelope, now)?;
+    let execution = ActionExecution {
+        id: execution_id,
+        action_id,
+        attempt_number: 1,
+        state: ActionExecutionState::Authorized,
+        revision: 1,
+        lease_generation: 0,
+        executor: None,
+        outcome: None,
+        created_at: now,
+        updated_at: now,
+    };
+    Ok((envelope, execution))
+}
+
+fn latest_action_execution(
+    inspection: &mcg_contracts::ActionInspection,
+) -> Result<ActionExecution, ProtectedRootError> {
+    inspection
+        .executions
+        .last()
+        .cloned()
+        .ok_or_else(|| StorageError::InvalidData("action has no execution".into()).into())
+}
+
+fn compensation_receipt(
+    runtime: &AppRuntime,
+    original_action_id: ActionId,
+    replayed: bool,
+) -> Result<ActionCompensationReceipt, ProtectedRootError> {
+    let original = runtime
+        .canonical_action(original_action_id, OWNER_COMPENSATION_EVENT_LIMIT)?
+        .ok_or(ProtectedRootError::ActionNotFound)?;
+    let compensation_action_id = original
+        .compensation_actions
+        .last()
+        .copied()
+        .ok_or_else(|| StorageError::InvalidData("compensation action was not linked".into()))?;
+    let compensation = runtime
+        .canonical_action(compensation_action_id, OWNER_COMPENSATION_EVENT_LIMIT)?
+        .ok_or_else(|| StorageError::InvalidData("compensation action was not found".into()))?;
+    Ok(ActionCompensationReceipt {
+        original_action_id,
+        original_execution: latest_action_execution(&original)?,
+        compensation,
+        replayed,
+    })
+}
+
+fn owner_compensation_authority_binding(
+    request: &OwnerActionCompensationRequest,
+) -> Result<PolicyBinding, ProtectedRootError> {
+    policy_binding(
+        OWNER_COMPENSATION_AUTHORITY_TYPE,
+        OWNER_COMPENSATION_AUTHORITY_DOMAIN,
+        &serde_json::json!({"owner_request": request}),
+    )
+}
+
+fn owner_compensation_budget_binding(
+    request: &OwnerActionCompensationRequest,
+) -> Result<PolicyBinding, ProtectedRootError> {
+    policy_binding(
+        OWNER_COMPENSATION_BUDGET_TYPE,
+        OWNER_COMPENSATION_BUDGET_DOMAIN,
+        &serde_json::json!({
+            "original_action_id": request.action_id,
+            "idempotency_key": request.idempotency_key.trim(),
+            "maximum_compensation_actions": 1,
+        }),
+    )
+}
+
+fn policy_binding(
+    type_id: &str,
+    domain: &str,
+    value: &serde_json::Value,
+) -> Result<PolicyBinding, ProtectedRootError> {
+    let payload = VersionedPayload::canonical_v1(StableTypeId::parse(type_id)?, value)?;
+    let content_hash = payload.content_hash(domain)?;
+    Ok(PolicyBinding {
+        payload,
+        content_hash,
+    })
+}
+
+fn owner_compensation_origin(
+    original: &ActionEnvelope,
+    request: &OwnerActionCompensationRequest,
+) -> Result<ActionOrigin, ProtectedRootError> {
+    let request_hash = canonical_contract_hash(
+        OwnerActionCompensationRequest::TYPE_ID,
+        OwnerActionCompensationRequest::HASH_DOMAIN,
+        request,
+    )?;
+    let original_hash = canonical_contract_hash(
+        ActionEnvelope::TYPE_ID,
+        ACTION_ENVELOPE_HASH_DOMAIN,
+        original,
+    )?;
+    Ok(ActionOrigin {
+        conversation: None,
+        invocation: None,
+        command: None,
+        approval: None,
+        agent: None,
+        evidence: vec![
+            SourceRef {
+                source_type: StableTypeId::parse(ActionEnvelope::TYPE_ID)?,
+                locator: original.id.to_string(),
+                content_hash: original_hash,
+            },
+            SourceRef {
+                source_type: StableTypeId::parse(OwnerActionCompensationRequest::TYPE_ID)?,
+                locator: format!(
+                    "{}:owner-compensation:{}",
+                    original.id,
+                    request.idempotency_key.trim()
+                ),
+                content_hash: request_hash,
+            },
+        ],
+    })
+}
+
+fn decode_original_filesystem_authority(
+    envelope: &ActionEnvelope,
+) -> Result<GovernedFilesystemAuthority, ProtectedRootError> {
+    if envelope.authority.content_hash.domain != GOVERNED_FILESYSTEM_AUTHORITY_HASH_DOMAIN
+        || envelope
+            .authority
+            .payload
+            .content_hash(GOVERNED_FILESYSTEM_AUTHORITY_HASH_DOMAIN)?
+            != envelope.authority.content_hash
+    {
+        return Err(ActionRunnerProtocolError::Invalid("original authority binding").into());
+    }
+    let authority = decode_governed_filesystem_authority(&envelope.authority.payload)?;
+    if authority.action_id != envelope.id
+        || authority.actor != envelope.actor
+        || authority.operation_hash != envelope.operation_hash
+        || authority.effect_class != envelope.effect_class
+        || !authority.capability_root.is_absolute()
+    {
+        return Err(ActionRunnerProtocolError::Invalid("original authority scope").into());
+    }
+    Ok(authority)
+}
+
+fn validate_existing_compensation(
+    original: &mcg_contracts::ActionInspection,
+    existing: &mcg_contracts::ActionInspection,
+    request: &OwnerActionCompensationRequest,
+    request_binding: &PolicyBinding,
+) -> Result<(), ProtectedRootError> {
+    if existing.envelope.compensates_action != Some(original.envelope.id)
+        || existing.envelope.workflow_id != original.envelope.workflow_id
+        || existing.envelope.attempt_id != original.envelope.attempt_id
+        || existing.envelope.task_contract != original.envelope.task_contract
+        || existing.envelope.actor != original.envelope.actor
+        || original.envelope.compensation.as_ref() != Some(&existing.envelope.operation)
+        || existing.envelope.elevated_authority.as_ref() != Some(request_binding)
+        || !original
+            .compensation_actions
+            .contains(&existing.envelope.id)
+        || latest_action_execution(existing)?.id != deterministic_compensation_ids(request).1
+    {
+        return Err(StorageError::Conflict(
+            "owner compensation idempotency key was replayed with substituted intent".into(),
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn deterministic_compensation_ids(
+    request: &OwnerActionCompensationRequest,
+) -> (ActionId, ActionExecutionId) {
+    (
+        ActionId(deterministic_compensation_uuid(
+            b"MetaCog.OwnerActionCompensation.Action.v1\0",
+            request,
+        )),
+        ActionExecutionId(deterministic_compensation_uuid(
+            b"MetaCog.OwnerActionCompensation.Execution.v1\0",
+            request,
+        )),
+    )
+}
+
+fn deterministic_compensation_uuid(
+    domain: &[u8],
+    request: &OwnerActionCompensationRequest,
+) -> Uuid {
+    let mut hasher = Sha256::new();
+    hasher.update(domain);
+    hasher.update(request.action_id.0.as_bytes());
+    hasher.update(request.idempotency_key.trim().as_bytes());
+    let digest = hasher.finalize();
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    Uuid::from_bytes(bytes)
 }
 
 /// Inspects and resolves one due governed-filesystem reconciliation job.
@@ -711,10 +1103,10 @@ fn classify_runner_failure(
     dispatched: &ActionExecution,
     correlation_id: CorrelationId,
     request_id: Uuid,
-    error: ActionRunnerClientError,
+    error: &ActionRunnerClientError,
 ) -> Result<GovernedActionDispatchReceipt, ProtectedRootError> {
     let may_have_occurred = error.effect_may_have_occurred();
-    let error_code = action_runner_client_error_code(&error);
+    let error_code = action_runner_client_error_code(error);
     let observation = runner_outcome_payload(
         if may_have_occurred {
             "mcg.action_runner_transport_unknown.v1"
@@ -1330,10 +1722,23 @@ fn start_root_ipc(
 }
 
 async fn handle_root_ipc<S>(
+    stream: S,
+    runtime: Arc<AppRuntime>,
+    session: RootIpcSession,
+    replay: Arc<Mutex<ReplayWindow>>,
+) -> Result<(), ProtectedRootError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    handle_root_ipc_with_action_runner(stream, runtime, session, replay, None).await
+}
+
+async fn handle_root_ipc_with_action_runner<S>(
     mut stream: S,
     runtime: Arc<AppRuntime>,
     session: RootIpcSession,
     replay: Arc<Mutex<ReplayWindow>>,
+    action_runner: Option<Arc<dyn GovernedActionRunnerGateway>>,
 ) -> Result<(), ProtectedRootError>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -1349,6 +1754,7 @@ where
             | ROOT_WORKFLOW_CANCEL_REQUEST_TYPE
             | ROOT_ACTION_LIST_REQUEST_TYPE
             | ROOT_ACTION_SHOW_REQUEST_TYPE
+            | ROOT_ACTION_COMPENSATE_REQUEST_TYPE
             | ROOT_INVOCATION_LIST_REQUEST_TYPE
             | ROOT_INVOCATION_SHOW_REQUEST_TYPE
     );
@@ -1375,7 +1781,41 @@ where
         .root_ownership()?
         .ok_or_else(|| StorageError::InvalidData("Root ownership is not initialized".into()))?;
     let request_value = decode_canonical_cbor_v1(&request.envelope.payload.bytes)?;
-    let (response_type, response_value) = match request_type.as_str() {
+    let (response_type, response_value) = dispatch_root_ipc_request(
+        &runtime,
+        &session,
+        &ownership,
+        request_type.as_str(),
+        request_value,
+        action_runner,
+    )
+    .await?;
+    let response = RpcEnvelope {
+        protocol_version: PROTOCOL_V1,
+        request_id: request.envelope.request_id,
+        correlation_id: request.envelope.correlation_id,
+        session_id: session.session_id,
+        caller_instance: ownership.runtime_identity.instance_id,
+        message_type: StableTypeId::parse(response_type)?,
+        expires_at: Some(Utc::now() + chrono::Duration::seconds(5)),
+        payload: VersionedPayload::canonical_v1(
+            StableTypeId::parse(response_type)?,
+            &response_value,
+        )?,
+    };
+    write_canonical_frame(&mut stream, &response).await?;
+    Ok(())
+}
+
+async fn dispatch_root_ipc_request(
+    runtime: &AppRuntime,
+    session: &RootIpcSession,
+    ownership: &mcg_storage::RootOwnership,
+    request_type: &str,
+    request_value: serde_json::Value,
+    action_runner: Option<Arc<dyn GovernedActionRunnerGateway>>,
+) -> Result<(&'static str, serde_json::Value), ProtectedRootError> {
+    Ok(match request_type {
         ROOT_STATUS_REQUEST_TYPE => (
             ROOT_STATUS_RESPONSE_TYPE,
             serde_json::to_value(RootStatus {
@@ -1387,7 +1827,7 @@ where
                 runtime_identity: ownership.runtime_identity.clone(),
                 storage_schema_version: STORAGE_SCHEMA_VERSION,
                 writer_queue_capacity: ROOT_WRITER_QUEUE_CAPACITY,
-                migration_receipt: ownership.migration_receipt,
+                migration_receipt: ownership.migration_receipt.clone(),
             })?,
         ),
         ROOT_WORKFLOW_LIST_REQUEST_TYPE => (
@@ -1422,6 +1862,24 @@ where
                 serde_json::to_value(runtime.canonical_action(show.action_id, show.event_limit)?)?,
             )
         }
+        ROOT_ACTION_COMPENSATE_REQUEST_TYPE => {
+            let compensate: OwnerActionCompensationRequest = serde_json::from_value(request_value)?;
+            let runner: Arc<dyn GovernedActionRunnerGateway> = match action_runner {
+                Some(runner) => runner,
+                None => Arc::new(ActionRunnerClient::adjacent_to(std::env::current_exe()?)?),
+            };
+            let receipt = execute_owner_authorized_filesystem_compensation(
+                runtime,
+                runner.as_ref(),
+                &compensate,
+                Utc::now(),
+            )
+            .await?;
+            (
+                ROOT_ACTION_COMPENSATE_RESPONSE_TYPE,
+                serde_json::to_value(receipt)?,
+            )
+        }
         ROOT_INVOCATION_LIST_REQUEST_TYPE => {
             let list: InvocationListRequest = serde_json::from_value(request_value)?;
             if list.limit == 0 || list.limit > MAX_ROOT_INVOCATION_SUMMARIES {
@@ -1445,22 +1903,7 @@ where
             )
         }
         _ => return Err(PlatformError::InvalidSession.into()),
-    };
-    let response = RpcEnvelope {
-        protocol_version: PROTOCOL_V1,
-        request_id: request.envelope.request_id,
-        correlation_id: request.envelope.correlation_id,
-        session_id: session.session_id,
-        caller_instance: ownership.runtime_identity.instance_id,
-        message_type: StableTypeId::parse(response_type)?,
-        expires_at: Some(Utc::now() + chrono::Duration::seconds(5)),
-        payload: VersionedPayload::canonical_v1(
-            StableTypeId::parse(response_type)?,
-            &response_value,
-        )?,
-    };
-    write_canonical_frame(&mut stream, &response).await?;
-    Ok(())
+    })
 }
 
 fn prepare_root_migration(config: &AppConfig) -> Result<RootMigrationReceipt, ProtectedRootError> {
@@ -1569,11 +2012,11 @@ mod tests {
         governed_filesystem_authority_binding, governed_filesystem_operation_payload,
     };
     use mcg_contracts::{
-        ActionEnvelope, ActionExecutionState, ActionId, AttemptId, ConfigurationId,
-        ContextManifest, ContextManifestId, ContextSelection, ContractClause, CorrelationId,
-        EffectClass, HashAlgorithm, InvocationManifest, InvocationRole, ModelRun, ModelRunId,
-        ModelRunState, PolicyBinding, RetryPolicy, RuntimeActorId, SessionId, SourceRef,
-        TaskContract, TaskContractId, TaskContractStatus, VersionedRef, WaitReason,
+        ActionEnvelope, ActionExecutionState, ActionId, ActionValidation, AttemptId,
+        ConfigurationId, ContextManifest, ContextManifestId, ContextSelection, ContractClause,
+        CorrelationId, EffectClass, HashAlgorithm, InvocationManifest, InvocationRole, ModelRun,
+        ModelRunId, ModelRunState, PolicyBinding, RetryPolicy, RuntimeActorId, SessionId,
+        SourceRef, TaskContract, TaskContractId, TaskContractStatus, VersionedRef, WaitReason,
         WorkflowAttempt, WorkflowId, WorkflowState,
     };
     use mcg_platform::{
@@ -1728,20 +2171,33 @@ mod tests {
                     Err(ActionRunnerClientError::Timeout)
                 }
                 GatewayOutcome::Confirmed => {
-                    fs::write(
-                        request.capability_root.join("authorized.txt"),
-                        b"authorized",
-                    )
-                    .expect("script physical effect");
+                    let operation = decode_governed_filesystem_operation(&request.operation)
+                        .expect("script operation");
+                    let exists = match operation {
+                        GovernedFilesystemOperation::CreateFile { .. } => {
+                            fs::write(
+                                request.capability_root.join("authorized.txt"),
+                                b"authorized",
+                            )
+                            .expect("script physical effect");
+                            true
+                        }
+                        GovernedFilesystemOperation::RemoveCreatedFile { .. } => {
+                            fs::remove_file(request.capability_root.join("authorized.txt"))
+                                .expect("script compensation effect");
+                            false
+                        }
+                        _ => panic!("unexpected scripted effect"),
+                    };
                     let now = Utc::now();
                     let observation = VersionedPayload::canonical_v1(
                         StableTypeId::parse(GOVERNED_FILESYSTEM_OBSERVATION_TYPE)
                             .expect("observation type"),
                         &serde_json::json!({
                             "relative_path": "authorized.txt",
-                            "exists": true,
-                            "sha256": format!("{:x}", Sha256::digest(b"authorized")),
-                            "size_bytes": 10,
+                            "exists": exists,
+                            "sha256": exists.then(|| format!("{:x}", Sha256::digest(b"authorized"))),
+                            "size_bytes": exists.then_some(10),
                             "content_base64": null,
                         }),
                     )
@@ -2499,6 +2955,265 @@ mod tests {
                 final_state
             );
         }
+    }
+
+    async fn commit_confirmed_filesystem_action(
+        runtime: &AppRuntime,
+        execution: &ActionExecution,
+        actor: RuntimeActorId,
+        now: chrono::DateTime<Utc>,
+    ) -> ActionExecution {
+        let dispatched = execute_authorized_filesystem_action(
+            runtime,
+            &ScriptedActionGateway(GatewayOutcome::Confirmed),
+            execution.id,
+            execution.revision,
+            execution.lease_generation,
+            actor,
+            now,
+        )
+        .await
+        .expect("confirmed action dispatch");
+        let validation_time = now + chrono::Duration::milliseconds(1);
+        let postcondition = dispatched
+            .runner_response
+            .as_ref()
+            .and_then(|response| response.observation.clone())
+            .expect("confirmed postcondition");
+        let validation = ActionValidation {
+            action_id: dispatched.execution.action_id,
+            execution_id: dispatched.execution.id,
+            validator: actor,
+            evidence: Vec::new(),
+            postconditions: vec![postcondition],
+            validated_at: validation_time,
+        };
+        let validated = runtime
+            .validate_canonical_action_effect(
+                dispatched.execution.id,
+                dispatched.execution.revision,
+                dispatched.execution.lease_generation,
+                &validation,
+                CorrelationId::new(),
+                &format!("test-validate:{}", dispatched.execution.action_id),
+                validation_time,
+            )
+            .expect("validate confirmed action");
+        let validation_event = runtime
+            .canonical_action(dispatched.execution.action_id, 100)
+            .expect("inspect validated action")
+            .expect("validated action exists")
+            .events
+            .last()
+            .expect("validation event")
+            .id;
+        runtime
+            .commit_canonical_action_effect(
+                validated.id,
+                validated.revision,
+                validated.lease_generation,
+                validation_event,
+                CorrelationId::new(),
+                &format!("test-commit:{}", validated.action_id),
+                validation_time + chrono::Duration::milliseconds(1),
+            )
+            .expect("commit validated action")
+            .execution
+    }
+
+    #[tokio::test]
+    async fn owner_compensation_is_root_derived_fenced_and_exactly_replay_safe() {
+        let (temporary, _config, runtime, execution, actor, now) = authorized_filesystem_fixture();
+        let committed = commit_confirmed_filesystem_action(&runtime, &execution, actor, now).await;
+        assert_eq!(committed.state, ActionExecutionState::Committed);
+        assert!(
+            temporary
+                .path()
+                .join("capability-root/authorized.txt")
+                .exists()
+        );
+        let workflow = runtime
+            .canonical_workflow(
+                runtime
+                    .canonical_action(committed.action_id, 100)
+                    .unwrap()
+                    .unwrap()
+                    .envelope
+                    .workflow_id,
+            )
+            .unwrap()
+            .unwrap();
+        let request = OwnerActionCompensationRequest {
+            action_id: committed.action_id,
+            execution_id: committed.id,
+            expected_action_revision: committed.revision,
+            expected_action_generation: committed.lease_generation,
+            expected_workflow_revision: workflow.attempt.revision,
+            expected_workflow_generation: workflow.attempt.lease_generation,
+            reason: "The owner requested removal of the exact file created by this action.".into(),
+            confirmed: true,
+            idempotency_key: "owner-compensation-test-1".into(),
+        };
+        let initiated = execute_owner_authorized_filesystem_compensation(
+            &runtime,
+            &ScriptedActionGateway(GatewayOutcome::Confirmed),
+            &request,
+            now + chrono::Duration::seconds(1),
+        )
+        .await
+        .expect("initiate owner compensation");
+        assert!(!initiated.replayed);
+        assert_eq!(
+            initiated.compensation.envelope.compensates_action,
+            Some(committed.action_id)
+        );
+        assert_eq!(
+            initiated.compensation.envelope.operation,
+            runtime
+                .canonical_action(committed.action_id, 100)
+                .unwrap()
+                .unwrap()
+                .envelope
+                .compensation
+                .unwrap()
+        );
+        assert_eq!(
+            initiated.compensation.executions.last().unwrap().state,
+            ActionExecutionState::EffectConfirmed
+        );
+        assert!(
+            !temporary
+                .path()
+                .join("capability-root/authorized.txt")
+                .exists()
+        );
+
+        let replayed = execute_owner_authorized_filesystem_compensation(
+            &runtime,
+            &ScriptedActionGateway(GatewayOutcome::LaunchFailed),
+            &request,
+            now + chrono::Duration::seconds(2),
+        )
+        .await
+        .expect("replay owner compensation");
+        assert!(replayed.replayed);
+        assert_eq!(
+            replayed.compensation.envelope.id,
+            initiated.compensation.envelope.id
+        );
+        assert_eq!(
+            replayed.compensation.executions.last().unwrap().state,
+            ActionExecutionState::EffectConfirmed
+        );
+
+        let mut substituted = request.clone();
+        substituted.reason =
+            "Substitute a different owner authorization under the same key.".into();
+        assert!(
+            execute_owner_authorized_filesystem_compensation(
+                &runtime,
+                &ScriptedActionGateway(GatewayOutcome::Confirmed),
+                &substituted,
+                now + chrono::Duration::milliseconds(2_500),
+            )
+            .await
+            .is_err()
+        );
+
+        let mut stale = request.clone();
+        stale.idempotency_key = "owner-compensation-stale".into();
+        stale.expected_action_revision -= 1;
+        assert!(
+            execute_owner_authorized_filesystem_compensation(
+                &runtime,
+                &ScriptedActionGateway(GatewayOutcome::Confirmed),
+                &stale,
+                now + chrono::Duration::seconds(3),
+            )
+            .await
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn authenticated_root_ipc_accepts_only_the_typed_owner_compensation_request() {
+        let (temporary, _config, runtime, execution, actor, now) = authorized_filesystem_fixture();
+        let committed = commit_confirmed_filesystem_action(&runtime, &execution, actor, now).await;
+        let workflow_id = runtime
+            .canonical_action(committed.action_id, 100)
+            .unwrap()
+            .unwrap()
+            .envelope
+            .workflow_id;
+        let workflow = runtime.canonical_workflow(workflow_id).unwrap().unwrap();
+        let compensation = OwnerActionCompensationRequest {
+            action_id: committed.action_id,
+            execution_id: committed.id,
+            expected_action_revision: committed.revision,
+            expected_action_generation: committed.lease_generation,
+            expected_workflow_revision: workflow.attempt.revision,
+            expected_workflow_generation: workflow.attempt.lease_generation,
+            reason: "Exercise the authenticated Root compensation protocol.".into(),
+            confirmed: true,
+            idempotency_key: "owner-compensation-ipc-1".into(),
+        };
+        let session = create_root_ipc_session(temporary.path()).expect("create Root IPC session");
+        let request_id = RequestId::new();
+        let correlation_id = CorrelationId::new();
+        let request = AuthenticatedRpcRequest {
+            envelope: RpcEnvelope {
+                protocol_version: PROTOCOL_V1,
+                request_id,
+                correlation_id,
+                session_id: session.session_id,
+                caller_instance: RuntimeInstanceId::new(),
+                message_type: StableTypeId::parse(ROOT_ACTION_COMPENSATE_REQUEST_TYPE).unwrap(),
+                expires_at: Some(Utc::now() + chrono::Duration::seconds(5)),
+                payload: VersionedPayload::canonical_v1(
+                    StableTypeId::parse(ROOT_ACTION_COMPENSATE_REQUEST_TYPE).unwrap(),
+                    &serde_json::to_value(&compensation).unwrap(),
+                )
+                .unwrap(),
+            },
+            session_capability: session.capability.clone(),
+        };
+        let (mut client, server) = tokio::io::duplex(mcg_platform::MAX_ROOT_IPC_FRAME_BYTES);
+        let server_task = tokio::spawn(handle_root_ipc_with_action_runner(
+            server,
+            runtime,
+            session.clone(),
+            Arc::new(Mutex::new(ReplayWindow::default())),
+            Some(Arc::new(ScriptedActionGateway(GatewayOutcome::Confirmed))),
+        ));
+        write_canonical_frame(&mut client, &request)
+            .await
+            .expect("write compensation request");
+        let response: RpcEnvelope = read_canonical_frame(&mut client)
+            .await
+            .expect("read compensation response");
+        server_task
+            .await
+            .expect("Root IPC task")
+            .expect("Root IPC response");
+        assert_eq!(response.correlation_id, correlation_id);
+        assert_eq!(
+            response.message_type.as_str(),
+            ROOT_ACTION_COMPENSATE_RESPONSE_TYPE
+        );
+        let value = decode_canonical_cbor_v1(&response.payload.bytes).unwrap();
+        let receipt: ActionCompensationReceipt = serde_json::from_value(value).unwrap();
+        assert_eq!(receipt.original_action_id, committed.action_id);
+        assert_eq!(
+            receipt.compensation.envelope.compensates_action,
+            Some(committed.action_id)
+        );
+        assert!(
+            !temporary
+                .path()
+                .join("capability-root/authorized.txt")
+                .exists()
+        );
+        remove_root_ipc_session(temporary.path(), session.session_id);
     }
 
     #[test]

@@ -218,6 +218,7 @@ const client = vi.hoisted(() => ({
   ,protectedRootWorkflow: vi.fn()
   ,protectedRootActions: vi.fn()
   ,protectedRootAction: vi.fn()
+  ,compensateProtectedRootAction: vi.fn()
   ,protectedRootInvocations: vi.fn()
   ,protectedRootInvocation: vi.fn()
   ,cancelProtectedRootWorkflow: vi.fn()
@@ -431,6 +432,7 @@ vi.mock("./desktop-client", () => ({
   getProtectedRootWorkflow: client.protectedRootWorkflow,
   listProtectedRootActions: client.protectedRootActions,
   getProtectedRootAction: client.protectedRootAction,
+  compensateProtectedRootAction: client.compensateProtectedRootAction,
   listProtectedRootInvocations: client.protectedRootInvocations,
   getProtectedRootInvocation: client.protectedRootInvocation,
   cancelProtectedRootWorkflow: client.cancelProtectedRootWorkflow,
@@ -464,6 +466,7 @@ beforeEach(() => {
   client.protectedRootWorkflow.mockReset();
   client.protectedRootActions.mockReset();
   client.protectedRootAction.mockReset();
+  client.compensateProtectedRootAction.mockReset();
   client.protectedRootInvocations.mockReset();
   client.protectedRootInvocation.mockReset();
   client.cancelProtectedRootWorkflow.mockReset();
@@ -975,6 +978,7 @@ beforeEach(() => {
   client.protectedRootWorkflow.mockResolvedValue(null);
   client.protectedRootActions.mockResolvedValue([]);
   client.protectedRootAction.mockResolvedValue(null);
+  client.compensateProtectedRootAction.mockRejectedValue(new Error("No action compensation fixture configured."));
   client.protectedRootInvocations.mockResolvedValue([]);
   client.protectedRootInvocation.mockResolvedValue(null);
   client.cancelProtectedRootWorkflow.mockRejectedValue(new Error("No workflow fixture configured."));
@@ -1337,6 +1341,64 @@ test("Developer progressively inspects canonical governed-action evidence", asyn
   fireEvent.click(within(actionsAfterFocus).getAllByRole("button", { name: /Open exact Runtime invocation/ })[0]);
   const invocationsAfterMismatch = screen.getByRole("article", { name: "Runtime invocations" });
   expect(await within(invocationsAfterMismatch).findByRole("alert")).toHaveTextContent("no longer matches its immutable approval binding");
+});
+
+test("Advanced initiates only the exact owner-confirmed compensation through Protected Root", async () => {
+  const actionId = "00000000-0000-4000-8000-000000000570";
+  const executionId = "00000000-0000-4000-8000-000000000571";
+  const workflowId = "00000000-0000-4000-8000-000000000572";
+  const attemptId = "00000000-0000-4000-8000-000000000573";
+  const compensationId = "00000000-0000-4000-8000-000000000574";
+  const now = "2026-08-31T12:00:00Z";
+  const payload = { type_id: "mcg.governed_filesystem_operation.v1", schema_version: 1, canonical_encoding: "canonical-cbor-v1", normalization: "canonical-json-v1", bytes: [1, 2, 3] };
+  const execution = { id: executionId, action_id: actionId, attempt_number: 1, state: "committed", revision: 7, lease_generation: 6, executor: null, outcome: { outcome: "effect_confirmed", evidence: [] }, created_at: now, updated_at: now };
+  const summary = { action_id: actionId, execution_id: executionId, workflow_id: workflowId, attempt_id: attemptId, actor: "00000000-0000-4000-8000-000000000575", effect_class: "reversible", state: "committed", outcome: execution.outcome, revision: 7, lease_generation: 6, updated_at: now };
+  const inspection = {
+    envelope: { id: actionId, workflow_id: workflowId, attempt_id: attemptId, actor: summary.actor, effect_class: "reversible", operation: payload, operation_hash: { algorithm: "blake3-256", domain: "MetaCog.ActionOperation", digest_hex: "a".repeat(64) }, compensation: payload, compensates_action: null, created_at: now },
+    compensation_actions: [],
+    executions: [execution],
+    receipts: [],
+    reconciliation_jobs: [],
+    events: []
+  };
+  const compensation = {
+    ...inspection,
+    envelope: { ...inspection.envelope, id: compensationId, compensation: null, compensates_action: actionId },
+    executions: [{ ...execution, id: "00000000-0000-4000-8000-000000000576", action_id: compensationId, state: "effect_confirmed", revision: 4, lease_generation: 3 }]
+  };
+  const workflow = { workflow_id: workflowId, attempt_id: attemptId, task_contract: { id: "00000000-0000-4000-8000-000000000577", version: 1, content_hash: { algorithm: "blake3-256", domain: "MetaCog.TaskContract", digest_hex: "b".repeat(64) } }, parent_attempt_id: null, attempt_number: 1, state: "running", revision: 11, lease_owner: summary.actor, lease_generation: 9, lease_expires_at: "2026-08-31T12:10:00Z", heartbeat_at: now, checkpoint: null, environment_snapshot: { algorithm: "blake3-256", domain: "MetaCog.Environment", digest_hex: "c".repeat(64) }, configuration: { id: "00000000-0000-4000-8000-000000000578", version: 1, content_hash: { algorithm: "blake3-256", domain: "MetaCog.Configuration", digest_hex: "d".repeat(64) } }, idempotency_key: "workflow", retry_policy: { max_attempts: 1, initial_backoff_ms: 100, maximum_backoff_ms: 100 }, compensation_policy: {}, created_at: now, updated_at: now };
+  client.getSettings.mockResolvedValue({ schema_version: 1, revision: 1, interface_complexity: "advanced", autonomy: "autonomous", shadow_experiments: false, updated_at: now });
+  client.protectedRootActions.mockResolvedValue([summary]);
+  client.protectedRootAction.mockImplementation(async (id: string) => id === actionId ? inspection : null);
+  client.protectedRootWorkflow.mockResolvedValue({ attempt: workflow, task_contract: { id: workflow.task_contract.id, version: 1, objective: "Create then compensate an exact file", requirements: [], constraints: [], assumptions: [], acceptance_criteria: [], status: "active", created_at: now }, events: [] });
+  client.compensateProtectedRootAction.mockResolvedValue({ original_action_id: actionId, original_execution: execution, compensation, replayed: false });
+  const confirmation = vi.spyOn(window, "confirm").mockReturnValue(true);
+
+  render(<App />);
+  fireEvent.click(await screen.findByRole("link", { name: /Agents/ }));
+  const actions = await screen.findByRole("article", { name: "Governed actions" });
+  fireEvent.click(within(actions).getByRole("button", { name: "Inspect" }));
+  const reason = await within(actions).findByRole("textbox", { name: `Compensation reason for action ${actionId}` });
+  fireEvent.change(reason, { target: { value: "Remove the exact file because the owner no longer needs it." } });
+  fireEvent.click(within(actions).getByRole("button", { name: "Initiate exact compensation" }));
+  await waitFor(() => expect(client.compensateProtectedRootAction).toHaveBeenCalledTimes(1));
+  const request = client.compensateProtectedRootAction.mock.calls[0][0];
+  expect(request).toMatchObject({
+    action_id: actionId,
+    execution_id: executionId,
+    expected_action_revision: 7,
+    expected_action_generation: 6,
+    expected_workflow_revision: 11,
+    expected_workflow_generation: 9,
+    reason: "Remove the exact file because the owner no longer needs it.",
+    confirmed: true,
+    idempotency_key: expect.stringMatching(/^desktop-owner-compensation-/)
+  });
+  expect(request).not.toHaveProperty("operation");
+  expect(request).not.toHaveProperty("authority");
+  expect(request).not.toHaveProperty("capability_root");
+  expect(await within(actions).findByRole("status")).toHaveTextContent(`Compensation ${compensationId} was initiated from the exact bound plan.`);
+  confirmation.mockRestore();
 });
 
 test("Runtime invocations preserve one Root truth across Simple Advanced and Developer", async () => {

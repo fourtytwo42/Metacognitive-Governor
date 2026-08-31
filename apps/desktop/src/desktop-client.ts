@@ -1342,6 +1342,25 @@ export interface CanonicalActionInspection {
   }>;
 }
 
+export interface OwnerActionCompensationRequest {
+  action_id: string;
+  execution_id: string;
+  expected_action_revision: number;
+  expected_action_generation: number;
+  expected_workflow_revision: number;
+  expected_workflow_generation: number;
+  reason: string;
+  confirmed: boolean;
+  idempotency_key: string;
+}
+
+export interface ActionCompensationReceipt {
+  original_action_id: string;
+  original_execution: CanonicalActionInspection["executions"][number];
+  compensation: CanonicalActionInspection;
+  replayed: boolean;
+}
+
 export interface CanonicalWorkflowCancelRequest {
   attempt_id: string;
   expected_revision: number;
@@ -2199,6 +2218,10 @@ export function listProtectedRootActions(limit = 100): Promise<CanonicalActionSu
 
 export function getProtectedRootAction(actionId: string, eventLimit = 500): Promise<CanonicalActionInspection | null> {
   return invoke("protected_root_action", { actionId, eventLimit });
+}
+
+export function compensateProtectedRootAction(request: OwnerActionCompensationRequest): Promise<ActionCompensationReceipt> {
+  return invoke("compensate_protected_root_action", { request });
 }
 
 export function listProtectedRootInvocations(limit = 100): Promise<CanonicalInvocationSummary[]> {

@@ -1860,6 +1860,10 @@ input:focus, select:focus, textarea:focus { border-color: #777; box-shadow: 0 0 
 .canonical-workflow-row, .canonical-action-row, .global-agent-session-row { flex-wrap: wrap; align-items: flex-start; }
 .canonical-workflow-row > span, .canonical-action-row > span, .global-agent-session-row > span { flex: 1 1 360px; }
 .workflow-inspection, .action-inspection, .invocation-inspection { flex: 1 0 100%; display: grid; gap: 10px; padding: 12px; border: 1px solid var(--mcg-border); border-radius: 10px; background: var(--mcg-bg); }
+.action-compensation-control { display: grid; gap: 9px; padding: 12px; border: 1px solid color-mix(in srgb, var(--mcg-danger) 55%, var(--mcg-border)); border-radius: 10px; background: color-mix(in srgb, var(--mcg-danger) 7%, var(--mcg-bg)); }
+.action-compensation-control label { display: grid; gap: 6px; font-weight: 650; }
+.action-compensation-control textarea { min-height: 78px; resize: vertical; }
+.action-compensation-control .danger { justify-self: start; border-color: color-mix(in srgb, var(--mcg-danger) 65%, var(--mcg-border)); color: var(--mcg-danger); }
 .approval-invocation-focus { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; margin: 8px 0 12px; padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--mcg-accent) 60%, var(--mcg-border)); border-radius: 10px; background: color-mix(in srgb, var(--mcg-accent) 7%, var(--mcg-surface-raised)); }
 .approval-invocation-focus span { min-width: 0; overflow-wrap: anywhere; }
 .canonical-invocation-row.focused { outline: 2px solid color-mix(in srgb, var(--mcg-accent) 72%, transparent); outline-offset: 2px; }

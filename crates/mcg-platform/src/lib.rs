@@ -11,11 +11,12 @@ use std::fmt::Write as _;
 
 use chrono::{DateTime, Duration, Utc};
 use mcg_contracts::{
-    ActionId, ActionInspection, ActionSummary, AuthenticatedRpcRequest, ContentHash, ContractError,
-    CorrelationId, InvocationId, InvocationInspection, InvocationSummary, PROTOCOL_V1, RequestId,
-    RootStatus, RpcEnvelope, RuntimeInstanceId, RuntimeWorkerRole, SessionId, StableTypeId,
-    VersionedPayload, WorkflowAttempt, WorkflowCancelRequest, WorkflowId, WorkflowInspection,
-    canonical_cbor_v1, decode_canonical_cbor_v1,
+    ActionCompensationReceipt, ActionId, ActionInspection, ActionSummary, AuthenticatedRpcRequest,
+    ContentHash, ContractError, CorrelationId, InvocationId, InvocationInspection,
+    InvocationSummary, OwnerActionCompensationRequest, PROTOCOL_V1, RequestId, RootStatus,
+    RpcEnvelope, RuntimeInstanceId, RuntimeWorkerRole, SessionId, StableTypeId, VersionedPayload,
+    WorkflowAttempt, WorkflowCancelRequest, WorkflowId, WorkflowInspection, canonical_cbor_v1,
+    decode_canonical_cbor_v1,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
@@ -43,6 +44,8 @@ pub const ROOT_ACTION_LIST_REQUEST_TYPE: &str = "metacog.root.action_list.reques
 pub const ROOT_ACTION_LIST_RESPONSE_TYPE: &str = "metacog.root.action_list.response.v1";
 pub const ROOT_ACTION_SHOW_REQUEST_TYPE: &str = "metacog.root.action_show.request.v1";
 pub const ROOT_ACTION_SHOW_RESPONSE_TYPE: &str = "metacog.root.action_show.response.v1";
+pub const ROOT_ACTION_COMPENSATE_REQUEST_TYPE: &str = "metacog.root.action_compensate.request.v1";
+pub const ROOT_ACTION_COMPENSATE_RESPONSE_TYPE: &str = "metacog.root.action_compensate.response.v1";
 pub const ROOT_INVOCATION_LIST_REQUEST_TYPE: &str = "metacog.root.invocation_list.request.v1";
 pub const ROOT_INVOCATION_LIST_RESPONSE_TYPE: &str = "metacog.root.invocation_list.response.v1";
 pub const ROOT_INVOCATION_SHOW_REQUEST_TYPE: &str = "metacog.root.invocation_show.request.v1";
@@ -596,6 +599,25 @@ pub async fn query_root_action(
         ROOT_ACTION_SHOW_REQUEST_TYPE,
         ROOT_ACTION_SHOW_RESPONSE_TYPE,
         &serde_json::json!({"action_id": action_id, "event_limit": event_limit}),
+    )
+    .await
+}
+
+/// Initiates or exactly replays one owner-confirmed causal compensation through Protected Root.
+///
+/// # Errors
+/// Returns an error for unavailable transport, stale identities, invalid owner confirmation, or
+/// any rejected Root authority or action-runner boundary.
+pub async fn compensate_root_action(
+    data_directory: &Path,
+    request: &OwnerActionCompensationRequest,
+) -> Result<ActionCompensationReceipt, PlatformError> {
+    request.validate()?;
+    query_root(
+        data_directory,
+        ROOT_ACTION_COMPENSATE_REQUEST_TYPE,
+        ROOT_ACTION_COMPENSATE_RESPONSE_TYPE,
+        request,
     )
     .await
 }

@@ -210,6 +210,7 @@ import {
   getProtectedRootWorkflow,
   listProtectedRootActions,
   getProtectedRootAction,
+  compensateProtectedRootAction,
   listProtectedRootInvocations,
   getProtectedRootInvocation,
   cancelProtectedRootWorkflow,
@@ -2651,6 +2652,9 @@ export function App() {
   const [actionInspections, setActionInspections] = useState<Record<string, CanonicalActionInspection>>({});
   const [actionBusy, setActionBusy] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [actionNotice, setActionNotice] = useState<string | null>(null);
+  const [compensationReasons, setCompensationReasons] = useState<Record<string, string>>({});
+  const [compensationIdempotencyKeys, setCompensationIdempotencyKeys] = useState<Record<string, string>>({});
   const [canonicalInvocations, setCanonicalInvocations] = useState<CanonicalInvocationSummary[]>([]);
   const [invocationInspections, setInvocationInspections] = useState<Record<string, CanonicalInvocationInspection>>({});
   const [focusedInvocationId, setFocusedInvocationId] = useState<string | null>(null);
@@ -4134,6 +4138,57 @@ export function App() {
           updated_at: latestExecution.updated_at
         }, ...current]);
       }
+    } catch (error) {
+      setActionError(errorMessage(error));
+    } finally {
+      setActionBusy(null);
+    }
+  }
+
+  async function compensateCanonicalAction(actionId: string) {
+    const reason = compensationReasons[actionId]?.trim() ?? "";
+    if (!reason) {
+      setActionError("Enter an owner-visible reason before initiating compensation.");
+      return;
+    }
+    if (!window.confirm("Execute the exact compensation already bound to this committed action? Protected Root will reject changed or stale intent.")) return;
+    setActionBusy(`compensate:${actionId}`);
+    setActionError(null);
+    setActionNotice(null);
+    const idempotencyKey = compensationIdempotencyKeys[actionId] ?? `desktop-owner-compensation-${crypto.randomUUID()}`;
+    setCompensationIdempotencyKeys((current) => ({ ...current, [actionId]: idempotencyKey }));
+    try {
+      const original = await getProtectedRootAction(actionId);
+      if (!original) throw new Error(`Canonical action ${actionId} was not found.`);
+      const execution = original.executions.at(-1);
+      if (!execution) throw new Error(`Canonical action ${actionId} has no execution.`);
+      const workflow = await getProtectedRootWorkflow(original.envelope.workflow_id);
+      if (!workflow) throw new Error(`Source workflow ${original.envelope.workflow_id} was not found.`);
+      const receipt = await compensateProtectedRootAction({
+        action_id: actionId,
+        execution_id: execution.id,
+        expected_action_revision: execution.revision,
+        expected_action_generation: execution.lease_generation,
+        expected_workflow_revision: workflow.attempt.revision,
+        expected_workflow_generation: workflow.attempt.lease_generation,
+        reason,
+        confirmed: true,
+        idempotency_key: idempotencyKey
+      });
+      const refreshedOriginal = await getProtectedRootAction(actionId);
+      setActionInspections((current) => ({
+        ...current,
+        ...(refreshedOriginal ? { [actionId]: refreshedOriginal } : {}),
+        [receipt.compensation.envelope.id]: receipt.compensation
+      }));
+      setCompensationReasons((current) => ({ ...current, [actionId]: "" }));
+      setCompensationIdempotencyKeys((current) => {
+        const updated = { ...current };
+        delete updated[actionId];
+        return updated;
+      });
+      setActionNotice(`Compensation ${receipt.compensation.envelope.id} ${receipt.replayed ? "was already initiated; Protected Root did not redispatch it" : "was initiated from the exact bound plan"}.`);
+      setCanonicalActions(await listProtectedRootActions());
     } catch (error) {
       setActionError(errorMessage(error));
     } finally {
@@ -9184,10 +9239,11 @@ export function App() {
               </div>
               {approvalSourceError && <p className="error-message" role="alert">{approvalSourceError}</p>}
               {actionError && <p className="error-message" role="alert">{actionError}</p>}
+              {actionNotice && <p className="success-message" role="status">{actionNotice}</p>}
               {canonicalActions.length === 0 ? <p className="empty-state">No governed actions yet.</p> : <div className="instance-list">
                 {canonicalActions.map((action) => {
                   const inspection = actionInspections[action.action_id];
-                  return <div className="instance-row canonical-action-row" key={action.execution_id} data-action-state={action.state}>
+                  return <div className="instance-row canonical-action-row" key={action.execution_id} data-action-id={action.action_id} data-action-state={action.state}>
                     <span>
                       <strong>Action {action.action_id.slice(0, 8)}</strong>
                       <small>{actionStateLabel(action.state)}{advanced ? ` · ${action.effect_class.replaceAll("_", " ")} · revision ${action.revision} · generation ${action.lease_generation}` : ""}</small>
@@ -9220,6 +9276,14 @@ export function App() {
                         <p><strong>Compensation history</strong> · exact causal action links</p>
                         {typeof inspection.envelope.compensates_action === "string" && <button className="link-button" type="button" disabled={actionBusy !== null} onClick={() => void inspectCanonicalAction(inspection.envelope.compensates_action as string)}>Inspect compensated action <code>{inspection.envelope.compensates_action}</code> →</button>}
                         {(inspection.compensation_actions ?? []).map((compensationActionId) => <button className="link-button" type="button" disabled={actionBusy !== null} onClick={() => void inspectCanonicalAction(compensationActionId)} key={compensationActionId}>Inspect compensation <code>{compensationActionId}</code> →</button>)}
+                      </div>}
+                      {inspection.executions.at(-1)?.state === "committed" && inspection.envelope.effect_class === "reversible" && inspection.envelope.compensation != null && (inspection.compensation_actions?.length ?? 0) === 0 && <div className="action-compensation-control" aria-label={`Compensate action ${action.action_id}`} role="region">
+                        <p><strong>Owner-authorized compensation</strong></p>
+                        <p className="form-note">Protected Root will execute only the immutable compensation plan already attached to this action. The reason and confirmation become authorization evidence.</p>
+                        <label>Reason
+                          <textarea aria-label={`Compensation reason for action ${action.action_id}`} maxLength={4096} value={compensationReasons[action.action_id] ?? ""} onChange={(event) => setCompensationReasons((current) => ({ ...current, [action.action_id]: event.target.value }))} />
+                        </label>
+                        <button className="danger" type="button" disabled={actionBusy !== null || !(compensationReasons[action.action_id]?.trim())} onClick={() => void compensateCanonicalAction(action.action_id)}>{actionBusy === `compensate:${action.action_id}` ? "Initiating exact compensation…" : "Initiate exact compensation"}</button>
                       </div>}
                       {inspection.reconciliation_jobs.length > 0 && <p>Reconciliation: {inspection.reconciliation_jobs.map((job) => job.state.replaceAll("_", " ")).join(", ")}</p>}
                       <button className="link-button" type="button" disabled={workflowBusy !== null} onClick={() => void inspectCanonicalWorkflow(inspection.envelope.workflow_id)}>Load source workflow evidence →</button>

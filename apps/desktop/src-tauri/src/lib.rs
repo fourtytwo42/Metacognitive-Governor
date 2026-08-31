@@ -221,6 +221,15 @@ async fn protected_root_action(
 }
 
 #[tauri::command]
+async fn compensate_protected_root_action(
+    request: mcg_contracts::OwnerActionCompensationRequest,
+) -> Result<mcg_contracts::ActionCompensationReceipt, String> {
+    mcg_platform::compensate_root_action(&AppConfig::default().data_directory, &request)
+        .await
+        .map_err(|error| format!("Protected Root compensation was rejected: {error}"))
+}
+
+#[tauri::command]
 async fn protected_root_invocations(
     limit: usize,
 ) -> Result<Vec<mcg_contracts::InvocationSummary>, String> {
@@ -4084,6 +4093,7 @@ pub fn run() {
             protected_root_workflow,
             protected_root_actions,
             protected_root_action,
+            compensate_protected_root_action,
             protected_root_invocations,
             protected_root_invocation,
             cancel_protected_root_workflow,

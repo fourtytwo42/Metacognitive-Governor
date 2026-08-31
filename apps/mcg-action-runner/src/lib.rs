@@ -611,6 +611,23 @@ pub fn decode_governed_filesystem_operation(
     decode_filesystem_operation(payload)
 }
 
+/// Decodes one canonical governed-filesystem authority without treating its execution deadline as
+/// current. Protected Root uses this only to derive a fresh, narrower permit from previously
+/// authorized immutable intent; execution still calls [`validate_governed_filesystem_envelope`].
+///
+/// # Errors
+/// Returns an error for an unexpected type or noncanonical payload.
+pub fn decode_governed_filesystem_authority(
+    payload: &VersionedPayload,
+) -> Result<GovernedFilesystemAuthority, ActionRunnerProtocolError> {
+    if payload.type_id.as_str() != GOVERNED_FILESYSTEM_AUTHORITY_TYPE {
+        return Err(ActionRunnerProtocolError::Invalid(
+            "filesystem authority type",
+        ));
+    }
+    decode_payload(payload)
+}
+
 /// Decodes one canonical governed-filesystem observation.
 ///
 /// # Errors
