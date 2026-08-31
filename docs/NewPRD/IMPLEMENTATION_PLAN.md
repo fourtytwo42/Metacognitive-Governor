@@ -680,7 +680,7 @@ Do not claim consciousness, subjective identity, unrestricted self-improvement, 
 1. Complete Stage 3 compatibility reattachment, child propagation, event streaming, wake triggers, and the remaining nonterminal crash/reassignment matrix.
 2. Extend Stage 4's implemented owner-authorized compensation and real-child fault paths through packaged adversarial and native three-platform qualification.
 3. Finish Stage 5 packaged remote-inventory, cancellation, replacement, crash-injection, and native qualification; direct remote Codex sub-agent inventory and canonical workflow/current-attempt invocation drill-down are implemented.
-4. Implement the Stage 6 Root-bound provider/tool/secret permit pipeline and prove one real end-to-end governed request.
+4. Continue the implemented Stage 6 model-egress permit kernel with a deterministic provider gateway, then one real provider route, governed tool/capability permits, redaction/security E2E, and cross-platform product qualification.
 5. Build and pass the Stage 7 Protected Evaluator and Phase 0 integrity gate before beginning recursive improvement work.
 6. Continue through Stages 8–13 only behind the recorded scientific and production gates, with matched Windows/macOS/Linux package and native UAT evidence at every affected boundary.
 
