@@ -23,5 +23,11 @@ mcg-runtime = { path = "../../crates/mcg-runtime" }
 mcg-storage = { path = "../../crates/mcg-storage" }
 tempfile.workspace = true
 
+[[bin]]
+name = "mcg-runtime-worker-delayed-fixture"
+path = "src/bin/delayed_fixture.rs"
+test = false
+bench = false
+
 [lints]
 workspace = true

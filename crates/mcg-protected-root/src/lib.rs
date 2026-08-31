@@ -6,7 +6,8 @@
 pub mod runtime_worker;
 
 pub use runtime_worker::{
-    RuntimeWorkerClient, RuntimeWorkerClientError, RuntimeWorkerReplacementReason,
+    RuntimeWorkerCancellationHandle, RuntimeWorkerClient, RuntimeWorkerClientError,
+    RuntimeWorkerReplacementReason,
 };
 
 use std::{
@@ -32,7 +33,7 @@ use mcg_contracts::{
     HashAlgorithm, InvocationId, PROTOCOL_V1, ReconciliationJob, ReconciliationJobId,
     ReconciliationObservation, RequestId, RootStatus, RpcEnvelope, RuntimeActorId, RuntimeIdentity,
     RuntimeInstanceId, RuntimeInvocationRequest, RuntimeInvocationResult, StableTypeId,
-    VersionedPayload, WorkflowCancelRequest, WorkflowId, decode_canonical_cbor_v1,
+    VersionedPayload, WorkflowAttempt, WorkflowCancelRequest, WorkflowId, decode_canonical_cbor_v1,
 };
 use mcg_platform::{
     MAX_ROOT_INVOCATION_MODEL_RUNS, MAX_ROOT_INVOCATION_SUMMARIES, PlatformError,
@@ -106,6 +107,24 @@ pub struct RuntimeInvocationDispatchReceipt {
     pub completed_run: mcg_storage::ModelRunRecord,
 }
 
+#[derive(Debug, Clone)]
+pub struct RuntimeInvocationCancellationReceipt {
+    pub workflow: WorkflowAttempt,
+    pub model_run: mcg_storage::ModelRunRecord,
+    pub worker_generation: u64,
+}
+
+#[derive(Debug, Clone)]
+pub enum RuntimeInvocationExecutionReceipt {
+    Completed(Box<RuntimeInvocationDispatchReceipt>),
+    Cancelled(Box<RuntimeInvocationCancellationReceipt>),
+}
+
+enum RuntimeInvocationRace {
+    Result(Result<RuntimeInvocationResult, RuntimeWorkerClientError>),
+    Cancellation(WorkflowCancelRequest),
+}
+
 /// Allocates a durable Root-owned generation and authenticates the fixed adjacent worker.
 ///
 /// # Errors
@@ -142,7 +161,7 @@ pub async fn replace_idle_runtime_worker_if_needed(
 ) -> Result<Option<RuntimeWorkerReplacementReceipt>, ProtectedRootError> {
     let reason = match worker.as_mut() {
         None => return Ok(None),
-        Some(client) => match client.replacement_reason(now) {
+        Some(client) => match client.replacement_reason(now).await {
             Ok(Some(reason)) => reason,
             Ok(None) => return Ok(None),
             Err(error) => {
@@ -178,6 +197,39 @@ pub async fn execute_runtime_invocation(
     request: &RuntimeInvocationRequest,
     now: chrono::DateTime<Utc>,
 ) -> Result<RuntimeInvocationDispatchReceipt, ProtectedRootError> {
+    match execute_runtime_invocation_with_cancellation(
+        runtime,
+        client,
+        request,
+        now,
+        std::future::pending::<WorkflowCancelRequest>(),
+    )
+    .await?
+    {
+        RuntimeInvocationExecutionReceipt::Completed(receipt) => Ok(*receipt),
+        RuntimeInvocationExecutionReceipt::Cancelled(_) => {
+            Err(RuntimeWorkerClientError::InvalidResponse.into())
+        }
+    }
+}
+
+/// Executes a persisted invocation while an exact durable workflow cancellation can interrupt
+/// the active child through independent process control. Root fences workflow state first,
+/// kills/reaps the exact generation, then settles the dispatched model run `Cancelled`.
+///
+/// # Errors
+/// Returns an error for stale authority, invalid cancellation identity, persistence failure,
+/// worker failure, or substituted data. Post-dispatch ambiguity settles `OutcomeUnknown`.
+pub async fn execute_runtime_invocation_with_cancellation<C>(
+    runtime: &AppRuntime,
+    client: &mut RuntimeWorkerClient,
+    request: &RuntimeInvocationRequest,
+    now: chrono::DateTime<Utc>,
+    cancellation: C,
+) -> Result<RuntimeInvocationExecutionReceipt, ProtectedRootError>
+where
+    C: std::future::Future<Output = WorkflowCancelRequest>,
+{
     if request.worker_generation != client.worker_generation()
         || request.invocation_manifest.runtime_identity != client.hello().runtime_identity
         || request.invocation_manifest.runtime_build != client.hello().executable_hash
@@ -186,9 +238,49 @@ pub async fn execute_runtime_invocation(
     }
     runtime.plan_runtime_invocation(request, now)?;
     runtime.dispatch_runtime_invocation(request, Utc::now())?;
-    let result = match client.invoke(request).await {
-        Ok(result) => result,
-        Err(error) => {
+    let cancellation_handle = client.cancellation_handle();
+    let race = {
+        let invocation = client.invoke(request);
+        tokio::pin!(invocation);
+        tokio::pin!(cancellation);
+        tokio::select! {
+            result = &mut invocation => RuntimeInvocationRace::Result(result),
+            cancel = &mut cancellation => RuntimeInvocationRace::Cancellation(cancel),
+        }
+    };
+    let result = match race {
+        RuntimeInvocationRace::Cancellation(cancel) => {
+            if cancel.attempt_id != request.invocation_manifest.attempt_id
+                || cancel.expected_revision != request.attempt_revision
+                || cancel.expected_generation != request.lease_generation
+                || cancellation_handle.worker_generation() != request.worker_generation
+            {
+                let _ = cancellation_handle.terminate().await;
+                runtime.settle_runtime_invocation_without_result(
+                    request,
+                    mcg_contracts::ModelRunState::OutcomeUnknown,
+                    Utc::now(),
+                )?;
+                return Err(RuntimeWorkerClientError::InvalidResponse.into());
+            }
+            let workflow = runtime.cancel_canonical_workflow(&cancel)?;
+            let termination = cancellation_handle.terminate().await;
+            let model_run = runtime.settle_runtime_invocation_without_result(
+                request,
+                mcg_contracts::ModelRunState::Cancelled,
+                Utc::now(),
+            )?;
+            termination?;
+            return Ok(RuntimeInvocationExecutionReceipt::Cancelled(Box::new(
+                RuntimeInvocationCancellationReceipt {
+                    workflow,
+                    model_run,
+                    worker_generation: request.worker_generation,
+                },
+            )));
+        }
+        RuntimeInvocationRace::Result(Ok(result)) => result,
+        RuntimeInvocationRace::Result(Err(error)) => {
             runtime.settle_runtime_invocation_without_result(
                 request,
                 mcg_contracts::ModelRunState::OutcomeUnknown,
@@ -198,11 +290,13 @@ pub async fn execute_runtime_invocation(
         }
     };
     match runtime.complete_runtime_invocation(request, &result, Utc::now()) {
-        Ok((completed_run, response_artifact)) => Ok(RuntimeInvocationDispatchReceipt {
-            result,
-            response_artifact,
-            completed_run,
-        }),
+        Ok((completed_run, response_artifact)) => Ok(RuntimeInvocationExecutionReceipt::Completed(
+            Box::new(RuntimeInvocationDispatchReceipt {
+                result,
+                response_artifact,
+                completed_run,
+            }),
+        )),
         Err(error) => {
             let _ = runtime.settle_runtime_invocation_without_result(
                 request,

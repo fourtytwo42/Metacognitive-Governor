@@ -3,6 +3,10 @@
 use std::{
     path::{Path, PathBuf},
     process::Stdio,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration as StdDuration,
 };
 
@@ -24,6 +28,7 @@ use mcg_platform::{
 use thiserror::Error;
 use tokio::{
     process::{Child, Command},
+    sync::Mutex,
     time::timeout,
 };
 use zeroize::Zeroize;
@@ -63,13 +68,21 @@ pub enum RuntimeWorkerReplacementReason {
 
 /// One authenticated Root-owned Runtime process generation.
 pub struct RuntimeWorkerClient {
-    child: Child,
+    child: Arc<Mutex<Child>>,
     stream: LocalIpcStream,
     session: RuntimeWorkerSession,
     hello: RuntimeWorkerHello,
     root_instance: RuntimeInstanceId,
     request_timeout: StdDuration,
-    usable: bool,
+    usable: Arc<AtomicBool>,
+}
+
+/// Independent exact-process control used when durable cancellation must interrupt active Work.
+#[derive(Clone)]
+pub struct RuntimeWorkerCancellationHandle {
+    child: Arc<Mutex<Child>>,
+    usable: Arc<AtomicBool>,
+    worker_generation: u64,
 }
 
 impl std::fmt::Debug for RuntimeWorkerClient {
@@ -86,7 +99,50 @@ impl std::fmt::Debug for RuntimeWorkerClient {
 
 impl Drop for RuntimeWorkerClient {
     fn drop(&mut self) {
-        let _ = self.child.start_kill();
+        self.usable.store(false, Ordering::Release);
+        if let Ok(mut child) = self.child.try_lock() {
+            let _ = child.start_kill();
+        }
+    }
+}
+
+impl std::fmt::Debug for RuntimeWorkerCancellationHandle {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RuntimeWorkerCancellationHandle")
+            .field("worker_generation", &self.worker_generation)
+            .finish_non_exhaustive()
+    }
+}
+
+impl RuntimeWorkerCancellationHandle {
+    #[must_use]
+    pub fn worker_generation(&self) -> u64 {
+        self.worker_generation
+    }
+
+    /// Makes the generation unusable, then forcefully terminates and reaps its exact child.
+    ///
+    /// # Errors
+    /// Returns an error when the exact process state cannot be inspected, killed, or reaped.
+    pub async fn terminate(&self) -> Result<(), RuntimeWorkerClientError> {
+        self.usable.store(false, Ordering::Release);
+        let mut child = self.child.lock().await;
+        if child
+            .try_wait()
+            .map_err(RuntimeWorkerClientError::Launch)?
+            .is_none()
+        {
+            child
+                .kill()
+                .await
+                .map_err(RuntimeWorkerClientError::Launch)?;
+            child
+                .wait()
+                .await
+                .map_err(RuntimeWorkerClientError::Launch)?;
+        }
+        Ok(())
     }
 }
 
@@ -179,13 +235,13 @@ impl RuntimeWorkerClient {
         let hello = validate_hello(&session, process_id, &hello_request)?;
         hello_request.session_capability.zeroize();
         Ok(Self {
-            child,
+            child: Arc::new(Mutex::new(child)),
             stream,
             session,
             hello,
             root_instance: RuntimeInstanceId::new(),
             request_timeout,
-            usable: true,
+            usable: Arc::new(AtomicBool::new(true)),
         })
     }
 
@@ -199,6 +255,17 @@ impl RuntimeWorkerClient {
         self.session.worker_generation
     }
 
+    /// Returns independent control that can kill/reap this exact generation while `invoke` owns
+    /// the request stream. The handle grants no IPC, request, storage, or replacement authority.
+    #[must_use]
+    pub fn cancellation_handle(&self) -> RuntimeWorkerCancellationHandle {
+        RuntimeWorkerCancellationHandle {
+            child: Arc::clone(&self.child),
+            usable: Arc::clone(&self.usable),
+            worker_generation: self.session.worker_generation,
+        }
+    }
+
     /// Determines whether this exclusively held, idle generation must be replaced.
     ///
     /// Root must call this only while no invocation is using the client. An expired or poisoned
@@ -206,11 +273,11 @@ impl RuntimeWorkerClient {
     ///
     /// # Errors
     /// Returns an error when the exact child process state cannot be inspected.
-    pub fn replacement_reason(
+    pub async fn replacement_reason(
         &mut self,
         now: chrono::DateTime<Utc>,
     ) -> Result<Option<RuntimeWorkerReplacementReason>, RuntimeWorkerClientError> {
-        if !self.usable {
+        if !self.usable.load(Ordering::Acquire) {
             return Ok(Some(RuntimeWorkerReplacementReason::Unusable));
         }
         if now >= self.session.expires_at {
@@ -218,11 +285,13 @@ impl RuntimeWorkerClient {
         }
         if self
             .child
+            .lock()
+            .await
             .try_wait()
             .map_err(RuntimeWorkerClientError::Launch)?
             .is_some()
         {
-            self.usable = false;
+            self.usable.store(false, Ordering::Release);
             return Ok(Some(RuntimeWorkerReplacementReason::Exited));
         }
         Ok(None)
@@ -274,7 +343,9 @@ impl RuntimeWorkerClient {
         Ok(result)
     }
 
-    /// Requests generation-fenced cancellation of worker-local activity.
+    /// Requests generation-fenced cooperative cancellation while no invocation owns the stream.
+    /// Active invocation interruption uses [`Self::cancellation_handle`] to kill/reap the exact
+    /// process without waiting behind Work.
     ///
     /// # Errors
     /// Returns an error when the channel is unavailable or the acknowledgement is invalid.
@@ -288,23 +359,7 @@ impl RuntimeWorkerClient {
     /// # Errors
     /// Returns an error when the exact child cannot be killed or reaped.
     pub async fn terminate(&mut self) -> Result<(), RuntimeWorkerClientError> {
-        if self
-            .child
-            .try_wait()
-            .map_err(RuntimeWorkerClientError::Launch)?
-            .is_none()
-        {
-            self.child
-                .kill()
-                .await
-                .map_err(RuntimeWorkerClientError::Launch)?;
-            self.child
-                .wait()
-                .await
-                .map_err(RuntimeWorkerClientError::Launch)?;
-        }
-        self.usable = false;
-        Ok(())
+        self.cancellation_handle().terminate().await
     }
 
     /// Requests clean shutdown and waits for the exact child to exit.
@@ -316,9 +371,13 @@ impl RuntimeWorkerClient {
             let _ = self.terminate().await;
             return Err(error);
         }
-        match timeout(self.request_timeout, self.child.wait()).await {
+        let waited = {
+            let mut child = self.child.lock().await;
+            timeout(self.request_timeout, child.wait()).await
+        };
+        match waited {
             Ok(Ok(_)) => {
-                self.usable = false;
+                self.usable.store(false, Ordering::Release);
                 Ok(())
             }
             Ok(Err(error)) => {
@@ -353,7 +412,7 @@ impl RuntimeWorkerClient {
         response_type: &str,
         value: &T,
     ) -> Result<serde_json::Value, RuntimeWorkerClientError> {
-        if !self.usable {
+        if !self.usable.load(Ordering::Acquire) {
             return Err(RuntimeWorkerClientError::Unavailable);
         }
         let request_id = RequestId::new();
@@ -425,8 +484,10 @@ impl RuntimeWorkerClient {
     }
 
     fn poison(&mut self) {
-        self.usable = false;
-        let _ = self.child.start_kill();
+        self.usable.store(false, Ordering::Release);
+        if let Ok(mut child) = self.child.try_lock() {
+            let _ = child.start_kill();
+        }
     }
 }
 

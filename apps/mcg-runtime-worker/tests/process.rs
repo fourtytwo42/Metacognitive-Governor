@@ -7,22 +7,23 @@ use mcg_contracts::{
     ConfigurationId, ContentHash, ContextManifest, ContextManifestId, ContextSelection,
     ContractClause, CorrelationId, DeterministicCriterionEvidence, DeterministicVerifyInput,
     HashAlgorithm, InvocationId, InvocationManifest, InvocationRole, ModelRunId, PROTOCOL_V1,
-    PolicyBinding, RUNTIME_INVOCATION_REQUEST_HASH_DOMAIN, RUNTIME_WORKER_ACK_MESSAGE_TYPE,
-    RUNTIME_WORKER_HELLO_MESSAGE_TYPE, RUNTIME_WORKER_INVOKE_MESSAGE_TYPE,
-    RUNTIME_WORKER_RESULT_MESSAGE_TYPE, RUNTIME_WORKER_SHUTDOWN_MESSAGE_TYPE, RequestId,
-    RetryPolicy, RpcEnvelope, RuntimeActorId, RuntimeInstanceId, RuntimeInvocationRequest,
-    RuntimeInvocationResult, RuntimeWorkerControl, RuntimeWorkerHello, SourceRef, StableTypeId,
-    TaskContract, TaskContractId, TaskContractStatus, VersionedPayload, VersionedRef,
-    WorkflowAttempt, WorkflowCancelRequest, WorkflowId, WorkflowState, canonical_contract_hash,
-    decode_canonical_cbor_v1,
+    PolicyBinding, RUNTIME_INVOCATION_REQUEST_HASH_DOMAIN, RUNTIME_INVOCATION_RESPONSE_HASH_DOMAIN,
+    RUNTIME_WORKER_ACK_MESSAGE_TYPE, RUNTIME_WORKER_HELLO_MESSAGE_TYPE,
+    RUNTIME_WORKER_INVOKE_MESSAGE_TYPE, RUNTIME_WORKER_RESULT_MESSAGE_TYPE,
+    RUNTIME_WORKER_SHUTDOWN_MESSAGE_TYPE, RequestId, RetryPolicy, RpcEnvelope, RuntimeActorId,
+    RuntimeInstanceId, RuntimeInvocationRequest, RuntimeInvocationResult, RuntimeWorkerControl,
+    RuntimeWorkerHello, SourceRef, StableTypeId, TaskContract, TaskContractId, TaskContractStatus,
+    VersionedPayload, VersionedRef, WorkflowAttempt, WorkflowCancelRequest, WorkflowId,
+    WorkflowState, canonical_contract_hash, decode_canonical_cbor_v1,
 };
 use mcg_platform::{
     LocalIpcStream, RuntimeWorkerListener, RuntimeWorkerSession, create_runtime_worker_session,
     read_canonical_frame, runtime_worker_executable_hash, write_canonical_frame,
 };
 use mcg_protected_root::{
-    RuntimeWorkerClient, RuntimeWorkerReplacementReason, execute_runtime_invocation,
-    launch_runtime_worker, replace_idle_runtime_worker_if_needed,
+    RuntimeInvocationExecutionReceipt, RuntimeWorkerClient, RuntimeWorkerReplacementReason,
+    execute_runtime_invocation, execute_runtime_invocation_with_cancellation,
+    launch_runtime_worker, open as open_protected_root, replace_idle_runtime_worker_if_needed,
 };
 use mcg_runtime::AppRuntime;
 use mcg_storage::{SqliteEventStore, task_contract_content_hash};
@@ -864,6 +865,177 @@ async fn protected_root_replaces_dead_and_expired_idle_generations() {
     );
     assert_eq!(worker.as_ref().unwrap().worker_generation(), 4);
     worker.take().unwrap().shutdown().await.unwrap();
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // One real-process cancel/kill/late/reopen proof.
+async fn active_invocation_cancellation_kills_generation_and_rejects_late_result() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = AppConfig {
+        data_directory: directory.path().join("active-cancellation-profile"),
+        ..AppConfig::default()
+    };
+    let restart_config = config.clone();
+    std::fs::create_dir_all(&config.data_directory).unwrap();
+    let now = Utc::now();
+    let (contract, ready) = workflow_fixture(now);
+    let running = {
+        let mut store = SqliteEventStore::open(config.database_path()).unwrap();
+        store
+            .create_workflow(&contract, &ready, CorrelationId::new(), now)
+            .unwrap();
+        store
+            .claim_workflow_attempt(
+                ready.attempt_id,
+                ready.revision,
+                ready.lease_generation,
+                RuntimeActorId::new(),
+                now + Duration::minutes(5),
+                CorrelationId::new(),
+                "active-cancellation-claim",
+                now,
+            )
+            .unwrap()
+    };
+    let runtime = AppRuntime::open(config).unwrap();
+    let generation = runtime.allocate_runtime_worker_generation().unwrap();
+    let fixture = env!("CARGO_BIN_EXE_mcg-runtime-worker-delayed-fixture");
+    let mut client = RuntimeWorkerClient::launch(
+        fixture,
+        directory.path(),
+        generation,
+        std::time::Duration::from_secs(5),
+        std::time::Duration::from_secs(35),
+        std::time::Duration::from_secs(60),
+    )
+    .await
+    .unwrap();
+    let input = VersionedPayload::canonical_v1(
+        StableTypeId::parse("test.work_input.v1").unwrap(),
+        &serde_json::json!({"task": "cancel-after-dispatch"}),
+    )
+    .unwrap();
+    let request = invocation_request_for(
+        client.hello(),
+        client.worker_generation(),
+        InvocationRole::Work,
+        input,
+        running.attempt_id,
+        running.task_contract.clone(),
+        running.revision,
+        running.lease_generation,
+    );
+    let cancel = WorkflowCancelRequest {
+        attempt_id: running.attempt_id,
+        expected_revision: running.revision,
+        expected_generation: running.lease_generation,
+        idempotency_key: "cancel-active-runtime-invocation".into(),
+    };
+    let started = std::time::Instant::now();
+    let receipt = execute_runtime_invocation_with_cancellation(
+        &runtime,
+        &mut client,
+        &request,
+        Utc::now(),
+        async move {
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            cancel
+        },
+    )
+    .await
+    .unwrap();
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    let RuntimeInvocationExecutionReceipt::Cancelled(cancelled) = receipt else {
+        panic!("delayed Runtime invocation completed instead of cancelling");
+    };
+    assert_eq!(cancelled.worker_generation, generation);
+    assert_eq!(cancelled.workflow.state, WorkflowState::CancelRequested);
+    assert_eq!(cancelled.workflow.revision, running.revision + 1);
+    assert_eq!(
+        cancelled.workflow.lease_generation,
+        running.lease_generation + 1
+    );
+    assert_eq!(
+        cancelled.model_run.run.state,
+        mcg_contracts::ModelRunState::Cancelled
+    );
+    assert!(matches!(
+        client.invoke(&request).await,
+        Err(mcg_protected_root::RuntimeWorkerClientError::Unavailable)
+    ));
+    assert!(
+        runtime
+            .runtime_response(request.model_run_id)
+            .unwrap()
+            .is_none()
+    );
+
+    let response = VersionedPayload::canonical_v1(
+        StableTypeId::parse("test.late_runtime_response.v1").unwrap(),
+        &serde_json::json!({"outcome": "must-not-commit"}),
+    )
+    .unwrap();
+    let response_hash = response
+        .content_hash(RUNTIME_INVOCATION_RESPONSE_HASH_DOMAIN)
+        .unwrap();
+    let late_result = RuntimeInvocationResult {
+        worker_generation: generation,
+        invocation_id: request.invocation_manifest.id,
+        model_run_id: request.model_run_id,
+        role: request.invocation_manifest.role,
+        request_hash: request.invocation_manifest.request_hash.clone(),
+        response,
+        response_hash,
+        criterion_results: Vec::new(),
+        verdict: None,
+    };
+    late_result.validate().unwrap();
+    assert!(
+        runtime
+            .complete_runtime_invocation(&request, &late_result, Utc::now())
+            .is_err()
+    );
+    assert!(
+        runtime
+            .runtime_response(request.model_run_id)
+            .unwrap()
+            .is_none()
+    );
+    drop(client);
+    drop(runtime);
+
+    let reopened = open_protected_root(restart_config).unwrap();
+    assert_eq!(
+        reopened
+            .canonical_workflow(running.workflow_id)
+            .unwrap()
+            .unwrap()
+            .attempt
+            .state,
+        WorkflowState::Cancelled
+    );
+    let inspection = reopened
+        .runtime_invocation(request.invocation_manifest.id, 10)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        inspection
+            .model_runs
+            .iter()
+            .map(|record| record.run.state)
+            .collect::<Vec<_>>(),
+        [
+            mcg_contracts::ModelRunState::Planned,
+            mcg_contracts::ModelRunState::Dispatched,
+            mcg_contracts::ModelRunState::Cancelled,
+        ]
+    );
+    assert!(
+        reopened
+            .runtime_response(request.model_run_id)
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[tokio::test]

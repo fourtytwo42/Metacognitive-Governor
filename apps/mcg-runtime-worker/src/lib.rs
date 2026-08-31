@@ -71,13 +71,34 @@ pub async fn run_from_stdin() -> Result<(), WorkerError> {
     run(session).await
 }
 
+/// Runs the distinct unpackaged integration fixture, delaying each invocation after the exact
+/// authenticated request has been accepted. Production entry points never call this function.
+///
+/// # Errors
+/// Returns the same bootstrap, authentication, transport, or execution errors as [`run`].
+#[doc(hidden)]
+pub async fn run_delayed_fixture_from_stdin(
+    invocation_delay: std::time::Duration,
+) -> Result<(), WorkerError> {
+    let mut input = tokio::io::stdin();
+    let session: RuntimeWorkerSession = read_canonical_frame(&mut input).await?;
+    run_with_invocation_delay(session, Some(invocation_delay)).await
+}
+
 /// Connects to the Root-owned endpoint, authenticates the exact process generation, and serves
 /// bounded invocation/control requests until explicit shutdown or channel closure.
 ///
 /// # Errors
 /// Returns an error for an invalid launch session, executable mismatch, protocol violation,
 /// replay, malformed invocation, or transport failure.
-pub async fn run(mut session: RuntimeWorkerSession) -> Result<(), WorkerError> {
+pub async fn run(session: RuntimeWorkerSession) -> Result<(), WorkerError> {
+    run_with_invocation_delay(session, None).await
+}
+
+async fn run_with_invocation_delay(
+    mut session: RuntimeWorkerSession,
+    invocation_delay: Option<std::time::Duration>,
+) -> Result<(), WorkerError> {
     session.validate(Utc::now())?;
     let executable_hash = runtime_worker_executable_hash(std::env::current_exe()?)?;
     if executable_hash != session.expected_executable_hash {
@@ -132,6 +153,9 @@ pub async fn run(mut session: RuntimeWorkerSession) -> Result<(), WorkerError> {
                 let invocation: RuntimeInvocationRequest = serde_json::from_value(request_value)?;
                 invocation.validate()?;
                 validate_invocation_identity(&session, &runtime_identity, &invocation)?;
+                if let Some(delay) = invocation_delay {
+                    tokio::time::sleep(delay).await;
+                }
                 let result = execute_deterministic(&invocation)?;
                 (
                     RUNTIME_WORKER_RESULT_MESSAGE_TYPE,
