@@ -5,7 +5,9 @@
 
 pub mod runtime_worker;
 
-pub use runtime_worker::{RuntimeWorkerClient, RuntimeWorkerClientError};
+pub use runtime_worker::{
+    RuntimeWorkerClient, RuntimeWorkerClientError, RuntimeWorkerReplacementReason,
+};
 
 use std::{
     collections::{BTreeSet, VecDeque},
@@ -53,7 +55,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::{
     io::{AsyncRead, AsyncWrite},
-    sync::Semaphore,
+    sync::{Semaphore, oneshot},
     task::JoinHandle,
 };
 use tracing::{debug, info, warn};
@@ -115,6 +117,53 @@ pub async fn launch_runtime_worker(
 ) -> Result<RuntimeWorkerClient, ProtectedRootError> {
     let generation = runtime.allocate_runtime_worker_generation()?;
     Ok(RuntimeWorkerClient::adjacent_to_root(root_executable, data_directory, generation).await?)
+}
+
+/// Evidence that Root reaped one idle Runtime generation before authenticating its replacement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RuntimeWorkerReplacementReceipt {
+    pub previous_generation: u64,
+    pub replacement_generation: u64,
+    pub reason: RuntimeWorkerReplacementReason,
+}
+
+/// Replaces an exclusively held idle worker when its process, channel, or session is unusable.
+/// The prior exact child is reaped before Root allocates and launches the next durable generation.
+///
+/// # Errors
+/// Returns an error when health inspection, exact-child reaping, generation allocation, launch,
+/// or authentication fails. A failed replacement leaves the slot empty so stale work cannot run.
+pub async fn replace_idle_runtime_worker_if_needed(
+    runtime: &AppRuntime,
+    root_executable: impl AsRef<Path>,
+    data_directory: impl AsRef<Path>,
+    worker: &mut Option<RuntimeWorkerClient>,
+    now: chrono::DateTime<Utc>,
+) -> Result<Option<RuntimeWorkerReplacementReceipt>, ProtectedRootError> {
+    let reason = match worker.as_mut() {
+        None => return Ok(None),
+        Some(client) => match client.replacement_reason(now) {
+            Ok(Some(reason)) => reason,
+            Ok(None) => return Ok(None),
+            Err(error) => {
+                if let Some(mut suspect) = worker.take() {
+                    let _ = suspect.terminate().await;
+                }
+                return Err(error.into());
+            }
+        },
+    };
+    let mut previous = worker.take().ok_or(RuntimeWorkerClientError::Unavailable)?;
+    let previous_generation = previous.worker_generation();
+    previous.terminate().await?;
+    let replacement = launch_runtime_worker(runtime, root_executable, data_directory).await?;
+    let replacement_generation = replacement.worker_generation();
+    *worker = Some(replacement);
+    Ok(Some(RuntimeWorkerReplacementReceipt {
+        previous_generation,
+        replacement_generation,
+        reason,
+    }))
 }
 
 /// Persists exact Runtime intent before dispatch, sends it only to the authenticated generation,
@@ -880,6 +929,81 @@ fn start_filesystem_reconciliation_worker(runtime: Arc<AppRuntime>) -> Option<Jo
     }))
 }
 
+const RUNTIME_WORKER_HEALTH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+
+struct RuntimeWorkerSupervisor {
+    shutdown: oneshot::Sender<()>,
+    task: JoinHandle<()>,
+}
+
+impl RuntimeWorkerSupervisor {
+    fn start(
+        runtime: Arc<AppRuntime>,
+        root_executable: PathBuf,
+        data_directory: PathBuf,
+        worker: RuntimeWorkerClient,
+    ) -> Self {
+        let (shutdown, mut shutdown_requested) = oneshot::channel();
+        let task = tokio::spawn(async move {
+            let mut worker = Some(worker);
+            let mut interval = tokio::time::interval(RUNTIME_WORKER_HEALTH_INTERVAL);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tokio::select! {
+                    _ = &mut shutdown_requested => break,
+                    _ = interval.tick() => {
+                        if worker.is_none() {
+                            match launch_runtime_worker(&runtime, &root_executable, &data_directory).await {
+                                Ok(replacement) => {
+                                    info!(
+                                        generation = replacement.worker_generation(),
+                                        process_id = replacement.hello().process_id,
+                                        "restored authenticated idle cognition Runtime worker"
+                                    );
+                                    worker = Some(replacement);
+                                }
+                                Err(error) => warn!(%error, "idle cognition Runtime worker remains unavailable"),
+                            }
+                            continue;
+                        }
+                        match replace_idle_runtime_worker_if_needed(
+                            &runtime,
+                            &root_executable,
+                            &data_directory,
+                            &mut worker,
+                            Utc::now(),
+                        )
+                        .await
+                        {
+                            Ok(Some(receipt)) => info!(
+                                previous_generation = receipt.previous_generation,
+                                replacement_generation = receipt.replacement_generation,
+                                reason = ?receipt.reason,
+                                "replaced idle cognition Runtime worker"
+                            ),
+                            Ok(None) => {}
+                            Err(error) => warn!(%error, "could not replace idle cognition Runtime worker"),
+                        }
+                    }
+                }
+            }
+            if let Some(worker) = worker
+                && let Err(error) = worker.shutdown().await
+            {
+                warn!(%error, "Runtime worker required forced cleanup during Root shutdown");
+            }
+        });
+        Self { shutdown, task }
+    }
+
+    async fn shutdown(self) {
+        let _ = self.shutdown.send(());
+        if let Err(error) = self.task.await {
+            warn!(%error, "Runtime worker supervisor did not stop cleanly");
+        }
+    }
+}
+
 /// Runs the Root-owned compatibility API until shutdown.
 ///
 /// # Errors
@@ -916,6 +1040,14 @@ pub async fn serve(config: AppConfig) -> Result<(), Box<dyn std::error::Error>> 
         );
         None
     };
+    let runtime_worker_supervisor = runtime_worker.map(|worker| {
+        RuntimeWorkerSupervisor::start(
+            runtime.clone(),
+            root_executable.clone(),
+            data_directory.clone(),
+            worker,
+        )
+    });
 
     // Internal role threads are recoverable implementation details, not user-owned tasks.
     match runtime.archive_owned_codex_threads_from_recents().await {
@@ -937,10 +1069,8 @@ pub async fn serve(config: AppConfig) -> Result<(), Box<dyn std::error::Error>> 
         reconciliation.abort();
     }
     ipc.abort();
-    if let Some(worker) = runtime_worker
-        && let Err(error) = worker.shutdown().await
-    {
-        warn!(%error, "Runtime worker required forced cleanup during Root shutdown");
+    if let Some(supervisor) = runtime_worker_supervisor {
+        supervisor.shutdown().await;
     }
     drop(session_guard);
     api_result?;

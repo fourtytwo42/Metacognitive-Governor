@@ -20,7 +20,10 @@ use mcg_platform::{
     LocalIpcStream, RuntimeWorkerListener, RuntimeWorkerSession, create_runtime_worker_session,
     read_canonical_frame, runtime_worker_executable_hash, write_canonical_frame,
 };
-use mcg_protected_root::{RuntimeWorkerClient, execute_runtime_invocation, launch_runtime_worker};
+use mcg_protected_root::{
+    RuntimeWorkerClient, RuntimeWorkerReplacementReason, execute_runtime_invocation,
+    launch_runtime_worker, replace_idle_runtime_worker_if_needed,
+};
 use mcg_runtime::AppRuntime;
 use mcg_storage::{SqliteEventStore, task_contract_content_hash};
 use tempfile::TempDir;
@@ -754,6 +757,113 @@ async fn protected_root_commits_real_work_verify_completion_certificate() {
             .state,
         mcg_contracts::ModelRunState::Completed
     );
+}
+
+#[tokio::test]
+async fn protected_root_replaces_dead_and_expired_idle_generations() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = AppConfig {
+        data_directory: directory.path().join("replacement-profile"),
+        ..AppConfig::default()
+    };
+    std::fs::create_dir_all(&config.data_directory).unwrap();
+    let runtime = AppRuntime::open(config).unwrap();
+    let executable = env!("CARGO_BIN_EXE_mcg-runtime-worker");
+    let mut worker = Some(
+        launch_runtime_worker(&runtime, executable, directory.path())
+            .await
+            .unwrap(),
+    );
+    let stale_hello = worker.as_ref().unwrap().hello().clone();
+    assert!(
+        replace_idle_runtime_worker_if_needed(
+            &runtime,
+            executable,
+            directory.path(),
+            &mut worker,
+            Utc::now(),
+        )
+        .await
+        .unwrap()
+        .is_none()
+    );
+    assert_eq!(worker.as_ref().unwrap().worker_generation(), 1);
+    worker.as_mut().unwrap().terminate().await.unwrap();
+
+    let dead_replacement = replace_idle_runtime_worker_if_needed(
+        &runtime,
+        executable,
+        directory.path(),
+        &mut worker,
+        Utc::now(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(dead_replacement.previous_generation, 1);
+    assert_eq!(dead_replacement.replacement_generation, 2);
+    assert_eq!(
+        dead_replacement.reason,
+        RuntimeWorkerReplacementReason::Unusable
+    );
+    assert_eq!(worker.as_ref().unwrap().worker_generation(), 2);
+
+    let stale_input = VersionedPayload::canonical_v1(
+        StableTypeId::parse("test.work_input.v1").unwrap(),
+        &serde_json::json!({"task": "stale-generation-must-not-run"}),
+    )
+    .unwrap();
+    let stale_request = invocation_request(&stale_hello, 1, InvocationRole::Work, stale_input);
+    assert!(
+        execute_runtime_invocation(
+            &runtime,
+            worker.as_mut().unwrap(),
+            &stale_request,
+            Utc::now(),
+        )
+        .await
+        .is_err()
+    );
+    assert!(
+        runtime
+            .runtime_invocation(stale_request.invocation_manifest.id, 10)
+            .unwrap()
+            .is_none()
+    );
+
+    worker.take().unwrap().shutdown().await.unwrap();
+    let expiring_generation = runtime.allocate_runtime_worker_generation().unwrap();
+    assert_eq!(expiring_generation, 3);
+    worker = Some(
+        RuntimeWorkerClient::launch(
+            executable,
+            directory.path(),
+            expiring_generation,
+            std::time::Duration::from_secs(5),
+            std::time::Duration::from_secs(5),
+            std::time::Duration::from_secs(1),
+        )
+        .await
+        .unwrap(),
+    );
+    let expired_replacement = replace_idle_runtime_worker_if_needed(
+        &runtime,
+        executable,
+        directory.path(),
+        &mut worker,
+        Utc::now() + Duration::seconds(2),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(expired_replacement.previous_generation, 3);
+    assert_eq!(expired_replacement.replacement_generation, 4);
+    assert_eq!(
+        expired_replacement.reason,
+        RuntimeWorkerReplacementReason::SessionExpired
+    );
+    assert_eq!(worker.as_ref().unwrap().worker_generation(), 4);
+    worker.take().unwrap().shutdown().await.unwrap();
 }
 
 #[tokio::test]

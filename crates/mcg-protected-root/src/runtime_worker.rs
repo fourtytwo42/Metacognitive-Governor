@@ -50,6 +50,17 @@ pub enum RuntimeWorkerClientError {
     InvalidResponse,
 }
 
+/// Root-observed reason that an idle Runtime generation must be replaced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeWorkerReplacementReason {
+    /// A prior protocol, transport, or identity failure poisoned this generation.
+    Unusable,
+    /// The authenticated child exited and can no longer accept work.
+    Exited,
+    /// The launch capability and authenticated session reached their fixed expiry.
+    SessionExpired,
+}
+
 /// One authenticated Root-owned Runtime process generation.
 pub struct RuntimeWorkerClient {
     child: Child,
@@ -188,6 +199,35 @@ impl RuntimeWorkerClient {
         self.session.worker_generation
     }
 
+    /// Determines whether this exclusively held, idle generation must be replaced.
+    ///
+    /// Root must call this only while no invocation is using the client. An expired or poisoned
+    /// generation is never probed over IPC, and an exited child is observed through `try_wait`.
+    ///
+    /// # Errors
+    /// Returns an error when the exact child process state cannot be inspected.
+    pub fn replacement_reason(
+        &mut self,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<Option<RuntimeWorkerReplacementReason>, RuntimeWorkerClientError> {
+        if !self.usable {
+            return Ok(Some(RuntimeWorkerReplacementReason::Unusable));
+        }
+        if now >= self.session.expires_at {
+            return Ok(Some(RuntimeWorkerReplacementReason::SessionExpired));
+        }
+        if self
+            .child
+            .try_wait()
+            .map_err(RuntimeWorkerClientError::Launch)?
+            .is_some()
+        {
+            self.usable = false;
+            return Ok(Some(RuntimeWorkerReplacementReason::Exited));
+        }
+        Ok(None)
+    }
+
     /// Dispatches one already-persisted invocation and returns only an authenticated, exactly
     /// correlated proposal from this process generation.
     ///
@@ -272,12 +312,24 @@ impl RuntimeWorkerClient {
     /// # Errors
     /// Returns an error when shutdown is not acknowledged or the child cannot be reaped.
     pub async fn shutdown(mut self) -> Result<(), RuntimeWorkerClientError> {
-        self.control(RUNTIME_WORKER_SHUTDOWN_MESSAGE_TYPE).await?;
-        timeout(self.request_timeout, self.child.wait())
-            .await
-            .map_err(|_| RuntimeWorkerClientError::Timeout)?
-            .map_err(RuntimeWorkerClientError::Launch)?;
-        Ok(())
+        if let Err(error) = self.control(RUNTIME_WORKER_SHUTDOWN_MESSAGE_TYPE).await {
+            let _ = self.terminate().await;
+            return Err(error);
+        }
+        match timeout(self.request_timeout, self.child.wait()).await {
+            Ok(Ok(_)) => {
+                self.usable = false;
+                Ok(())
+            }
+            Ok(Err(error)) => {
+                let _ = self.terminate().await;
+                Err(RuntimeWorkerClientError::Launch(error))
+            }
+            Err(_) => {
+                let _ = self.terminate().await;
+                Err(RuntimeWorkerClientError::Timeout)
+            }
+        }
     }
 
     async fn control(&mut self, message_type: &str) -> Result<(), RuntimeWorkerClientError> {
