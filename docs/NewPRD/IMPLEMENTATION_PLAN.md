@@ -1,6 +1,6 @@
 # MetaCog Cognitive Runtime Implementation Plan
 
-**Status:** Active staged delivery plan; Stages 0–4 have implementation checkpoints and Stage 5 is implemented through Root-owned real-process Work/Verify orchestration plus authenticated Root/CLI/Desktop reconstruction
+**Status:** Active staged delivery plan; Stages 0–4 have implementation checkpoints and Stage 5 is implemented through Root-owned real-process Work/Verify, authenticated Root/CLI/Desktop reconstruction, generation-safe service replacement, and active cancellation
 **Scope:** Alignment with the Adaptive Cognitive Agent Runtime PRD v1.4.2, Cognitive Runtime Implementation Contract v0.1, and Cognitive Runtime Experimental Protocol Specification v0.2
 **Product:** MetaCog desktop and `mcg` CLI on Windows, macOS, and Linux
 

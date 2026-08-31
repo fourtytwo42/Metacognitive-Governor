@@ -1,6 +1,6 @@
 # Stage 5 — Runtime Worker and Reconstructable Deterministic Cognition
 
-**Status:** Contract/persistence foundation (`83b5629`), separate authenticated worker (`522ba92`), Root-owned real-process orchestration/recovery (`4a2a905`), authenticated Root/CLI reconstruction (`bde06f0`), progressive Desktop reconstruction (`1e94efb`), and generation-safe idle service supervision (`dc54a88`) implemented; global-browser and release qualification remain open
+**Status:** Contract/persistence foundation (`83b5629`), separate authenticated worker (`522ba92`), Root-owned real-process orchestration/recovery (`4a2a905`), authenticated Root/CLI reconstruction (`bde06f0`), progressive Desktop reconstruction (`1e94efb`), generation-safe idle service supervision (`dc54a88`), and active invocation cancellation (`65f7073`) implemented; global-browser and release qualification remain open
 
 ## Delivered contract boundary
 
@@ -112,6 +112,21 @@ The real-process test proves a healthy generation does not churn, a dead/unusabl
 reaped before generation 2 starts, a generation-1 request is rejected before invocation intent is
 persisted, and expired generation 3 is reaped before generation 4 authenticates.
 
+## Active invocation cancellation checkpoint
+
+Checkpoint `65f7073` separates exact child-process control from the invocation stream so durable
+cancellation does not wait behind synchronous Work. Root validates the cancellation against the
+invocation's exact attempt revision, lease generation, and worker generation; commits
+`CancelRequested` first; kills and reaps that generation; and settles the dispatched model run
+`Cancelled`. Invalid cancellation identity force-stops the suspect worker and conservatively
+settles `OutcomeUnknown`. A late otherwise-valid result cannot persist a response because the
+workflow generation and model-run state are already fenced.
+
+The distinct delayed fixture is built only for integration tests and is absent from Tauri's exact
+production sidecar allowlist. Its real-process test proves bounded active cancellation, exact-child
+kill/reap, `Planned → Dispatched → Cancelled` history, no response artifact, late-result rejection,
+and full Protected Root reopen settling the effect-free workflow to `Cancelled`.
+
 ## Verification
 
 - `cargo test -p mcg-contracts` — 17/17 passed.
@@ -127,7 +142,7 @@ persisted, and expired generation 3 is reaped before generation 4 authenticates.
 - Packaging and documentation validators, PowerShell parsing, copied debug-sidecar qualification, formatting, and `git diff --check` — passed.
 - Root/CLI reconstruction checkpoint: contracts 17/17, platform 3/3, storage 110/110, Protected Root 12/12, CLI 69 unit plus 10 integration, whole-workspace all-target check, strict boundary Clippy, packaging/docs/format/diff gates — passed.
 - Desktop reconstruction checkpoint: TypeScript and production build passed; Desktop Vitest 124/124; serialized Playwright 31/31; Desktop Rust 20/20; whole-workspace all-target check; packaging/docs/format/diff gates — passed. Strict Desktop boundary Clippy passes with only its recorded legacy lint classes allowed; no finding names the invocation path.
-- Active-service supervision checkpoint: Runtime worker 12/12 and Protected Root 12/12; whole-workspace all-target check; strict worker Clippy and strict Root changed-boundary Clippy; packaging/docs/format/diff gates — passed.
+- Active cancellation/service supervision checkpoint: Runtime worker 13/13 and Protected Root 12/12; whole-workspace all-target check; strict worker Clippy and strict Root changed-boundary Clippy; packaging/docs/format/diff gates — passed.
 
 Strict whole-storage Clippy still reaches the repository’s documented pre-existing storage lint backlog. Rerunning the storage library with only those established lint classes allowed passes, and strict contracts Clippy is clean.
 
@@ -137,6 +152,6 @@ Stage 5 is not complete until all of the following are implemented and qualified
 
 1. Extend the canonical invocation list into the global workflow/agent browser and reconcile compatible `agents --remote` presentation.
 2. Connect real governed provider/model execution through Stage 6 permits without giving Runtime ambient network, storage, or secret authority.
-3. Run cancellation during active execution, packaged active-service replacement, combined workflow/Runtime crash injection, native GUI UAT, migration, and matched Windows/Linux/macOS package gates.
+3. Run packaged active cancellation/service replacement, broader combined workflow/Runtime crash injection, native GUI UAT, migration, and matched Windows/Linux/macOS package gates.
 
 No real provider is required for this stage’s correctness. Root-bound remote egress permits and secret handles begin in Stage 6.
