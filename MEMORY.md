@@ -2,6 +2,14 @@
 
 Durable project context lives here. Update this file whenever information should survive chat context compression or future agent handoff.
 
+### 2026-08-30 - Active Runtime cancellation concurrency gap
+
+- Context: Stage 5 still requires cancellation during active execution, so the production Root/worker protocol was audited before adding a superficial E2E.
+- Decision: Do not treat the existing `RuntimeWorkerClient::cancel()` acknowledgement as active interruption. The client holds one mutable stream throughout `invoke`, and the worker synchronously completes `execute_deterministic` before reading another frame; a cancel frame is therefore serialized behind Work. Active cancellation must durably fence the workflow/run, interrupt or kill/reap the exact generation through a control path that does not wait behind the invocation, settle the model run `Cancelled`, and reject every late result before response persistence.
+- Files: `crates/mcg-protected-root/src/runtime_worker.rs`, `apps/mcg-runtime-worker/src/lib.rs`; Stage 5 already keeps active-execution cancellation/crash E2E open.
+- Result: The limitation is verified from current production control flow. No completion claim was made and no narrow acknowledgement-only test was substituted.
+- Follow-up: Introduce an interruptible Root dispatch/supervision path and a distinct unpackaged delayed Runtime fixture, then prove cancel/kill/reap/late-result/reopen behavior with the real process boundary.
+
 ### 2026-08-30 - Generation-safe idle Runtime service replacement
 
 - Context: Root launched one authenticated Runtime generation for the service lifetime but did not inspect or replace it after process death, channel poisoning, or fixed session expiry.
