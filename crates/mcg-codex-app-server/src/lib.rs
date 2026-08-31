@@ -340,6 +340,25 @@ pub enum CodexProcessState {
     Failed,
 }
 
+/// Content-minimized projection of one Codex sub-agent thread returned by app-server.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodexRemoteAgentSummary {
+    pub thread_id: String,
+    pub session_id: String,
+    pub parent_thread_id: String,
+    pub nickname: Option<String>,
+    pub role: Option<String>,
+    pub status: String,
+    pub can_accept_direct_input: Option<bool>,
+    pub updated_at_unix: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodexRemoteAgentInventory {
+    pub agents: Vec<CodexRemoteAgentSummary>,
+    pub truncated: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CodexTransportConfig {
@@ -3201,6 +3220,38 @@ impl CodexAppServerHarness {
         Ok(matching)
     }
 
+    /// Lists a bounded, content-minimized inventory of sub-agent threads from this app-server.
+    ///
+    /// # Errors
+    /// Returns an error for an invalid bound, transport/protocol failure, or malformed identity.
+    pub async fn list_remote_agents(
+        &self,
+        limit: usize,
+    ) -> Result<CodexRemoteAgentInventory, CodexHarnessError> {
+        if limit == 0 || limit > 200 {
+            return Err(CodexHarnessError::InvalidRequest(
+                "remote agent inventory limit must be between 1 and 200".into(),
+            ));
+        }
+        let response = self
+            .request(
+                "thread/list",
+                json!({
+                    "limit": limit,
+                    "sortKey": "updated_at",
+                    "sortDirection": "desc",
+                    "sourceKinds": [
+                        "subAgent", "subAgentReview", "subAgentCompact",
+                        "subAgentThreadSpawn", "subAgentOther"
+                    ],
+                    "archived": false,
+                    "useStateDbOnly": true
+                }),
+            )
+            .await?;
+        decode_remote_agent_summaries(&response, limit)
+    }
+
     pub async fn unarchive_thread(&self, thread_id: &str) -> Result<(), CodexHarnessError> {
         self.request("thread/unarchive", json!({"threadId": thread_id}))
             .await
@@ -4358,6 +4409,74 @@ fn thread_ids_with_source(response: &Value, thread_source: &str) -> Vec<String> 
         .collect()
 }
 
+fn decode_remote_agent_summaries(
+    response: &Value,
+    limit: usize,
+) -> Result<CodexRemoteAgentInventory, CodexHarnessError> {
+    let rows = response
+        .get("data")
+        .and_then(Value::as_array)
+        .ok_or_else(|| CodexHarnessError::Protocol("thread/list omitted its data array".into()))?;
+    if rows.len() > limit {
+        return Err(CodexHarnessError::Protocol(
+            "thread/list exceeded the requested remote agent limit".into(),
+        ));
+    }
+    let agents = rows
+        .iter()
+        .map(
+            |thread| -> Result<CodexRemoteAgentSummary, CodexHarnessError> {
+                let bounded = |field: &'static str, optional: bool| {
+                    let value = thread.get(field).and_then(Value::as_str);
+                    if value.is_none() && optional {
+                        return Ok(None);
+                    }
+                    let value = value.ok_or_else(|| {
+                        CodexHarnessError::Protocol(format!("remote agent omitted {field}"))
+                    })?;
+                    if value.is_empty() || value.len() > 512 || value.chars().any(char::is_control)
+                    {
+                        return Err(CodexHarnessError::Protocol(format!(
+                            "remote agent {field} is invalid or oversized"
+                        )));
+                    }
+                    Ok(Some(value.to_owned()))
+                };
+                let status = thread
+                    .pointer("/status/type")
+                    .and_then(Value::as_str)
+                    .filter(|status| {
+                        matches!(*status, "notLoaded" | "idle" | "systemError" | "active")
+                    })
+                    .ok_or_else(|| {
+                        CodexHarnessError::Protocol("remote agent status is invalid".into())
+                    })?;
+                Ok(CodexRemoteAgentSummary {
+                    thread_id: bounded("id", false)?.expect("required remote agent id"),
+                    session_id: bounded("sessionId", false)?.expect("required remote session id"),
+                    parent_thread_id: bounded("parentThreadId", false)?
+                        .expect("required remote parent thread id"),
+                    nickname: bounded("agentNickname", true)?,
+                    role: bounded("agentRole", true)?,
+                    status: status.to_owned(),
+                    can_accept_direct_input: thread
+                        .get("canAcceptDirectInput")
+                        .and_then(Value::as_bool),
+                    updated_at_unix: thread.get("updatedAt").and_then(Value::as_i64).ok_or_else(
+                        || CodexHarnessError::Protocol("remote agent updatedAt is invalid".into()),
+                    )?,
+                })
+            },
+        )
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(CodexRemoteAgentInventory {
+        agents,
+        truncated: response
+            .get("nextCursor")
+            .is_some_and(|cursor| !cursor.is_null()),
+    })
+}
+
 fn thread_has_source(thread: &Value, thread_source: &str) -> bool {
     if thread.get("threadSource").and_then(Value::as_str) == Some(thread_source) {
         return true;
@@ -4404,6 +4523,36 @@ mod tests {
         assert!(ollama_responses_supported(Some("v0.13.4")));
         assert!(ollama_responses_supported(Some("0.14.0")));
         assert!(ollama_responses_supported(Some("development")));
+    }
+
+    #[test]
+    fn remote_agent_inventory_is_bounded_content_minimized_and_parent_bound() {
+        let response = json!({"data": [{
+            "id": "019remote-agent",
+            "sessionId": "019session",
+            "parentThreadId": "019parent",
+            "agentNickname": "Atlas",
+            "agentRole": "coder",
+            "status": {"type": "active", "activeFlags": []},
+            "canAcceptDirectInput": true,
+            "updatedAt": 1_788_000_000_i64,
+            "preview": "secret prompt material",
+            "cwd": "C:/private/repository"
+        }]});
+        let inventory = decode_remote_agent_summaries(&response, 1).unwrap();
+        assert_eq!(inventory.agents.len(), 1);
+        assert_eq!(inventory.agents[0].thread_id, "019remote-agent");
+        assert_eq!(inventory.agents[0].parent_thread_id, "019parent");
+        assert!(!inventory.truncated);
+        let serialized = serde_json::to_string(&inventory).unwrap();
+        assert!(!serialized.contains("secret prompt material"));
+        assert!(!serialized.contains("private/repository"));
+
+        let mut missing_parent = response;
+        missing_parent["data"][0]["parentThreadId"] = Value::Null;
+        assert!(decode_remote_agent_summaries(&missing_parent, 1).is_err());
+        assert!(decode_remote_agent_summaries(&json!({"data": []}), 0).is_ok());
+        assert!(decode_remote_agent_summaries(&json!({"data": [{}, {}]}), 1).is_err());
     }
 
     #[test]
@@ -4484,7 +4633,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn remote_websocket_initializes_and_serves_account_requests() {
+    async fn remote_websocket_initializes_and_serves_account_and_agent_inventory() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind websocket fixture");
@@ -4506,10 +4655,19 @@ mod tests {
                     .get("method")
                     .and_then(Value::as_str)
                     .unwrap_or_default();
-                let result = if method == "account/read" {
-                    json!({"account": null, "requiresOpenaiAuth": true})
-                } else {
-                    json!({})
+                let result = match method {
+                    "account/read" => json!({"account": null, "requiresOpenaiAuth": true}),
+                    "thread/list" => json!({"data": [{
+                        "id": "019remote-agent",
+                        "sessionId": "019session",
+                        "parentThreadId": "019parent",
+                        "agentNickname": "Atlas",
+                        "agentRole": "coder",
+                        "status": {"type": "idle"},
+                        "canAcceptDirectInput": false,
+                        "updatedAt": 1_788_000_000_i64
+                    }], "nextCursor": null}),
+                    _ => json!({}),
                 };
                 socket
                     .send(Message::Text(
@@ -4517,7 +4675,7 @@ mod tests {
                     ))
                     .await
                     .expect("send fixture response");
-                if method == "account/read" {
+                if method == "thread/list" {
                     break;
                 }
             }
@@ -4526,6 +4684,13 @@ mod tests {
         let harness = CodexAppServerHarness::new_with_transport("unused", transport.clone());
         let account = harness.account().await.expect("remote account request");
         assert!(!account.authenticated);
+        let inventory = harness
+            .list_remote_agents(200)
+            .await
+            .expect("remote agent inventory");
+        assert_eq!(inventory.agents.len(), 1);
+        assert_eq!(inventory.agents[0].parent_thread_id, "019parent");
+        assert!(!inventory.truncated);
         assert_eq!(harness.status().await.transport, transport);
         server.await.expect("fixture server completion");
     }

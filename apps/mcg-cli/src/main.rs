@@ -125,7 +125,7 @@ use mcg_tools::{
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use sha2::{Digest, Sha256};
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 use commands::{CommandContext, QueuePolicy, SLASH_COMMANDS, command_named};
 use exec_jsonl::{ExecJsonlEvent, ExecJsonlProjector};
@@ -3910,6 +3910,11 @@ async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
     let codex_profile = native_overrides.codex_profile;
     let strict_config = native_overrides.strict_config;
     let no_alt_screen = native_overrides.no_alt_screen;
+    let direct_remote_agents = matches!(
+        &cli.command,
+        CodexCompatCommand::Agents(args)
+            if cli.remote.remote.is_some() || args.remote.remote.is_some()
+    );
     let root_remote = cli.remote;
     for feature in cli.enable_features {
         feature_overrides.insert(feature, true);
@@ -3920,7 +3925,9 @@ async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
     let config = AppConfig::default();
     let host = cli.host.trim_end_matches('/').to_owned();
     let token_path = cli.token_file.unwrap_or_else(|| config.auth_token_path());
-    let token = if let Ok(token) = std::env::var("MCG_AUTH_TOKEN") {
+    let token = if direct_remote_agents {
+        String::new()
+    } else if let Ok(token) = std::env::var("MCG_AUTH_TOKEN") {
         token
     } else {
         std::fs::read_to_string(&token_path).map_err(|error| {
@@ -4912,12 +4919,74 @@ async fn run_codex_agents(
     no_alt_screen: bool,
     remote: Option<&InvocationRemote>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(remote) = remote {
+        let harness = mcg_codex_app_server::CodexAppServerHarness::new_with_invocation_remote(
+            "unused",
+            remote.endpoint.clone(),
+            remote.auth_token.clone().map(Zeroizing::new),
+        )?;
+        let inventory = harness.list_remote_agents(200).await?;
+        let agents = &inventory.agents;
+        if agents.is_empty() {
+            println!("No active remote Codex sub-agents found.");
+            return Ok(());
+        }
+        if !std::io::stdin().is_terminal() {
+            for agent in agents {
+                println!(
+                    "{} · {} · {} · parent {} · {}",
+                    agent.nickname.as_deref().unwrap_or("Codex sub-agent"),
+                    agent.role.as_deref().unwrap_or("unspecified role"),
+                    agent.status,
+                    agent.parent_thread_id,
+                    agent.thread_id
+                );
+            }
+            if inventory.truncated {
+                eprintln!("Remote agent inventory is truncated at the app-server page boundary.");
+            }
+            return Ok(());
+        }
+        let candidates = agents
+            .iter()
+            .map(|agent| SessionPickerCandidate {
+                id: agent.thread_id.clone(),
+                title: format!(
+                    "{} · {}",
+                    agent.nickname.as_deref().unwrap_or("Codex sub-agent"),
+                    agent.role.as_deref().unwrap_or("unspecified role")
+                ),
+                detail: format!("{} · parent {}", agent.status, agent.parent_thread_id),
+            })
+            .collect::<Vec<_>>();
+        let selected = select_agent_session(&candidates, no_alt_screen)?
+            .ok_or("remote agent selection was cancelled")?;
+        let agent = agents
+            .iter()
+            .find(|agent| agent.thread_id == selected)
+            .ok_or("selected remote agent is no longer available")?;
+        println!("Remote Codex sub-agent {}", agent.thread_id);
+        println!("  parent: {}", agent.parent_thread_id);
+        println!("  session: {}", agent.session_id);
+        println!("  status: {}", agent.status);
+        println!(
+            "  direct input: {}",
+            agent
+                .can_accept_direct_input
+                .map_or("unknown", |value| if value {
+                    "available"
+                } else {
+                    "unavailable"
+                })
+        );
+        if inventory.truncated {
+            println!("  inventory: truncated at the app-server page boundary");
+        }
+        return Ok(());
+    }
     let response: GlobalAgentSessionListResponse =
         get_authenticated(client, host, token, "/api/v1/agent-sessions?limit=200").await?;
     if !std::io::stdin().is_terminal() {
-        if remote.is_some() {
-            return Err("`mcg agents --remote` requires an interactive terminal".into());
-        }
         for session in &response.sessions {
             println!(
                 "{} · {} · {:?} · {:?} · {}",
