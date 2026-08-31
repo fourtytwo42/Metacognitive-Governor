@@ -261,7 +261,7 @@ Make consequential effects durable, authorized, observable, and safe under ambig
 - Simple shows understandable reconciliation messages.
 - Advanced shows action state and receipt.
 - Developer shows the complete action envelope, authorization result, effect classification, and reconciliation evidence.
-- CLI adds action inspection and reconciliation commands; consequential unknown effects are never blindly retried.
+- CLI adds action inspection and separately confirmed exact compensation initiation; consequential unknown effects are never blindly retried.
 
 ### Testing and exit gate
 
@@ -677,8 +677,8 @@ Do not claim consciousness, subjective identity, unrestricted self-improvement, 
 
 ## 10. Immediate Next Actions
 
-1. Expose separately authorized owner-facing compensation initiation; all current approval producers and hash-verified direct invocation focus are implemented at `f93c6d9`.
-2. Complete Stage 3 compatibility reattachment, child propagation, event streaming, wake triggers, and the remaining nonterminal crash/reassignment matrix.
+1. Complete Stage 3 compatibility reattachment, child propagation, event streaming, wake triggers, and the remaining nonterminal crash/reassignment matrix.
+2. Extend Stage 4's implemented owner-authorized compensation and real-child fault paths through packaged adversarial and native three-platform qualification.
 3. Finish Stage 5 combined workflow/invocation drill-down, direct remote-server inventory semantics where support is discoverable, and packaged cancellation/replacement qualification.
 4. Implement the Stage 6 Root-bound provider/tool/secret permit pipeline and prove one real end-to-end governed request.
 5. Build and pass the Stage 7 Protected Evaluator and Phase 0 integrity gate before beginning recursive improvement work.

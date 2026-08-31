@@ -1,8 +1,8 @@
 # Stage 4 — Governed Actions, Side Effects, and Reconciliation
 
-**Status:** Authoritative ledger, filesystem runner, Root dispatch, reconciliation, restart recovery, progressive Desktop inspection, every current approval producer, and hash-verified invocation focus implemented; release qualification and owner-authorized compensation initiation remain open
+**Status:** Authoritative ledger, filesystem runner, Root dispatch, reconciliation, restart recovery, owner-authorized compensation initiation, progressive Desktop inspection, every current approval producer, and hash-verified invocation focus implemented; packaged and native release qualification remain open
 
-**Last verified:** 2026-08-30
+**Last verified:** 2026-08-31
 
 ## Delivered foundation
 
@@ -92,6 +92,21 @@ for `mcg.invocation_manifest.v1`, reloads the exact invocation through Protected
 returned ID and full manifest hash against the immutable source reference, then marks only that
 invocation as focused. Missing, mismatched, changed-hash, and unsupported-type sources fail closed.
 
+Checkpoint `2e8c135` closes the local owner-compensation initiation gap without giving the CLI or Desktop
+an operation-building API. `mcg action compensate <id> --reason ... --confirm` and the
+Advanced/Developer action inspector send only the exact action/execution identity, current action
+and workflow revision/generation fences, an owner-visible reason, explicit confirmation, and a
+retry-stable idempotency key. Protected Root reloads the committed reversible original, derives the
+already-bound compensation operation, actor, capability root, reconciler, fresh five-minute
+authority, one-action budget, and causal source evidence, then executes only through the adjacent
+action runner. Changed owner intent under the same key, stale fences, substituted sources, and
+ineligible originals fail closed. An uncertain client retry returns the exact existing causal action
+and cannot redispatch an execution that has advanced beyond `Authorized`.
+
+Initiation ends at the runner's durable `EFFECT_CONFIRMED` observation. It does not let Root judge
+its own effect: the existing independent validation and commit boundary must still validate the
+compensation before its commit atomically marks the original `Compensated`.
+
 ## Authority boundary
 
 The runner is an effect executor, not an authorization service. Its request identifiers
@@ -109,17 +124,19 @@ deadline; this process boundary is defense in depth, not a filesystem or network
 
 ## Verification completed
 
-- Runner unit and separate-process tests: 17 passed (5 unit and 12 separate-process).
+- Runner unit and separate-process tests: 18 passed (6 unit and 12 separate-process).
+- Contracts suite: 18/18 passed, including bounded explicit owner confirmation.
 - Storage suite: 112/112 passed, including backward-compatible approval decoding, bounded and
   duplicate-resistant approval-origin validation, plus action origin decoding, bounds validation,
   canonical inspection, and replay-substitution rejection.
-- Protected Root tests: 11 passed (10 unit and 1 real-process integration), including
+- Protected Root tests: 14 passed (13 unit and 1 real-process integration), including
   confirmed/lost/pre-launch classification,
   occurred/not-occurred/ambiguous reconciliation, real-store reopen, and stranded dispatch
   restart recovery, authenticated bounded action list/show IPC, and four real-child failures
-  durably reconciled after a full Root reopen without redispatch.
-- CLI tests: 68 unit and 10 integration passed, including bounded `action list/show` parsing
-  and exact content-minimized human origin output.
+  durably reconciled after a full Root reopen without redispatch, plus Root-derived owner
+  compensation, authenticated typed IPC, stale/substituted intent rejection, and exact replay.
+- CLI tests: 70 unit and 10 integration passed, including bounded `action list/show` parsing,
+  exact content-minimized human origin output, and explicit `action compensate --confirm` parsing.
 - Contracts and platform strict all-target Clippy: passed.
 - Runtime tests: 110 passed with two explicit native Windows Sandbox package gates ignored,
   including stable approval source hashes, exact locators, optional agent binding, and
@@ -128,7 +145,7 @@ deadline; this process boundary is defense in depth, not a filesystem or network
 - Tools tests: 59 passed with the existing owner-visible handoff UAT ignored, including exact,
   stable, content-bound generic tool approval origins; strict all-target Clippy passed.
 - Protected Root migration-process test: passed.
-- Action runner tests: 18 passed (6 unit and 12 separate-process), including deterministic
+- Action runner process tests passed serialized 12/12, including deterministic
   pre-effect exit, post-effect lost response, timeout-before-effect, timeout-after-effect,
   direct-child and descendant reaping, rejection of work scheduled after the deadline,
   malformed responses, diagnostic output, bounded stdout/stderr overflow, and a leader that
@@ -137,10 +154,10 @@ deadline; this process boundary is defense in depth, not a filesystem or network
 - Strict client-only runner Clippy and dependency-shape checks: passed; `cap-fs-ext` and
   `cap-std` are absent from the Root-linked feature graph.
 - Desktop Rust tests: 20 passed.
-- Desktop component tests: 125/125 passed, including exact approval reload/navigation,
+- Desktop component tests: 126/126 passed, including exact approval reload/navigation,
   conversation/turn/agent/command/evidence presentation, fail-closed missing-conversation
   behavior, hash-verified invocation focus and changed-hash refusal, canonical action evidence,
-  and read-only accessibility semantics.
+  owner compensation request minimization/fencing, and read-only accessibility semantics.
 - Serialized browser E2E: 32/32 passed, including Simple → Advanced → Developer → Simple
   action-state preservation, exact approval-source traversal, scoped approval/action Axe scans,
   and keyboard-only navigation after the additional conversation projection.
@@ -150,6 +167,9 @@ deadline; this process boundary is defense in depth, not a filesystem or network
 - Windows PowerShell AST parsing and Git Bash syntax parsing for the modified package
   harnesses: passed.
 - Packaging, documentation, formatting, metadata, and diff checks: passed.
+- One resource-contended cold-build run exceeded the pre-existing one-second runner teardown
+  assertion. Its isolated rerun passed in 0.76 seconds and the full serialized process suite then
+  passed 12/12 in 5.2 seconds.
 
 The unit suite covers create/inspect/duplicate/compensate behavior, operation and hash-domain
 substitution, traversal rejection, changed-target preservation, empty-root qualification,
@@ -168,18 +188,16 @@ Stage 4 is not complete until all of the following pass:
 1. Extend the passing real-child plus Root-restart exit/lost-response/timeout/kill/reap matrix
    through packaged-process tests, including the existing changed-target ambiguity case,
    without blind redispatch.
-2. Expose separately authorized owner-facing compensation initiation. Every current production
-   approval producer now emits exact source bindings, and invocation bindings navigate only after
-   exact ID and full manifest-hash verification. Future producers must satisfy the same contract.
-   Bounded bidirectional compensation history and exact inspection are implemented. Add a Root
-   HTTP/API projection only if a non-local product consumer requires it.
-3. Resource budgets beyond bounded I/O/deadlines, network denial, case-collision/filesystem
+2. Resource budgets beyond bounded I/O/deadlines, network denial, case-collision/filesystem
    alias qualification, and platform sandbox capability reporting pass adversarial Windows,
    Linux, and macOS tests. Platform-stable lexical semantic-path policy and Windows Job
    Object/POSIX process-group confinement are implemented; native Linux/macOS and packaged
    path/process-tree qualification remain.
-4. Fresh Windows installer/portable, Linux Debian/AppImage, and macOS app/DMG builds pass
+3. Fresh Windows installer/portable, Linux Debian/AppImage, and macOS app/DMG builds pass
    native package UAT. The Debian sudo and macOS authenticated owner gates remain intact.
+
+Every future approval or action producer must satisfy the same immutable source contract. Add a
+Root HTTP/API compensation projection only if a governed non-local product consumer requires it.
 
 ## Release rule
 
