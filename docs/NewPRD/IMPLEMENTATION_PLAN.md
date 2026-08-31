@@ -677,7 +677,7 @@ Do not claim consciousness, subjective identity, unrestricted self-improvement, 
 
 ## 10. Immediate Next Actions
 
-1. Populate immutable action origins from every compatibility/runtime producer and implement exact approval, invocation, command, agent, conversation, and evidence focus.
+1. Extend the implemented Codex conversation approval origin and exact conversation/turn/agent/command/evidence navigation to every remaining compatibility/runtime producer, add direct invocation focus when bound, and expose separately authorized owner-facing compensation initiation.
 2. Complete Stage 3 compatibility reattachment, child propagation, event streaming, wake triggers, and the remaining nonterminal crash/reassignment matrix.
 3. Finish Stage 5 combined workflow/invocation drill-down, direct remote-server inventory semantics where support is discoverable, and packaged cancellation/replacement qualification.
 4. Implement the Stage 6 Root-bound provider/tool/secret permit pipeline and prove one real end-to-end governed request.

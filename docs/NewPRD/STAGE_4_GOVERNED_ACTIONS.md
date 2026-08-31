@@ -1,6 +1,6 @@
 # Stage 4 — Governed Actions, Side Effects, and Reconciliation
 
-**Status:** Authoritative ledger, filesystem runner, Root dispatch, reconciliation, restart recovery, and progressive Desktop inspection implemented; release qualification and exact source navigation remain open
+**Status:** Authoritative ledger, filesystem runner, Root dispatch, reconciliation, restart recovery, progressive Desktop inspection, and exact Codex approval-source navigation implemented; release qualification and remaining producer integration remain open
 
 **Last verified:** 2026-08-30
 
@@ -66,8 +66,21 @@ approval, agent, and evidence `SourceRef` values into immutable action intent. R
 empty, oversized, duplicate, malformed-hash, and idempotently substituted origins. Advanced
 shows the bound locators and short hashes and enables the originating-conversation control
 only when that exact conversation is already present; Developer raw evidence includes the
-complete binding. Compatibility producers and deeper invocation/command/approval focus are
-still required before approval-source navigation is complete.
+complete binding. Compatibility producers and deeper invocation/command/approval focus were
+still required before approval-source navigation was complete.
+
+The current approval-source checkpoint completes the first real producer and owner journey.
+Codex conversation approval requests now persist a backward-compatible optional
+`ApprovalOrigin` with canonical, domain-separated hashes for the exact conversation, turn,
+command request, matching conversation agent session when available, and command parameters as
+evidence. Storage rejects empty, malformed, oversized, or duplicate approval origins before
+persistence, while historical approvals without an origin continue to decode and serialize
+without invented provenance. Authenticated Tauri inspection reloads the exact approval identity;
+the Desktop opens only the exact originating conversation already present in the compatibility
+projection and resolves only matching agent-session and command-activity identities. Missing
+conversations, agents, or commands remain explicit and are never substituted with nearby state.
+Advanced and Developer action inspection can traverse the bound approval directly, and the same
+panel is available from a live conversation permission request.
 
 ## Authority boundary
 
@@ -87,8 +100,9 @@ deadline; this process boundary is defense in depth, not a filesystem or network
 ## Verification completed
 
 - Runner unit and separate-process tests: 17 passed (5 unit and 12 separate-process).
-- Storage action/recovery suite within 103 passing storage tests, including backward-compatible
-  origin decoding, bounds validation, canonical inspection, and replay-substitution rejection.
+- Storage suite: 112/112 passed, including backward-compatible approval decoding, bounded and
+  duplicate-resistant approval-origin validation, plus action origin decoding, bounds validation,
+  canonical inspection, and replay-substitution rejection.
 - Protected Root tests: 11 passed (10 unit and 1 real-process integration), including
   confirmed/lost/pre-launch classification,
   occurred/not-occurred/ambiguous reconciliation, real-store reopen, and stranded dispatch
@@ -97,7 +111,9 @@ deadline; this process boundary is defense in depth, not a filesystem or network
 - CLI tests: 68 unit and 10 integration passed, including bounded `action list/show` parsing
   and exact content-minimized human origin output.
 - Contracts and platform strict all-target Clippy: passed.
-- Runtime tests: 108 passed with two explicit native Windows Sandbox package gates ignored.
+- Runtime tests: 109 passed with two explicit native Windows Sandbox package gates ignored,
+  including stable approval source hashes, exact locators, optional agent binding, and
+  command/evidence hash changes after parameter mutation.
 - Protected Root migration-process test: passed.
 - Action runner tests: 18 passed (6 unit and 12 separate-process), including deterministic
   pre-effect exit, post-effect lost response, timeout-before-effect, timeout-after-effect,
@@ -108,12 +124,12 @@ deadline; this process boundary is defense in depth, not a filesystem or network
 - Strict client-only runner Clippy and dependency-shape checks: passed; `cap-fs-ext` and
   `cap-std` are absent from the Root-linked feature graph.
 - Desktop Rust tests: 20 passed.
-- Desktop component tests: 123 passed, including canonical action evidence and read-only
-  accessibility semantics.
-- Current governed-action component path: 113/113 passed, including exact causal compensation
-  traversal and materialization of a linked action outside the current summary window.
-- Serialized browser E2E: 30 passed, including Simple → Advanced → Developer → Simple
-  action-state preservation and an action-card Axe accessibility scan.
+- Desktop component tests: 115/115 passed, including exact approval reload/navigation,
+  conversation/turn/agent/command/evidence presentation, fail-closed missing-conversation
+  behavior, canonical action evidence, and read-only accessibility semantics.
+- Serialized browser E2E: 32/32 passed, including Simple → Advanced → Developer → Simple
+  action-state preservation, exact approval-source traversal, scoped approval/action Axe scans,
+  and keyboard-only navigation after the additional conversation projection.
 - Desktop TypeScript, production frontend build, and affected Tauri all-target check: passed.
 - Whole workspace all-target compile: passed.
 - Windows debug sidecar preparation and copied-sidecar qualification: passed.
@@ -138,15 +154,12 @@ Stage 4 is not complete until all of the following pass:
 1. Extend the passing real-child plus Root-restart exit/lost-response/timeout/kill/reap matrix
    through packaged-process tests, including the existing changed-target ambiguity case,
    without blind redispatch.
-2. Exact approval-to-source navigation reaches the originating conversation, agent,
-   command, approval, and evidence, and compensation controls become owner-visible.
-   Authenticated local IPC, CLI list/show, and progressive Desktop status/evidence are
-   implemented. Immutable source binding and fail-closed origin display are implemented;
-   compatibility producers plus exact invocation/command/approval focus remain. The current
-   Desktop source-workflow loader is not the complete navigation contract. Bounded bidirectional
-   compensation history and exact inspection are implemented; initiating a new separately
-   authorized compensation is not yet exposed. Add a Root HTTP/API projection only if a
-   non-local product consumer requires it.
+2. Extend the implemented Codex conversation approval producer and exact
+   conversation/turn/agent/command/evidence navigation to every remaining compatibility/runtime
+   producer, add direct invocation focus where an invocation binding exists, and expose
+   separately authorized owner-facing compensation initiation. Bounded bidirectional
+   compensation history and exact inspection are implemented. Add a Root HTTP/API projection
+   only if a non-local product consumer requires it.
 3. Resource budgets beyond bounded I/O/deadlines, network denial, case-collision/filesystem
    alias qualification, and platform sandbox capability reporting pass adversarial Windows,
    Linux, and macOS tests. Platform-stable lexical semantic-path policy and Windows Job
