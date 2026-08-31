@@ -61,11 +61,12 @@ use mcg_contracts::{
     ActionEnvelope, ActionExecution, ActionExecutionId, ActionId, ActionInspection, ActionReceipt,
     ActionSummary, ActionValidation, ArtifactRef, CompletionCertificate, CompletionVerdict,
     ContentHash, ContextManifest, CorrelationId, EffectOutcome, InvocationId, InvocationInspection,
-    InvocationSummary, ModelEgressPolicy, ModelInvocationPermit, ModelInvocationProposal, ModelRun,
-    ModelRunState, PermitId, ReconciliationJob, ReconciliationJobId, ReconciliationObservation,
-    RuntimeActorId, RuntimeIdentity, RuntimeInvocationRequest, RuntimeInvocationResult,
-    SecretHandleId, SourceRef, StableTypeId, WorkflowAttempt, WorkflowCancelRequest, WorkflowId,
-    WorkflowInspection, WorkflowInvocationActivity, WorkflowState, canonical_contract_hash,
+    InvocationManifest, InvocationSummary, ModelEgressPolicy, ModelInvocationPermit,
+    ModelInvocationProposal, ModelRun, ModelRunId, ModelRunState, ModelUsage, PermitId,
+    ReconciliationJob, ReconciliationJobId, ReconciliationObservation, RuntimeActorId,
+    RuntimeIdentity, RuntimeInvocationRequest, RuntimeInvocationResult, SecretHandleId, SourceRef,
+    StableTypeId, WorkflowAttempt, WorkflowCancelRequest, WorkflowId, WorkflowInspection,
+    WorkflowInvocationActivity, WorkflowState, canonical_contract_hash,
 };
 use mcg_domain::{
     AgentContextCheckpoint, AgentContextCheckpointCause, AgentContextCheckpointId,
@@ -3478,6 +3479,35 @@ fn current_runtime_model_run(
     Ok(current)
 }
 
+fn validate_active_model_authorization(
+    store: &SqliteEventStore,
+    invocation_id: InvocationId,
+    now: DateTime<Utc>,
+) -> Result<ModelEgressAuthorizationReceipt, StorageError> {
+    let authorization = store
+        .active_model_egress_authorization(invocation_id, now)?
+        .ok_or_else(|| {
+            StorageError::Conflict("model egress authorization does not exist".into())
+        })?;
+    Ok(authorization)
+}
+
+fn exact_model_run(
+    store: &SqliteEventStore,
+    invocation_id: InvocationId,
+    model_run_id: ModelRunId,
+) -> Result<mcg_storage::ModelRunRecord, StorageError> {
+    let record = store.model_run(model_run_id)?.ok_or_else(|| {
+        StorageError::Conflict("governed provider model run does not exist".into())
+    })?;
+    if record.run.invocation_id != invocation_id {
+        return Err(StorageError::Conflict(
+            "governed provider model-run invocation was substituted".into(),
+        ));
+    }
+    Ok(record)
+}
+
 impl AppRuntime {
     /// Opens the durable runtime, migrates storage, and rebuilds projections.
     ///
@@ -4069,6 +4099,20 @@ impl AppRuntime {
         Ok(self.store()?.model_egress_authorization(invocation_id)?)
     }
 
+    /// Loads one authorization only while its exact workflow lease and permit are active.
+    ///
+    /// # Errors
+    /// Returns a runtime error for stale or expired authority or unreadable durable evidence.
+    pub fn active_model_egress_authorization(
+        &self,
+        invocation_id: InvocationId,
+        now: DateTime<Utc>,
+    ) -> Result<Option<ModelEgressAuthorizationReceipt>, RuntimeError> {
+        Ok(self
+            .store()?
+            .active_model_egress_authorization(invocation_id, now)?)
+    }
+
     /// Resolves only the metadata behind one exact unexpired opaque secret handle.
     /// Raw credential resolution remains inside the authorized provider adapter.
     ///
@@ -4083,6 +4127,166 @@ impl AppRuntime {
         Ok(self
             .store()?
             .resolve_model_secret_handle_binding(permit_id, handle_id, now)?)
+    }
+
+    /// Persists one permit-bound provider invocation and its initial planned run before dispatch.
+    ///
+    /// # Errors
+    /// Returns a runtime error for missing, expired, stale, substituted, or malformed authority.
+    pub fn plan_governed_provider_invocation(
+        &self,
+        manifest: &InvocationManifest,
+        model_run_id: ModelRunId,
+        now: DateTime<Utc>,
+    ) -> Result<mcg_storage::ModelRunRecord, RuntimeError> {
+        let mut store = self.store()?;
+        validate_active_model_authorization(&store, manifest.id, now)?;
+        if manifest.egress_permit.is_none() || manifest.response_hash.is_some() {
+            return Err(StorageError::Conflict(
+                "governed provider invocation requires an active permit and no response".into(),
+            )
+            .into());
+        }
+        store.persist_invocation_manifest(manifest, now)?;
+        if let Some(existing) = store.model_run(model_run_id)? {
+            if existing.run.invocation_id != manifest.id || existing.run.role != manifest.role {
+                return Err(StorageError::Conflict(
+                    "governed provider planning replay substituted model-run lineage".into(),
+                )
+                .into());
+            }
+            return Ok(existing);
+        }
+        Ok(store.create_model_run(
+            &ModelRun {
+                id: model_run_id,
+                invocation_id: manifest.id,
+                role: manifest.role,
+                state: ModelRunState::Planned,
+                provider_request_id: None,
+                response_artifact: None,
+                usage: None,
+                started_at: now,
+                finished_at: None,
+            },
+            now,
+        )?)
+    }
+
+    /// Records dispatch of one exact permit-bound model run before invoking its gateway.
+    ///
+    /// # Errors
+    /// Returns a runtime error for stale authority, an expired permit, or invalid run state.
+    pub fn dispatch_governed_provider_invocation(
+        &self,
+        invocation_id: InvocationId,
+        model_run_id: ModelRunId,
+        provider_request_id: &str,
+        now: DateTime<Utc>,
+    ) -> Result<mcg_storage::ModelRunRecord, RuntimeError> {
+        let mut store = self.store()?;
+        validate_active_model_authorization(&store, invocation_id, now)?;
+        let current = exact_model_run(&store, invocation_id, model_run_id)?;
+        if current.run.state != ModelRunState::Planned {
+            return Err(StorageError::Conflict(
+                "only a planned governed provider invocation can be dispatched".into(),
+            )
+            .into());
+        }
+        let mut next = current.run;
+        next.state = ModelRunState::Dispatched;
+        next.provider_request_id = Some(provider_request_id.to_owned());
+        Ok(store.transition_model_run(&next, current.revision, now)?)
+    }
+
+    /// Accepts a provider result only while its exact permit and workflow lease remain current.
+    /// Raw response content is not persisted; only its content-addressed artifact metadata remains.
+    ///
+    /// # Errors
+    /// Returns a runtime error for stale authority, budget excess, substitution, or invalid state.
+    pub fn complete_governed_provider_invocation(
+        &self,
+        invocation_id: InvocationId,
+        model_run_id: ModelRunId,
+        response_artifact: ArtifactRef,
+        usage: ModelUsage,
+        now: DateTime<Utc>,
+    ) -> Result<mcg_storage::ModelRunRecord, RuntimeError> {
+        response_artifact
+            .validate()
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        let mut store = self.store()?;
+        let authorization = validate_active_model_authorization(&store, invocation_id, now)?;
+        if usage.input_tokens > authorization.permit.limits.max_input_tokens
+            || usage.output_tokens > authorization.permit.limits.max_output_tokens
+            || usage.cached_input_tokens > usage.input_tokens
+            || usage.reasoning_tokens > usage.output_tokens
+        {
+            return Err(StorageError::Conflict(
+                "provider result usage exceeds its exact permit budget".into(),
+            )
+            .into());
+        }
+        let current = exact_model_run(&store, invocation_id, model_run_id)?;
+        if current.run.state != ModelRunState::Dispatched {
+            return Err(StorageError::Conflict(
+                "only a dispatched governed provider invocation can complete".into(),
+            )
+            .into());
+        }
+        let mut next = current.run;
+        next.state = ModelRunState::Completed;
+        next.response_artifact = Some(response_artifact);
+        next.usage = Some(usage);
+        next.finished_at = Some(now);
+        Ok(store.transition_model_run(&next, current.revision, now)?)
+    }
+
+    /// Conservatively settles a dispatched provider run after an indeterminate gateway outcome.
+    /// This path intentionally does not require the now-stale lease because no result is accepted.
+    ///
+    /// # Errors
+    /// Returns a runtime error for substituted lineage, invalid state, or persistence failure.
+    pub fn settle_governed_provider_invocation_unknown(
+        &self,
+        invocation_id: InvocationId,
+        model_run_id: ModelRunId,
+        now: DateTime<Utc>,
+    ) -> Result<mcg_storage::ModelRunRecord, RuntimeError> {
+        let mut store = self.store()?;
+        let current = exact_model_run(&store, invocation_id, model_run_id)?;
+        if current.run.state != ModelRunState::Dispatched {
+            return Err(StorageError::Conflict(
+                "only a dispatched governed provider invocation can settle unknown".into(),
+            )
+            .into());
+        }
+        let mut next = current.run;
+        next.state = ModelRunState::OutcomeUnknown;
+        next.finished_at = Some(now);
+        Ok(store.transition_model_run(&next, current.revision, now)?)
+    }
+
+    /// Loads the current exact revision of one governed provider model run.
+    ///
+    /// # Errors
+    /// Returns a runtime error for unreadable or substituted durable lineage.
+    pub fn governed_provider_model_run(
+        &self,
+        invocation_id: InvocationId,
+        model_run_id: ModelRunId,
+    ) -> Result<Option<mcg_storage::ModelRunRecord>, RuntimeError> {
+        let store = self.store()?;
+        let Some(record) = store.model_run(model_run_id)? else {
+            return Ok(None);
+        };
+        if record.run.invocation_id != invocation_id {
+            return Err(StorageError::Conflict(
+                "governed provider model-run invocation was substituted".into(),
+            )
+            .into());
+        }
+        Ok(Some(record))
     }
 
     /// Persists complete reconstructable invocation intent and the initial planned model run

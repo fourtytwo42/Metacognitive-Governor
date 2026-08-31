@@ -6,7 +6,7 @@ use mcg_contracts::{
     MODEL_EGRESS_POLICY_HASH_DOMAIN, MODEL_INVOCATION_PERMIT_HASH_DOMAIN,
     MODEL_INVOCATION_PROPOSAL_HASH_DOMAIN, ModelDisclosureManifest, ModelEgressPolicy,
     ModelEgressRoute, ModelInvocationPermit, ModelInvocationProposal, PermitId, PolicyBinding,
-    SecretHandleId, SourceRef, StableTypeId, VersionedPayload, WorkflowState,
+    SecretHandleId, SourceRef, StableTypeId, VersionedPayload, WorkflowAttempt, WorkflowState,
     canonical_contract_hash, decode_canonical_cbor_v1,
 };
 use mcg_providers::{ModelDescriptor, ProviderAuthMode, ProviderConnection};
@@ -21,7 +21,7 @@ const PROVIDER_MODEL_TYPE: &str = "mcg.provider_model.v1";
 const PROVIDER_MODEL_HASH_DOMAIN: &str = "MetaCog.ProviderModel";
 const PROVIDER_DESTINATION_TYPE: &str = "mcg.provider_destination.v1";
 const PROVIDER_DESTINATION_HASH_DOMAIN: &str = "MetaCog.ProviderDestination";
-const MODEL_PERMIT_SOURCE_TYPE: &str = "mcg.model_invocation_permit.v1";
+const MODEL_PERMIT_SOURCE_TYPE: &str = "mcg.model_invocation_permit.v2";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -127,18 +127,8 @@ impl SqliteEventStore {
         let attempt = self
             .workflow_attempt(proposal.attempt_id)?
             .ok_or(StorageError::WorkflowAttemptNotFound(proposal.attempt_id))?;
-        if attempt.attempt_id != permit.attempt_id
-            || attempt.task_contract != proposal.task_contract
-            || attempt.task_contract != permit.task_contract
-            || !matches!(
-                attempt.state,
-                WorkflowState::Ready | WorkflowState::Running | WorkflowState::Verifying
-            )
-        {
-            return Err(StorageError::Conflict(
-                "model egress permit does not belong to an eligible active workflow attempt".into(),
-            ));
-        }
+        validate_active_attempt_binding(&attempt, proposal, permit)?;
+        validate_active_attempt_time(&attempt, authorized_at)?;
         let context =
             load_context_by_hash(&self.connection, &proposal.disclosure.context_manifest)?
                 .ok_or_else(|| {
@@ -237,6 +227,32 @@ impl SqliteEventStore {
         }))
     }
 
+    /// Loads an authorization only while its exact workflow lease and permit remain active.
+    ///
+    /// # Errors
+    /// Returns a storage error for stale identity, revision, generation, owner, lease, or time.
+    pub fn active_model_egress_authorization(
+        &self,
+        invocation_id: InvocationId,
+        now: DateTime<Utc>,
+    ) -> Result<Option<ModelEgressAuthorizationReceipt>, StorageError> {
+        let Some(authorization) = self.model_egress_authorization(invocation_id)? else {
+            return Ok(None);
+        };
+        let attempt = self
+            .workflow_attempt(authorization.proposal.attempt_id)?
+            .ok_or(StorageError::WorkflowAttemptNotFound(
+                authorization.proposal.attempt_id,
+            ))?;
+        validate_active_attempt_time(&attempt, now)?;
+        if now < authorization.permit.issued_at || now >= authorization.permit.expires_at {
+            return Err(StorageError::Conflict(
+                "model egress authorization is outside its active time window".into(),
+            ));
+        }
+        Ok(Some(authorization))
+    }
+
     /// Loads one opaque handle binding only when it belongs to the exact unexpired permit.
     ///
     /// # Errors
@@ -275,7 +291,7 @@ impl SqliteEventStore {
             StorageError::InvalidData("invalid model secret-handle invocation id".into())
         })?);
         let authorization = self
-            .model_egress_authorization(invocation_id)?
+            .active_model_egress_authorization(invocation_id, now)?
             .ok_or_else(|| {
                 StorageError::InvalidData("model secret-handle permit is missing".into())
             })?;
@@ -498,6 +514,10 @@ fn validate_proposal_permit_binding(
 ) -> Result<(), StorageError> {
     if permit.invocation_id != proposal.invocation_id
         || permit.attempt_id != proposal.attempt_id
+        || permit.attempt_revision != proposal.attempt_revision
+        || permit.lease_generation != proposal.lease_generation
+        || permit.runtime_actor != proposal.runtime_actor
+        || permit.runtime_identity != proposal.runtime_identity
         || permit.role != proposal.role
         || permit.task_contract != proposal.task_contract
         || permit.request_hash != proposal.request_hash
@@ -575,6 +595,10 @@ fn validate_loaded_authorization(
         &permit.policy,
         permit.issued_at,
     )?;
+    let attempt = store
+        .workflow_attempt(proposal.attempt_id)?
+        .ok_or(StorageError::WorkflowAttemptNotFound(proposal.attempt_id))?;
+    validate_active_attempt_binding(&attempt, proposal, permit)?;
     let context = load_context_by_hash(&store.connection, &proposal.disclosure.context_manifest)?
         .ok_or_else(|| {
         StorageError::InvalidData(
@@ -599,6 +623,57 @@ fn validate_loaded_authorization(
         .ok_or_else(|| StorageError::InvalidData("stored model egress model is missing".into()))?;
     validate_resolved_route(proposal, permit, &connection, model)?;
     validate_secret_handles(permit, secret_handles, &connection)
+}
+
+fn validate_active_attempt_binding(
+    attempt: &WorkflowAttempt,
+    proposal: &ModelInvocationProposal,
+    permit: &ModelInvocationPermit,
+) -> Result<(), StorageError> {
+    let role_matches_state = matches!(
+        (proposal.role, attempt.state),
+        (mcg_contracts::InvocationRole::Work, WorkflowState::Running)
+            | (
+                mcg_contracts::InvocationRole::Verify,
+                WorkflowState::Verifying
+            )
+    );
+    if attempt.attempt_id != proposal.attempt_id
+        || attempt.attempt_id != permit.attempt_id
+        || attempt.revision != proposal.attempt_revision
+        || attempt.revision != permit.attempt_revision
+        || attempt.lease_generation != proposal.lease_generation
+        || attempt.lease_generation != permit.lease_generation
+        || attempt.lease_owner != Some(proposal.runtime_actor)
+        || attempt.lease_owner != Some(permit.runtime_actor)
+        || attempt.task_contract != proposal.task_contract
+        || attempt.task_contract != permit.task_contract
+        || !role_matches_state
+        || !matches!(
+            attempt.state,
+            WorkflowState::Running | WorkflowState::Verifying
+        )
+    {
+        return Err(StorageError::Conflict(
+            "model egress permit does not belong to the exact active workflow lease".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_active_attempt_time(
+    attempt: &WorkflowAttempt,
+    now: DateTime<Utc>,
+) -> Result<(), StorageError> {
+    if attempt
+        .lease_expires_at
+        .is_none_or(|expires_at| expires_at <= now)
+    {
+        return Err(StorageError::Conflict(
+            "model egress authorization workflow lease is expired".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn model_egress_policy_from_binding(
@@ -837,8 +912,8 @@ mod tests {
         ContractClause, CorrelationId, HashAlgorithm, InvocationManifest, InvocationRole,
         ModelBudget, ModelDataClassification, ModelDestinationClass, ModelEgressRoute,
         ModelInvocationPermit, ModelInvocationProposal, PROTOCOL_V1, PolicyBinding, RetryPolicy,
-        RuntimeIdentity, RuntimeInstanceId, TaskContract, TaskContractId, TaskContractStatus,
-        VersionedRef, WorkflowAttempt, WorkflowId, WorkflowState,
+        RuntimeActorId, RuntimeIdentity, RuntimeInstanceId, TaskContract, TaskContractId,
+        TaskContractStatus, VersionedRef, WorkflowAttempt, WorkflowId, WorkflowState,
     };
     use mcg_providers::{
         CONTRACT_VERSION, ModelCapabilities, ProviderAuthMode, ProviderConnection, ProviderKind,
@@ -963,6 +1038,25 @@ mod tests {
         store
             .create_workflow(&contract, &attempt, CorrelationId::new(), now())
             .unwrap();
+        let runtime_actor = RuntimeActorId::new();
+        let attempt = store
+            .claim_workflow_attempt(
+                attempt.attempt_id,
+                attempt.revision,
+                attempt.lease_generation,
+                runtime_actor,
+                now() + Duration::minutes(10),
+                CorrelationId::new(),
+                "egress-workflow-claim-1",
+                now(),
+            )
+            .unwrap();
+        let runtime_identity = RuntimeIdentity {
+            instance_id: RuntimeInstanceId::new(),
+            build_hash: hash("runtime-build"),
+            protocol_version: PROTOCOL_V1,
+            started_at: now(),
+        };
         let context = ContextManifest {
             id: ContextManifestId::new(),
             attempt_id: attempt.attempt_id,
@@ -1019,6 +1113,10 @@ mod tests {
         let proposal = ModelInvocationProposal {
             invocation_id: InvocationId::new(),
             attempt_id: attempt.attempt_id,
+            attempt_revision: attempt.revision,
+            lease_generation: attempt.lease_generation,
+            runtime_actor,
+            runtime_identity: runtime_identity.clone(),
             role: InvocationRole::Work,
             task_contract: attempt.task_contract.clone(),
             request_artifact: ArtifactRef {
@@ -1059,6 +1157,10 @@ mod tests {
             id: permit_id,
             invocation_id: proposal.invocation_id,
             attempt_id: proposal.attempt_id,
+            attempt_revision: proposal.attempt_revision,
+            lease_generation: proposal.lease_generation,
+            runtime_actor: proposal.runtime_actor,
+            runtime_identity: proposal.runtime_identity.clone(),
             role: proposal.role,
             task_contract: proposal.task_contract.clone(),
             proposal_hash,
@@ -1117,18 +1219,13 @@ mod tests {
         let encoded = serde_json::to_string(&receipt).unwrap();
         assert!(!encoded.contains("api-key"));
 
-        let runtime_build = hash("runtime-build");
+        let runtime_build = runtime_identity.build_hash.clone();
         let manifest = InvocationManifest {
             id: proposal.invocation_id,
             role: InvocationRole::Work,
             attempt_id: attempt.attempt_id,
             task_contract: attempt.task_contract.clone(),
-            runtime_identity: RuntimeIdentity {
-                instance_id: RuntimeInstanceId::new(),
-                build_hash: runtime_build.clone(),
-                protocol_version: PROTOCOL_V1,
-                started_at: now(),
-            },
+            runtime_identity,
             cognitive_configuration: hash("cognitive-configuration"),
             role_manifest: hash("work-role"),
             prompt_bundle: hash("prompt-bundle"),
@@ -1160,7 +1257,7 @@ mod tests {
                 .is_err()
         );
 
-        let mut substituted = proposal;
+        let mut substituted = proposal.clone();
         substituted.route.model_id = "other-model".into();
         assert!(
             store
@@ -1172,6 +1269,55 @@ mod tests {
                     now(),
                 )
                 .is_err()
+        );
+
+        let mut wrong_role_proposal = proposal.clone();
+        wrong_role_proposal.invocation_id = InvocationId::new();
+        wrong_role_proposal.role = InvocationRole::Verify;
+        let mut wrong_role_permit = permit.clone();
+        wrong_role_permit.id = PermitId::new();
+        wrong_role_permit.invocation_id = wrong_role_proposal.invocation_id;
+        wrong_role_permit.role = InvocationRole::Verify;
+        wrong_role_permit.proposal_hash = model_proposal_hash(&wrong_role_proposal).unwrap();
+        let wrong_role_handle = SecretHandleId::new();
+        wrong_role_permit.secret_handles = vec![wrong_role_handle];
+        let wrong_role_binding = ModelSecretHandleBinding {
+            handle_id: wrong_role_handle,
+            permit_id: wrong_role_permit.id,
+            connection_id: connection.id.clone(),
+            slot: ModelSecretSlot::Primary,
+            expires_at: wrong_role_permit.expires_at,
+        };
+        assert!(
+            store
+                .authorize_model_egress(
+                    &wrong_role_proposal,
+                    &policy,
+                    &wrong_role_permit,
+                    &[wrong_role_binding],
+                    now(),
+                )
+                .is_err(),
+            "a Verify permit must not be issued for a Running workflow"
+        );
+
+        store
+            .heartbeat_workflow_attempt(
+                attempt.attempt_id,
+                attempt.revision,
+                attempt.lease_generation,
+                runtime_actor,
+                now() + Duration::minutes(11),
+                CorrelationId::new(),
+                "egress-workflow-heartbeat-1",
+                now() + Duration::seconds(2),
+            )
+            .unwrap();
+        assert!(
+            store
+                .model_egress_authorization(receipt.proposal.invocation_id)
+                .is_err(),
+            "a workflow revision change must invalidate the old permit"
         );
     }
 }

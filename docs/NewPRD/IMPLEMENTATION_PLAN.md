@@ -1,6 +1,6 @@
 # MetaCog Cognitive Runtime Implementation Plan
 
-**Status:** Active staged delivery plan; Stages 0–4 have implementation checkpoints and Stage 5 is implemented through Root-owned real-process Work/Verify, authenticated Root/CLI/Desktop reconstruction, generation-safe service replacement, active cancellation, governed local/global agent browsing, canonical workflow/current-attempt invocation drill-down, and direct remote Codex sub-agent inventory
+**Status:** Active staged delivery plan; Stages 0–4 have implementation checkpoints, Stage 5 is implemented through reconstructable real-process Work/Verify and governed agent inspection, and Stage 6 now includes exact Runtime/lease-bound model-egress permits plus deterministic Root-governed provider dispatch/result fencing
 **Scope:** Alignment with the Adaptive Cognitive Agent Runtime PRD v1.4.2, Cognitive Runtime Implementation Contract v0.1, and Cognitive Runtime Experimental Protocol Specification v0.2
 **Product:** MetaCog desktop and `mcg` CLI on Windows, macOS, and Linux
 
@@ -680,7 +680,7 @@ Do not claim consciousness, subjective identity, unrestricted self-improvement, 
 1. Complete Stage 3 compatibility reattachment, child propagation, event streaming, wake triggers, and the remaining nonterminal crash/reassignment matrix.
 2. Extend Stage 4's implemented owner-authorized compensation and real-child fault paths through packaged adversarial and native three-platform qualification.
 3. Finish Stage 5 packaged remote-inventory, cancellation, replacement, crash-injection, and native qualification; direct remote Codex sub-agent inventory and canonical workflow/current-attempt invocation drill-down are implemented.
-4. Continue the implemented Stage 6 model-egress permit kernel with a deterministic provider gateway, then one real provider route, governed tool/capability permits, redaction/security E2E, and cross-platform product qualification.
+4. Move Stage 6's implemented deterministic in-process provider gateway behind an isolated adapter, resolve/zeroize opaque credentials there, route one real provider, then add retry/stream/cancellation, governed tool/capability permits, redaction/security E2E, and cross-platform product qualification.
 5. Build and pass the Stage 7 Protected Evaluator and Phase 0 integrity gate before beginning recursive improvement work.
 6. Continue through Stages 8–13 only behind the recorded scientific and production gates, with matched Windows/macOS/Linux package and native UAT evidence at every affected boundary.
 

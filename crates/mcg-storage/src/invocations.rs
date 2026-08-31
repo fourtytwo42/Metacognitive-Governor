@@ -310,6 +310,7 @@ impl SqliteEventStore {
             if authorization.permit_ref != *permit_ref
                 || authorization.permit.invocation_id != manifest.id
                 || authorization.permit.attempt_id != manifest.attempt_id
+                || authorization.permit.runtime_identity != manifest.runtime_identity
                 || authorization.permit.role != manifest.role
                 || authorization.permit.task_contract != manifest.task_contract
                 || authorization.permit.request_hash != manifest.request_hash
@@ -419,6 +420,17 @@ impl SqliteEventStore {
         )?;
         transaction.commit()?;
         Ok(record)
+    }
+
+    /// Loads the current authoritative revision for one exact model-run identity.
+    ///
+    /// # Errors
+    /// Returns a storage error when durable evidence cannot be decoded or validated.
+    pub fn model_run(
+        &self,
+        model_run_id: ModelRunId,
+    ) -> Result<Option<ModelRunRecord>, StorageError> {
+        load_model_run_head(&self.connection, model_run_id)
     }
 
     /// Appends one generation-fenced model-run state revision and advances its head with CAS.

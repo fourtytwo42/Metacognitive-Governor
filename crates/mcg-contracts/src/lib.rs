@@ -488,6 +488,17 @@ pub struct RuntimeIdentity {
     pub started_at: DateTime<Utc>,
 }
 
+impl RuntimeIdentity {
+    /// Validates the negotiated protocol and exact executable build identity.
+    ///
+    /// # Errors
+    /// Returns a contract error for an unsupported protocol or malformed build hash.
+    pub fn validate(&self) -> Result<(), ContractError> {
+        negotiate_protocol(&[self.protocol_version])?;
+        self.build_hash.validate()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VersionedRef<T> {
     pub id: T,
@@ -1262,6 +1273,10 @@ impl ModelEgressRoute {
 pub struct ModelInvocationProposal {
     pub invocation_id: InvocationId,
     pub attempt_id: AttemptId,
+    pub attempt_revision: u64,
+    pub lease_generation: u64,
+    pub runtime_actor: RuntimeActorId,
+    pub runtime_identity: RuntimeIdentity,
     pub role: InvocationRole,
     pub task_contract: VersionedRef<TaskContractId>,
     pub request_artifact: ArtifactRef,
@@ -1274,14 +1289,20 @@ pub struct ModelInvocationProposal {
 }
 
 impl ModelInvocationProposal {
-    pub const SCHEMA_VERSION: u32 = 1;
-    pub const TYPE_ID: &'static str = "mcg.model_invocation_proposal.v1";
+    pub const SCHEMA_VERSION: u32 = 2;
+    pub const TYPE_ID: &'static str = "mcg.model_invocation_proposal.v2";
 
     /// Validates immutable request, disclosure, route, budget, and deadline shape.
     ///
     /// # Errors
     /// Returns a contract error for malformed or internally inconsistent evidence.
     pub fn validate(&self) -> Result<(), ContractError> {
+        if self.attempt_revision == 0 || self.lease_generation == 0 {
+            return Err(ContractError::InvalidContract(
+                "model proposal workflow fences must be nonzero",
+            ));
+        }
+        self.runtime_identity.validate()?;
         self.request_artifact.validate()?;
         if self.request_artifact.byte_length == 0 {
             return Err(ContractError::InvalidContract(
@@ -1371,6 +1392,10 @@ pub struct ModelInvocationPermit {
     pub id: PermitId,
     pub invocation_id: InvocationId,
     pub attempt_id: AttemptId,
+    pub attempt_revision: u64,
+    pub lease_generation: u64,
+    pub runtime_actor: RuntimeActorId,
+    pub runtime_identity: RuntimeIdentity,
     pub role: InvocationRole,
     pub task_contract: VersionedRef<TaskContractId>,
     pub proposal_hash: ContentHash,
@@ -1389,14 +1414,20 @@ pub struct ModelInvocationPermit {
 }
 
 impl ModelInvocationPermit {
-    pub const SCHEMA_VERSION: u32 = 1;
-    pub const TYPE_ID: &'static str = "mcg.model_invocation_permit.v1";
+    pub const SCHEMA_VERSION: u32 = 2;
+    pub const TYPE_ID: &'static str = "mcg.model_invocation_permit.v2";
 
     /// Validates a bounded, content-minimized Root permit.
     ///
     /// # Errors
     /// Returns a contract error for malformed hashes, sources, policy, time, or handles.
     pub fn validate(&self) -> Result<(), ContractError> {
+        if self.attempt_revision == 0 || self.lease_generation == 0 {
+            return Err(ContractError::InvalidContract(
+                "model invocation permit workflow fences must be nonzero",
+            ));
+        }
+        self.runtime_identity.validate()?;
         self.proposal_hash.validate()?;
         if self.task_contract.version == 0 {
             return Err(ContractError::InvalidContract(
@@ -3165,6 +3196,15 @@ mod tests {
         ModelInvocationProposal {
             invocation_id: InvocationId::new(),
             attempt_id: AttemptId::new(),
+            attempt_revision: 2,
+            lease_generation: 1,
+            runtime_actor: RuntimeActorId::new(),
+            runtime_identity: RuntimeIdentity {
+                instance_id: RuntimeInstanceId::new(),
+                build_hash: fixture_hash("model-runtime-build"),
+                protocol_version: PROTOCOL_V1,
+                started_at: fixture_time("2026-08-30T12:00:00Z"),
+            },
             role: InvocationRole::Work,
             task_contract: VersionedRef {
                 id: TaskContractId::new(),
@@ -3206,6 +3246,14 @@ mod tests {
         overscope.disclosure.approximate_input_tokens = 129;
         assert!(overscope.validate().is_err());
 
+        let mut unfenced = proposal.clone();
+        unfenced.lease_generation = 0;
+        assert!(unfenced.validate().is_err());
+
+        let mut unsupported_runtime = proposal.clone();
+        unsupported_runtime.runtime_identity.protocol_version = PROTOCOL_V1 + 1;
+        assert!(unsupported_runtime.validate().is_err());
+
         let route = fixture_model_egress_route();
         let policy = ModelEgressPolicy {
             allowed_routes: vec![route.clone()],
@@ -3233,6 +3281,10 @@ mod tests {
             id: PermitId::new(),
             invocation_id: proposal.invocation_id,
             attempt_id: proposal.attempt_id,
+            attempt_revision: proposal.attempt_revision,
+            lease_generation: proposal.lease_generation,
+            runtime_actor: proposal.runtime_actor,
+            runtime_identity: proposal.runtime_identity,
             role: proposal.role,
             task_contract: proposal.task_contract.clone(),
             proposal_hash: fixture_hash("model-proposal"),

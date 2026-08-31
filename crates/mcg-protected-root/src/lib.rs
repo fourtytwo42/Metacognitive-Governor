@@ -32,13 +32,13 @@ use mcg_action_runner::{
 use mcg_config::AppConfig;
 use mcg_contracts::{
     ActionCompensationReceipt, ActionEnvelope, ActionExecution, ActionExecutionId,
-    ActionExecutionState, ActionId, ActionOrigin, ActionReceipt, ActionReceiptId,
+    ActionExecutionState, ActionId, ActionOrigin, ActionReceipt, ActionReceiptId, ArtifactRef,
     AuthenticatedRpcRequest, ContentHash, ContextManifest, ContractError, CorrelationId,
-    EffectClass, EffectOutcome, HashAlgorithm, InvocationId, ModelDestinationClass,
-    ModelEgressPolicy, ModelInvocationPermit, ModelInvocationProposal,
-    OwnerActionCompensationRequest, PROTOCOL_V1, PermitId, PolicyBinding, ReconciliationJob,
-    ReconciliationJobId, ReconciliationObservation, RequestId, RootStatus, RpcEnvelope,
-    RuntimeActorId, RuntimeIdentity, RuntimeInstanceId, RuntimeInvocationRequest,
+    EffectClass, EffectOutcome, HashAlgorithm, InvocationId, InvocationManifest,
+    ModelDestinationClass, ModelEgressPolicy, ModelInvocationPermit, ModelInvocationProposal,
+    ModelRunId, ModelUsage, OwnerActionCompensationRequest, PROTOCOL_V1, PermitId, PolicyBinding,
+    ReconciliationJob, ReconciliationJobId, ReconciliationObservation, RequestId, RootStatus,
+    RpcEnvelope, RuntimeActorId, RuntimeIdentity, RuntimeInstanceId, RuntimeInvocationRequest,
     RuntimeInvocationResult, SecretHandleId, SourceRef, StableTypeId, VersionedPayload,
     WorkflowAttempt, WorkflowCancelRequest, WorkflowId, WorkflowState, canonical_contract_hash,
     decode_canonical_cbor_v1,
@@ -56,7 +56,10 @@ use mcg_platform::{
     ROOT_WORKFLOW_SHOW_REQUEST_TYPE, ROOT_WORKFLOW_SHOW_RESPONSE_TYPE, RootIpcSession,
     create_root_ipc_session, read_canonical_frame, remove_root_ipc_session, write_canonical_frame,
 };
-use mcg_providers::{ProviderAuthMode, ProviderConnection, ProviderKind};
+use mcg_providers::{
+    CONTRACT_VERSION, ModelRequest, ModelResponse, ProviderAuthMode, ProviderConnection,
+    ProviderError, ProviderKind,
+};
 use mcg_runtime::{AppRuntime, RuntimeError};
 use mcg_storage::{
     ModelEgressAuthorizationReceipt, ModelSecretHandleBinding, ModelSecretSlot,
@@ -97,6 +100,8 @@ pub enum ProtectedRootError {
     ActionRunnerClient(#[from] ActionRunnerClientError),
     #[error(transparent)]
     RuntimeWorker(#[from] RuntimeWorkerClientError),
+    #[error(transparent)]
+    Provider(#[from] ProviderError),
     #[error("authorized action execution was not found")]
     ActionNotFound,
     #[error("configured Root API address is invalid: {0}")]
@@ -132,6 +137,12 @@ pub struct RuntimeInvocationCancellationReceipt {
 
 /// Root-owned, content-minimized authorization for one exact governed provider request.
 pub type RuntimeModelEgressAuthorizationReceipt = ModelEgressAuthorizationReceipt;
+
+#[derive(Debug, Clone)]
+pub struct GovernedModelProviderDispatchReceipt {
+    pub response: ModelResponse,
+    pub completed_run: mcg_storage::ModelRunRecord,
+}
 
 #[derive(Debug, Clone)]
 pub enum RuntimeInvocationExecutionReceipt {
@@ -217,11 +228,19 @@ pub fn authorize_runtime_model_egress(
     runtime: &AppRuntime,
     context: &ContextManifest,
     proposal: &ModelInvocationProposal,
+    expected_runtime_identity: &RuntimeIdentity,
     policy: &ModelEgressPolicy,
     now: chrono::DateTime<Utc>,
 ) -> Result<RuntimeModelEgressAuthorizationReceipt, ProtectedRootError> {
     proposal.validate()?;
     policy.validate()?;
+    expected_runtime_identity.validate()?;
+    if proposal.runtime_identity != *expected_runtime_identity {
+        return Err(StorageError::Conflict(
+            "model proposal does not belong to the authenticated Runtime identity".into(),
+        )
+        .into());
+    }
     if context.attempt_id != proposal.attempt_id {
         return Err(StorageError::Conflict(
             "model proposal context belongs to a different workflow attempt".into(),
@@ -236,7 +255,9 @@ pub fn authorize_runtime_model_egress(
         .into());
     }
     let policy_binding = model_egress_policy_binding(policy)?;
-    if let Some(existing) = runtime.model_egress_authorization(proposal.invocation_id)? {
+    if let Some(existing) =
+        runtime.active_model_egress_authorization(proposal.invocation_id, now)?
+    {
         if existing.proposal != *proposal || existing.permit.policy != policy_binding {
             return Err(StorageError::Conflict(
                 "model egress replay substituted proposal or Root policy".into(),
@@ -289,6 +310,10 @@ pub fn authorize_runtime_model_egress(
         id: permit_id,
         invocation_id: proposal.invocation_id,
         attempt_id: proposal.attempt_id,
+        attempt_revision: proposal.attempt_revision,
+        lease_generation: proposal.lease_generation,
+        runtime_actor: proposal.runtime_actor,
+        runtime_identity: proposal.runtime_identity.clone(),
         role: proposal.role,
         task_contract: proposal.task_contract.clone(),
         proposal_hash: model_proposal_hash(proposal)?,
@@ -317,6 +342,261 @@ pub fn authorize_runtime_model_egress(
         })
         .collect::<Vec<_>>();
     Ok(runtime.authorize_model_egress(proposal, policy, &permit, &bindings, now)?)
+}
+
+const MODEL_PROVIDER_REQUEST_TYPE: &str = "mcg.model_provider_request.v1";
+const MODEL_PROVIDER_REQUEST_HASH_DOMAIN: &str = "MetaCog.ModelProviderRequest";
+const MODEL_PROVIDER_RESPONSE_TYPE: &str = "mcg.model_provider_response.v1";
+const MODEL_PROVIDER_RESPONSE_HASH_DOMAIN: &str = "MetaCog.ModelProviderResponse";
+const MAX_GOVERNED_PROVIDER_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
+
+/// Canonically binds the exact provider request bytes authorized by Root.
+///
+/// # Errors
+/// Returns an error for non-canonical or oversized provider request content.
+pub fn model_provider_request_artifact(
+    request: &ModelRequest,
+) -> Result<ArtifactRef, ProtectedRootError> {
+    if request.temperature.is_some_and(|value| !value.is_finite())
+        || request.top_p.is_some_and(|value| !value.is_finite())
+    {
+        return Err(StorageError::InvalidData(
+            "governed provider request contains a non-finite sampling value".into(),
+        )
+        .into());
+    }
+    governed_provider_artifact(
+        MODEL_PROVIDER_REQUEST_TYPE,
+        MODEL_PROVIDER_REQUEST_HASH_DOMAIN,
+        "application/vnd.metacog.model-provider-request+json",
+        request,
+    )
+}
+
+fn model_provider_response_artifact(
+    response: &ModelResponse,
+) -> Result<ArtifactRef, ProtectedRootError> {
+    governed_provider_artifact(
+        MODEL_PROVIDER_RESPONSE_TYPE,
+        MODEL_PROVIDER_RESPONSE_HASH_DOMAIN,
+        "application/vnd.metacog.model-provider-response+json",
+        response,
+    )
+}
+
+fn governed_provider_artifact<T: serde::Serialize>(
+    type_id: &str,
+    hash_domain: &str,
+    media_type: &str,
+    value: &T,
+) -> Result<ArtifactRef, ProtectedRootError> {
+    StableTypeId::parse(type_id)?;
+    let bytes = serde_json::to_vec(value)?;
+    if bytes.is_empty() || bytes.len() > MAX_GOVERNED_PROVIDER_PAYLOAD_BYTES {
+        return Err(StorageError::InvalidData(
+            "governed provider payload is empty or exceeds its byte limit".into(),
+        )
+        .into());
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(b"MetaCog.GovernedProviderArtifact:v1\0");
+    hasher.update(type_id.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(hash_domain.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(&bytes);
+    Ok(ArtifactRef {
+        content_hash: ContentHash {
+            algorithm: HashAlgorithm::Sha256,
+            domain: hash_domain.into(),
+            digest_hex: format!("{:x}", hasher.finalize()),
+        },
+        media_type: media_type.into(),
+        byte_length: u64::try_from(bytes.len()).map_err(|_| {
+            StorageError::InvalidData("governed provider payload length does not fit u64".into())
+        })?,
+    })
+}
+
+#[async_trait::async_trait]
+pub trait GovernedModelProviderGateway: Send + Sync {
+    async fn invoke(
+        &self,
+        authorization: &RuntimeModelEgressAuthorizationReceipt,
+        request: &ModelRequest,
+    ) -> Result<ModelResponse, ProviderError>;
+}
+
+/// Executes one exact provider request only through its active Root-issued egress permit.
+///
+/// The immutable invocation manifest and planned model run are persisted before dispatch. Root
+/// revalidates the request before calling the gateway and revalidates the workflow lease, permit,
+/// provider catalog, response identity, and usage before accepting a result. Raw response content
+/// is returned to the caller but not retained in generic durable state.
+///
+/// # Errors
+/// Returns an error for stale or substituted authority, malformed request/response content,
+/// provider failure, budget excess, or durable-state failure. Once dispatch is persisted, any
+/// failure that cannot prove no provider contact conservatively settles the run `OutcomeUnknown`.
+pub async fn execute_authorized_model_invocation(
+    runtime: &AppRuntime,
+    gateway: &dyn GovernedModelProviderGateway,
+    manifest: &InvocationManifest,
+    model_run_id: ModelRunId,
+    request: &ModelRequest,
+    now: chrono::DateTime<Utc>,
+) -> Result<GovernedModelProviderDispatchReceipt, ProtectedRootError> {
+    let authorization = runtime
+        .active_model_egress_authorization(manifest.id, now)?
+        .ok_or_else(|| {
+            StorageError::Conflict("model egress authorization does not exist".into())
+        })?;
+    validate_governed_provider_request(&authorization, manifest, request, now)?;
+    runtime.plan_governed_provider_invocation(manifest, model_run_id, now)?;
+    let provider_request_id = request.client_request_id.as_deref().ok_or_else(|| {
+        StorageError::InvalidData(
+            "governed provider request requires a stable client request id".into(),
+        )
+    })?;
+    runtime.dispatch_governed_provider_invocation(
+        manifest.id,
+        model_run_id,
+        provider_request_id,
+        now,
+    )?;
+
+    let response = match gateway.invoke(&authorization, request).await {
+        Ok(response) => response,
+        Err(error) => {
+            runtime.settle_governed_provider_invocation_unknown(
+                manifest.id,
+                model_run_id,
+                Utc::now(),
+            )?;
+            return Err(error.into());
+        }
+    };
+    let completed_at = Utc::now();
+    if let Err(error) = validate_governed_provider_response(&authorization, &response) {
+        runtime.settle_governed_provider_invocation_unknown(
+            manifest.id,
+            model_run_id,
+            completed_at,
+        )?;
+        return Err(error);
+    }
+    let response_artifact = match model_provider_response_artifact(&response) {
+        Ok(artifact) => artifact,
+        Err(error) => {
+            runtime.settle_governed_provider_invocation_unknown(
+                manifest.id,
+                model_run_id,
+                completed_at,
+            )?;
+            return Err(error);
+        }
+    };
+    let completed_run = match runtime.complete_governed_provider_invocation(
+        manifest.id,
+        model_run_id,
+        response_artifact,
+        ModelUsage {
+            input_tokens: response.usage.input_tokens,
+            output_tokens: response.usage.output_tokens,
+            cached_input_tokens: response.usage.cached_input_tokens,
+            reasoning_tokens: response.usage.reasoning_tokens,
+        },
+        completed_at,
+    ) {
+        Ok(completed) => completed,
+        Err(error) => {
+            runtime.settle_governed_provider_invocation_unknown(
+                manifest.id,
+                model_run_id,
+                completed_at,
+            )?;
+            return Err(error.into());
+        }
+    };
+    Ok(GovernedModelProviderDispatchReceipt {
+        response,
+        completed_run,
+    })
+}
+
+fn validate_governed_provider_request(
+    authorization: &RuntimeModelEgressAuthorizationReceipt,
+    manifest: &InvocationManifest,
+    request: &ModelRequest,
+    now: chrono::DateTime<Utc>,
+) -> Result<(), ProtectedRootError> {
+    let request_artifact = model_provider_request_artifact(request)?;
+    if now < authorization.permit.issued_at
+        || now >= authorization.permit.expires_at
+        || authorization.proposal.invocation_id != manifest.id
+        || authorization.permit.invocation_id != manifest.id
+        || authorization.permit.runtime_identity != manifest.runtime_identity
+        || authorization.permit.role != manifest.role
+        || authorization.permit.task_contract != manifest.task_contract
+        || authorization.permit_ref
+            != *manifest.egress_permit.as_ref().ok_or_else(|| {
+                StorageError::Conflict(
+                    "governed provider manifest omitted its egress permit".into(),
+                )
+            })?
+        || authorization.proposal.request_artifact != request_artifact
+        || authorization.proposal.request_hash != request_artifact.content_hash
+        || authorization.permit.request_hash != request_artifact.content_hash
+        || request.contract_version != CONTRACT_VERSION
+        || request.model != authorization.proposal.route.model_id
+        || request.max_output_tokens.is_some_and(|limit| {
+            limit == 0 || limit > authorization.permit.limits.max_output_tokens
+        })
+    {
+        return Err(StorageError::Conflict(
+            "provider request does not bind the exact active Root authorization".into(),
+        )
+        .into());
+    }
+    let request_id = request.client_request_id.as_deref().ok_or_else(|| {
+        StorageError::InvalidData(
+            "governed provider request requires a stable client request id".into(),
+        )
+    })?;
+    if request_id.is_empty() || request_id.len() > 128 || request_id.chars().any(char::is_control) {
+        return Err(StorageError::InvalidData(
+            "governed provider client request id is invalid".into(),
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn validate_governed_provider_response(
+    authorization: &RuntimeModelEgressAuthorizationReceipt,
+    response: &ModelResponse,
+) -> Result<(), ProtectedRootError> {
+    if response.contract_version != CONTRACT_VERSION
+        || response.model != authorization.proposal.route.model_id
+        || response.id.is_empty()
+        || response.id.len() > 4_096
+        || response.id.chars().any(char::is_control)
+        || response.usage.input_tokens > authorization.permit.limits.max_input_tokens
+        || response.usage.output_tokens > authorization.permit.limits.max_output_tokens
+        || response.usage.cached_input_tokens > response.usage.input_tokens
+        || response.usage.reasoning_tokens > response.usage.output_tokens
+        || response.usage.total_tokens
+            != response
+                .usage
+                .input_tokens
+                .saturating_add(response.usage.output_tokens)
+    {
+        return Err(ProviderError::Incompatible(
+            "provider response identity or usage violates its Root permit".into(),
+        )
+        .into());
+    }
+    Ok(())
 }
 
 fn classify_model_destination(
@@ -2223,7 +2503,7 @@ mod tests {
         governed_filesystem_authority_binding, governed_filesystem_operation_payload,
     };
     use mcg_contracts::{
-        ActionEnvelope, ActionExecutionState, ActionId, ActionValidation, ArtifactRef, AttemptId,
+        ActionEnvelope, ActionExecutionState, ActionId, ActionValidation, AttemptId,
         ConfigurationId, ContextManifest, ContextManifestId, ContextSelection, ContractClause,
         CorrelationId, EffectClass, HashAlgorithm, InvocationManifest, InvocationRole, ModelBudget,
         ModelDataClassification, ModelDisclosureManifest, ModelEgressRoute, ModelRun, ModelRunId,
@@ -2237,8 +2517,9 @@ mod tests {
         query_root_workflow_activity, query_root_workflows, root_ipc_session_path,
     };
     use mcg_providers::{
-        CONTRACT_VERSION, ModelCapabilities, ModelDescriptor, ProviderAuthMode, ProviderConnection,
-        ProviderKind, ProviderModelCatalog,
+        CONTRACT_VERSION, ContentPart, Message, MessageRole, ModelCapabilities, ModelDescriptor,
+        ModelRequest, ModelResponse, OutputItem, ProviderAuthMode, ProviderConnection,
+        ProviderKind, ProviderModelCatalog, Usage,
     };
     use mcg_storage::{SqliteEventStore, task_contract_content_hash, verify_backup_bundle};
 
@@ -2281,6 +2562,52 @@ mod tests {
                 .expect("invocation source type"),
             locator: format!("test:{label}"),
             content_hash: workflow_hash(label),
+        }
+    }
+
+    struct DeterministicModelGateway {
+        calls: Mutex<usize>,
+        response: ModelResponse,
+    }
+
+    #[async_trait::async_trait]
+    impl GovernedModelProviderGateway for DeterministicModelGateway {
+        async fn invoke(
+            &self,
+            _authorization: &RuntimeModelEgressAuthorizationReceipt,
+            _request: &ModelRequest,
+        ) -> Result<ModelResponse, ProviderError> {
+            *self.calls.lock().expect("model gateway call lock") += 1;
+            Ok(self.response.clone())
+        }
+    }
+
+    struct LeaseAdvancingModelGateway<'a> {
+        runtime: &'a AppRuntime,
+        attempt_id: AttemptId,
+        attempt_revision: u64,
+        lease_generation: u64,
+        response: ModelResponse,
+        at: chrono::DateTime<Utc>,
+    }
+
+    #[async_trait::async_trait]
+    impl GovernedModelProviderGateway for LeaseAdvancingModelGateway<'_> {
+        async fn invoke(
+            &self,
+            _authorization: &RuntimeModelEgressAuthorizationReceipt,
+            _request: &ModelRequest,
+        ) -> Result<ModelResponse, ProviderError> {
+            self.runtime
+                .begin_runtime_verification(
+                    self.attempt_id,
+                    self.attempt_revision,
+                    self.lease_generation,
+                    "provider-post-dispatch-lease-advance",
+                    self.at,
+                )
+                .expect("advance workflow lease during provider dispatch");
+            Ok(self.response.clone())
         }
     }
 
@@ -2622,13 +2949,20 @@ mod tests {
         );
     }
 
-    #[test]
+    #[tokio::test]
     #[allow(clippy::too_many_lines)]
-    fn root_model_egress_permit_is_route_disclosure_budget_and_secret_handle_bound() {
+    async fn root_model_egress_permit_is_route_disclosure_budget_and_secret_handle_bound() {
         let temporary = tempfile::tempdir().expect("temporary Root egress directory");
         let config = AppConfig::default().with_data_directory(temporary.path());
         let at = Utc::now();
-        let (contract, attempt) = expired_workflow_fixture(at);
+        let (contract, initial_attempt) = expired_workflow_fixture(at);
+        let runtime_actor = RuntimeActorId::new();
+        let runtime_identity = RuntimeIdentity {
+            instance_id: RuntimeInstanceId::new(),
+            build_hash: workflow_hash("governed-provider-runtime-build"),
+            protocol_version: PROTOCOL_V1,
+            started_at: at,
+        };
         let connection = ProviderConnection {
             contract_version: CONTRACT_VERSION,
             id: "root-egress-fixture".into(),
@@ -2654,7 +2988,7 @@ mod tests {
         {
             let mut store = SqliteEventStore::open(config.database_path()).expect("egress store");
             store
-                .create_workflow(&contract, &attempt, CorrelationId::new(), at)
+                .create_workflow(&contract, &initial_attempt, CorrelationId::new(), at)
                 .expect("create egress workflow");
             store
                 .record_provider_configuration(
@@ -2667,7 +3001,26 @@ mod tests {
                     at,
                 )
                 .expect("record egress provider");
+            store
+                .claim_workflow_attempt(
+                    initial_attempt.attempt_id,
+                    initial_attempt.revision,
+                    initial_attempt.lease_generation,
+                    runtime_actor,
+                    at + chrono::Duration::minutes(10),
+                    CorrelationId::new(),
+                    "root-egress-claim-1",
+                    at,
+                )
+                .expect("claim egress workflow");
         }
+        let attempt = {
+            let store = SqliteEventStore::open(config.database_path()).expect("read egress store");
+            store
+                .workflow_attempt(initial_attempt.attempt_id)
+                .expect("read egress workflow")
+                .expect("egress workflow exists")
+        };
         let runtime = open(config).expect("open Root egress runtime");
         let context = ContextManifest {
             id: ContextManifestId::new(),
@@ -2696,18 +3049,40 @@ mod tests {
             destination: connection.base_url.clone(),
             destination_class: ModelDestinationClass::ThirdPartyRemote,
         };
-        let request_hash = workflow_hash("governed-provider-request");
+        let request = ModelRequest {
+            contract_version: CONTRACT_VERSION,
+            model: "fixture-model".into(),
+            client_request_id: Some("governed-provider-request-1".into()),
+            instructions: Some("Use only the disclosed project context.".into()),
+            messages: vec![Message {
+                role: MessageRole::User,
+                content: vec![ContentPart::Text {
+                    text: "Return the deterministic fixture result.".into(),
+                }],
+                name: None,
+            }],
+            tools: Vec::new(),
+            tool_choice: None,
+            structured_output: None,
+            reasoning: None,
+            temperature: Some(0.0),
+            top_p: None,
+            max_output_tokens: Some(64),
+            metadata: serde_json::Value::Null,
+        };
+        let request_artifact =
+            model_provider_request_artifact(&request).expect("canonical provider request artifact");
         let proposal = ModelInvocationProposal {
             invocation_id: InvocationId::new(),
             attempt_id: attempt.attempt_id,
+            attempt_revision: attempt.revision,
+            lease_generation: attempt.lease_generation,
+            runtime_actor,
+            runtime_identity: runtime_identity.clone(),
             role: InvocationRole::Work,
             task_contract: attempt.task_contract.clone(),
-            request_artifact: ArtifactRef {
-                content_hash: request_hash.clone(),
-                media_type: "application/vnd.metacog.model-request+cbor".into(),
-                byte_length: 256,
-            },
-            request_hash,
+            request_artifact: request_artifact.clone(),
+            request_hash: request_artifact.content_hash,
             route: route.clone(),
             data_classification: ModelDataClassification::Confidential,
             disclosure: ModelDisclosureManifest {
@@ -2733,8 +3108,15 @@ mod tests {
             },
             maximum_permit_lifetime_seconds: 600,
         };
-        let receipt = authorize_runtime_model_egress(&runtime, &context, &proposal, &policy, at)
-            .expect("Root egress authorization");
+        let receipt = authorize_runtime_model_egress(
+            &runtime,
+            &context,
+            &proposal,
+            &runtime_identity,
+            &policy,
+            at,
+        )
+        .expect("Root egress authorization");
         assert_eq!(receipt.permit.invocation_id, proposal.invocation_id);
         assert_eq!(receipt.permit.request_hash, proposal.request_hash);
         assert_eq!(receipt.permit.secret_handles.len(), 1);
@@ -2750,25 +3132,205 @@ mod tests {
             receipt.secret_handles[0]
         );
         assert_eq!(
-            authorize_runtime_model_egress(&runtime, &context, &proposal, &policy, at)
-                .expect("exact egress replay"),
+            authorize_runtime_model_egress(
+                &runtime,
+                &context,
+                &proposal,
+                &runtime_identity,
+                &policy,
+                at,
+            )
+            .expect("exact egress replay"),
             receipt
         );
         let encoded = serde_json::to_string(&receipt).expect("serialize egress receipt");
         assert!(!encoded.contains("secret-value"));
 
+        let runtime_build = runtime_identity.build_hash.clone();
+        let manifest = InvocationManifest {
+            id: proposal.invocation_id,
+            role: proposal.role,
+            attempt_id: proposal.attempt_id,
+            task_contract: proposal.task_contract.clone(),
+            runtime_identity: runtime_identity.clone(),
+            cognitive_configuration: workflow_hash("governed-provider-cognitive-config"),
+            role_manifest: workflow_hash("governed-provider-work-role"),
+            prompt_bundle: workflow_hash("governed-provider-prompt-bundle"),
+            context_manifest: proposal.disclosure.context_manifest.clone(),
+            model_route: mcg_storage::model_egress_route_payload(&proposal.route)
+                .expect("governed provider route payload"),
+            resolved_provider: receipt.permit.resolved_provider.clone(),
+            resolved_model: receipt.permit.resolved_model.clone(),
+            observed_model_fingerprint: Some("fixture-model-v1".into()),
+            sampling: root_invocation_payload("test.root_sampling.v1", "zero"),
+            reasoning: None,
+            available_tool_manifests: Vec::new(),
+            selected_skill_manifests: Vec::new(),
+            authority_envelope: root_invocation_source("root-provider-authority"),
+            egress_permit: Some(receipt.permit_ref.clone()),
+            repository_revision: Some(workflow_hash("governed-provider-revision")),
+            environment: root_invocation_source("governed-provider-environment"),
+            runtime_build,
+            request_hash: proposal.request_hash.clone(),
+            response_hash: None,
+        };
+        let gateway = DeterministicModelGateway {
+            calls: Mutex::new(0),
+            response: ModelResponse {
+                contract_version: CONTRACT_VERSION,
+                id: "fixture-response-1".into(),
+                model: "fixture-model".into(),
+                status: Some("completed".into()),
+                output: vec![OutputItem::Message {
+                    role: MessageRole::Assistant,
+                    content: vec![ContentPart::Text {
+                        text: "private deterministic result".into(),
+                    }],
+                }],
+                usage: Usage {
+                    input_tokens: 7,
+                    cached_input_tokens: 0,
+                    output_tokens: 4,
+                    reasoning_tokens: 0,
+                    total_tokens: 11,
+                },
+                provider_metadata: serde_json::json!({"fixture": true}),
+            },
+        };
+        let model_run_id = ModelRunId::new();
+        let mut substituted_request = request.clone();
+        substituted_request.model = "substituted-model".into();
+        assert!(
+            execute_authorized_model_invocation(
+                &runtime,
+                &gateway,
+                &manifest,
+                model_run_id,
+                &substituted_request,
+                at,
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(*gateway.calls.lock().expect("model gateway calls"), 0);
+
+        let dispatch = execute_authorized_model_invocation(
+            &runtime,
+            &gateway,
+            &manifest,
+            model_run_id,
+            &request,
+            at,
+        )
+        .await
+        .expect("governed deterministic provider dispatch");
+        assert_eq!(*gateway.calls.lock().expect("model gateway calls"), 1);
+        assert_eq!(dispatch.response.id, "fixture-response-1");
+        assert_eq!(dispatch.completed_run.run.state, ModelRunState::Completed);
+        assert_eq!(
+            dispatch
+                .completed_run
+                .run
+                .usage
+                .as_ref()
+                .expect("provider usage")
+                .output_tokens,
+            4
+        );
+        assert!(dispatch.completed_run.run.response_artifact.is_some());
+        assert!(
+            runtime
+                .runtime_response(model_run_id)
+                .expect("provider response lookup")
+                .is_none(),
+            "generic durable state must not retain raw provider response content"
+        );
+
+        let mut stale_proposal = proposal.clone();
+        stale_proposal.invocation_id = InvocationId::new();
+        let stale_receipt = authorize_runtime_model_egress(
+            &runtime,
+            &context,
+            &stale_proposal,
+            &runtime_identity,
+            &policy,
+            at,
+        )
+        .expect("authorize stale-result fixture invocation");
+        let mut stale_manifest = manifest.clone();
+        stale_manifest.id = stale_proposal.invocation_id;
+        stale_manifest.egress_permit = Some(stale_receipt.permit_ref);
+        stale_manifest.resolved_provider = stale_receipt.permit.resolved_provider;
+        stale_manifest.resolved_model = stale_receipt.permit.resolved_model;
+        let stale_result_run_id = ModelRunId::new();
+        let lease_advancing_gateway = LeaseAdvancingModelGateway {
+            runtime: &runtime,
+            attempt_id: attempt.attempt_id,
+            attempt_revision: attempt.revision,
+            lease_generation: attempt.lease_generation,
+            response: gateway.response.clone(),
+            at: at + chrono::Duration::seconds(1),
+        };
+        let stale_result = execute_authorized_model_invocation(
+            &runtime,
+            &lease_advancing_gateway,
+            &stale_manifest,
+            stale_result_run_id,
+            &request,
+            at,
+        )
+        .await;
+        assert!(
+            stale_result.is_err(),
+            "a result arriving after the workflow revision advances must be rejected"
+        );
+        let stale_run = runtime
+            .governed_provider_model_run(stale_proposal.invocation_id, stale_result_run_id)
+            .unwrap_or_else(|error| {
+                panic!("stale provider run lookup after {stale_result:?}: {error}")
+            })
+            .unwrap_or_else(|| panic!("stale provider model run missing after {stale_result:?}"));
+        assert_eq!(stale_run.run.state, ModelRunState::OutcomeUnknown);
+
         let mut substituted_route = proposal.clone();
         substituted_route.route.destination = "https://other.example/v1".into();
         assert!(
-            authorize_runtime_model_egress(&runtime, &context, &substituted_route, &policy, at,)
-                .is_err()
+            authorize_runtime_model_egress(
+                &runtime,
+                &context,
+                &substituted_route,
+                &runtime_identity,
+                &policy,
+                at,
+            )
+            .is_err()
+        );
+        let mut substituted_identity = runtime_identity.clone();
+        substituted_identity.instance_id = RuntimeInstanceId::new();
+        assert!(
+            authorize_runtime_model_egress(
+                &runtime,
+                &context,
+                &proposal,
+                &substituted_identity,
+                &policy,
+                at,
+            )
+            .is_err()
         );
         let mut under_disclosed = proposal;
         under_disclosed.invocation_id = InvocationId::new();
         under_disclosed.disclosure.disclosed_sources.clear();
         assert!(
-            authorize_runtime_model_egress(&runtime, &context, &under_disclosed, &policy, at)
-                .is_err()
+            authorize_runtime_model_egress(
+                &runtime,
+                &context,
+                &under_disclosed,
+                &runtime_identity,
+                &policy,
+                at,
+            )
+            .is_err()
         );
     }
 
