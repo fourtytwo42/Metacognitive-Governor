@@ -1248,6 +1248,12 @@ export interface CanonicalWorkflowInspection {
   events: CanonicalWorkflowEvent[];
 }
 
+export interface CanonicalWorkflowInvocationActivity {
+  workflow: CanonicalWorkflowInspection;
+  invocations: CanonicalInvocationSummary[];
+  invocations_truncated: boolean;
+}
+
 export type ActionEffectClass = "observational" | "reversible" | "consequential" | "irreversible";
 export type ActionExecutionState = "proposed" | "authorized" | "executing" | "observed" | "no_effect_confirmed" | "effect_confirmed" | "outcome_unknown" | "reconciling" | "validated" | "committed" | "denied" | "quarantined" | "compensated";
 
@@ -2210,6 +2216,10 @@ export function listProtectedRootWorkflows(): Promise<CanonicalWorkflowAttempt[]
 
 export function getProtectedRootWorkflow(workflowId: string): Promise<CanonicalWorkflowInspection | null> {
   return invoke("protected_root_workflow", { workflowId });
+}
+
+export function getProtectedRootWorkflowActivity(workflowId: string, invocationLimit = 100): Promise<CanonicalWorkflowInvocationActivity | null> {
+  return invoke("protected_root_workflow_activity", { workflowId, invocationLimit });
 }
 
 export function listProtectedRootActions(limit = 100): Promise<CanonicalActionSummary[]> {

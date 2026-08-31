@@ -19,6 +19,7 @@ use uuid::Uuid;
 pub const PROTOCOL_V1: u16 = 1;
 pub const MAX_CANONICAL_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_MANIFEST_ITEMS: usize = 4_096;
+pub const MAX_WORKFLOW_ACTIVITY_INVOCATIONS: usize = 200;
 pub const MAX_CONTEXT_TRANSFORMATIONS: usize = 64;
 pub const MAX_CONTEXT_EXPANSION_STEPS: usize = 256;
 pub const MAX_REFERENCE_LOCATOR_BYTES: usize = 4_096;
@@ -1430,6 +1431,48 @@ pub struct InvocationSummary {
     pub model_run_revision: Option<u64>,
     pub persisted_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+/// Bounded, integrity-checked activity projection for one canonical workflow attempt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowInvocationActivity {
+    pub workflow: WorkflowInspection,
+    pub invocations: Vec<InvocationSummary>,
+    pub invocations_truncated: bool,
+}
+
+impl WorkflowInvocationActivity {
+    /// Verifies that every invocation belongs to the exact workflow attempt and TaskContract.
+    ///
+    /// # Errors
+    /// Returns a contract error for substituted, duplicated, or unbounded invocation evidence.
+    pub fn validate(&self) -> Result<(), ContractError> {
+        if self.invocations.len() > MAX_WORKFLOW_ACTIVITY_INVOCATIONS {
+            return Err(ContractError::InvalidContract(
+                "workflow activity invocation evidence exceeds its bound",
+            ));
+        }
+        if self.workflow.task_contract.id != self.workflow.attempt.task_contract.id
+            || self.workflow.task_contract.version != self.workflow.attempt.task_contract.version
+        {
+            return Err(ContractError::InvalidContract(
+                "workflow activity TaskContract identity does not match its attempt",
+            ));
+        }
+        let mut seen = BTreeSet::new();
+        for invocation in &self.invocations {
+            if invocation.workflow_id != self.workflow.attempt.workflow_id
+                || invocation.attempt_id != self.workflow.attempt.attempt_id
+                || invocation.task_contract != self.workflow.attempt.task_contract
+                || !seen.insert(invocation.invocation_id)
+            {
+                return Err(ContractError::InvalidContract(
+                    "workflow activity contains substituted or duplicate invocation evidence",
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Canonical bounded reconstruction view for one material invocation.

@@ -13,10 +13,10 @@ use chrono::{DateTime, Duration, Utc};
 use mcg_contracts::{
     ActionCompensationReceipt, ActionId, ActionInspection, ActionSummary, AuthenticatedRpcRequest,
     ContentHash, ContractError, CorrelationId, InvocationId, InvocationInspection,
-    InvocationSummary, OwnerActionCompensationRequest, PROTOCOL_V1, RequestId, RootStatus,
-    RpcEnvelope, RuntimeInstanceId, RuntimeWorkerRole, SessionId, StableTypeId, VersionedPayload,
-    WorkflowAttempt, WorkflowCancelRequest, WorkflowId, WorkflowInspection, canonical_cbor_v1,
-    decode_canonical_cbor_v1,
+    InvocationSummary, MAX_WORKFLOW_ACTIVITY_INVOCATIONS, OwnerActionCompensationRequest,
+    PROTOCOL_V1, RequestId, RootStatus, RpcEnvelope, RuntimeInstanceId, RuntimeWorkerRole,
+    SessionId, StableTypeId, VersionedPayload, WorkflowAttempt, WorkflowCancelRequest, WorkflowId,
+    WorkflowInspection, WorkflowInvocationActivity, canonical_cbor_v1, decode_canonical_cbor_v1,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
@@ -32,12 +32,15 @@ pub const RUNTIME_WORKER_SESSION_SCHEMA_VERSION: u16 = 1;
 pub const RUNTIME_WORKER_EXECUTABLE_HASH_DOMAIN: &str = "MetaCog.RuntimeWorkerExecutable";
 pub const MAX_ROOT_INVOCATION_SUMMARIES: usize = 200;
 pub const MAX_ROOT_INVOCATION_MODEL_RUNS: usize = 100;
+pub const MAX_ROOT_WORKFLOW_INVOCATIONS: usize = MAX_WORKFLOW_ACTIVITY_INVOCATIONS;
 pub const ROOT_STATUS_REQUEST_TYPE: &str = "metacog.root.status.request.v1";
 pub const ROOT_STATUS_RESPONSE_TYPE: &str = "metacog.root.status.response.v1";
 pub const ROOT_WORKFLOW_LIST_REQUEST_TYPE: &str = "metacog.root.workflow_list.request.v1";
 pub const ROOT_WORKFLOW_LIST_RESPONSE_TYPE: &str = "metacog.root.workflow_list.response.v1";
 pub const ROOT_WORKFLOW_SHOW_REQUEST_TYPE: &str = "metacog.root.workflow_show.request.v1";
 pub const ROOT_WORKFLOW_SHOW_RESPONSE_TYPE: &str = "metacog.root.workflow_show.response.v1";
+pub const ROOT_WORKFLOW_ACTIVITY_REQUEST_TYPE: &str = "metacog.root.workflow_activity.request.v1";
+pub const ROOT_WORKFLOW_ACTIVITY_RESPONSE_TYPE: &str = "metacog.root.workflow_activity.response.v1";
 pub const ROOT_WORKFLOW_CANCEL_REQUEST_TYPE: &str = "metacog.root.workflow_cancel.request.v1";
 pub const ROOT_WORKFLOW_CANCEL_RESPONSE_TYPE: &str = "metacog.root.workflow_cancel.response.v1";
 pub const ROOT_ACTION_LIST_REQUEST_TYPE: &str = "metacog.root.action_list.request.v1";
@@ -549,6 +552,37 @@ pub async fn query_root_workflow(
         &serde_json::json!({"workflow_id": workflow_id}),
     )
     .await
+}
+
+/// Loads one canonical workflow and its bounded current-attempt invocation activity.
+///
+/// # Errors
+/// Returns an error for unavailable transport, invalid bounds, substituted evidence, or protocol failure.
+pub async fn query_root_workflow_activity(
+    data_directory: &Path,
+    workflow_id: WorkflowId,
+    invocation_limit: usize,
+) -> Result<Option<WorkflowInvocationActivity>, PlatformError> {
+    if invocation_limit == 0 || invocation_limit > MAX_ROOT_WORKFLOW_INVOCATIONS {
+        return Err(PlatformError::InvalidInspectionBound);
+    }
+    let activity: Option<WorkflowInvocationActivity> = query_root(
+        data_directory,
+        ROOT_WORKFLOW_ACTIVITY_REQUEST_TYPE,
+        ROOT_WORKFLOW_ACTIVITY_RESPONSE_TYPE,
+        &serde_json::json!({"workflow_id": workflow_id, "invocation_limit": invocation_limit}),
+    )
+    .await?;
+    if let Some(activity) = &activity {
+        activity.validate()?;
+        if activity.workflow.attempt.workflow_id != workflow_id {
+            return Err(ContractError::InvalidContract(
+                "workflow activity response does not match its requested workflow",
+            )
+            .into());
+        }
+    }
+    Ok(activity)
 }
 
 /// Requests durable, generation-fenced cancellation over authenticated local IPC.

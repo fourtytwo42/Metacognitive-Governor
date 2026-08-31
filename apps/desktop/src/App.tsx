@@ -208,6 +208,7 @@ import {
   getProtectedRootStatus,
   listProtectedRootWorkflows,
   getProtectedRootWorkflow,
+  getProtectedRootWorkflowActivity,
   listProtectedRootActions,
   getProtectedRootAction,
   compensateProtectedRootAction,
@@ -419,6 +420,7 @@ import {
   type ProtectedRootStatus,
   type CanonicalWorkflowAttempt,
   type CanonicalWorkflowInspection,
+  type CanonicalWorkflowInvocationActivity,
   type CanonicalActionSummary,
   type CanonicalActionInspection,
   type CanonicalSourceRef,
@@ -2645,7 +2647,8 @@ export function App() {
   const [localService, setLocalService] = useState<LocalServiceStatus | null>(null);
   const [protectedRoot, setProtectedRoot] = useState<ProtectedRootStatus | null>(null);
   const [canonicalWorkflows, setCanonicalWorkflows] = useState<CanonicalWorkflowAttempt[]>([]);
-  const [workflowInspections, setWorkflowInspections] = useState<Record<string, CanonicalWorkflowInspection>>({});
+    const [workflowInspections, setWorkflowInspections] = useState<Record<string, CanonicalWorkflowInspection>>({});
+    const [workflowActivities, setWorkflowActivities] = useState<Record<string, CanonicalWorkflowInvocationActivity>>({});
   const [workflowBusy, setWorkflowBusy] = useState<string | null>(null);
   const [workflowError, setWorkflowError] = useState<string | null>(null);
   const [canonicalActions, setCanonicalActions] = useState<CanonicalActionSummary[]>([]);
@@ -4075,6 +4078,21 @@ export function App() {
       const inspection = await getProtectedRootWorkflow(workflowId);
       if (!inspection) throw new Error(`Canonical workflow ${workflowId} was not found.`);
       setWorkflowInspections((current) => ({ ...current, [workflowId]: inspection }));
+    } catch (error) {
+      setWorkflowError(errorMessage(error));
+    } finally {
+      setWorkflowBusy(null);
+    }
+  }
+
+  async function inspectCanonicalWorkflowActivity(workflowId: string) {
+    setWorkflowBusy(workflowId);
+    setWorkflowError(null);
+    try {
+      const activity = await getProtectedRootWorkflowActivity(workflowId);
+      if (!activity) throw new Error(`Canonical workflow ${workflowId} was not found.`);
+      setWorkflowActivities((current) => ({ ...current, [workflowId]: activity }));
+      setWorkflowInspections((current) => ({ ...current, [workflowId]: activity.workflow }));
     } catch (error) {
       setWorkflowError(errorMessage(error));
     } finally {
@@ -9140,9 +9158,9 @@ export function App() {
               </details>
             </article>
 
-            <article className="agent-section-card global-agent-session-section" aria-label="Global agent sessions">
+            <article className="agent-section-card global-agent-session-section" aria-label="Compatibility agent sessions">
               <div className="section-heading compact-heading">
-                <div><h3>Global agent sessions</h3><p className="muted">Browse Chat, Coordinator, Coding, and Tester sessions across every active conversation.</p></div>
+                <div><h3>Compatibility agent sessions</h3><p className="muted">Browse conversation agents while canonical workflow attachment migration proceeds.</p></div>
                 <span className="count-badge">{visibleGlobalAgentSessions.length}</span>
               </div>
               <label className="compact-search"><span className="sr-only">Search global agent sessions</span><input type="search" aria-label="Search global agent sessions" value={globalAgentSearch} onChange={(event) => setGlobalAgentSearch(event.target.value)} placeholder="Search agents or conversations" /></label>
@@ -9159,15 +9177,16 @@ export function App() {
               </div>}
             </article>
 
-            <article className="agent-section-card canonical-workflow-section" aria-label="Durable workflows">
+            <article className="agent-section-card canonical-workflow-section" aria-label="Governed workflow activity">
               <div className="section-heading compact-heading">
-                <div><h3>Durable workflows</h3><p className="muted">Protected Root owns this state. Closing or reconnecting the app cannot change it.</p></div>
+                <div><h3>Governed workflow activity</h3><p className="muted">Drill from each Root-owned workflow into its exact current-attempt Work and Verification invocations.</p></div>
                 <button className="secondary" type="button" disabled={workflowBusy !== null} onClick={() => void refreshCanonicalWorkflows()}>{workflowBusy === "list" ? "Refreshing…" : "Refresh"}</button>
               </div>
               {workflowError && <p className="error-message" role="alert">{workflowError}</p>}
               {canonicalWorkflows.length === 0 ? <p className="empty-state">No canonical workflows yet. Existing compatibility work remains available in its current views while migration proceeds.</p> : <div className="instance-list">
-                {canonicalWorkflows.map((attempt) => {
-                  const inspection = workflowInspections[attempt.workflow_id];
+                  {canonicalWorkflows.map((attempt) => {
+                    const inspection = workflowInspections[attempt.workflow_id];
+                    const activity = workflowActivities[attempt.workflow_id];
                   return <div className="instance-row canonical-workflow-row" key={attempt.workflow_id} data-workflow-state={workflowStateKey(attempt.state)}>
                     <span>
                       <strong>{inspection?.task_contract.objective ?? `Workflow ${attempt.workflow_id.slice(0, 8)}`}</strong>
@@ -9176,15 +9195,22 @@ export function App() {
                       {advanced && attempt.lease_owner && <small>Lease owner <code>{attempt.lease_owner}</code>{attempt.lease_expires_at ? ` until ${new Date(attempt.lease_expires_at).toLocaleString()}` : ""}</small>}
                     </span>
                     <div className="memory-actions">
-                      {advanced && <button className="secondary" type="button" disabled={workflowBusy !== null} onClick={() => void inspectCanonicalWorkflow(attempt.workflow_id)}>{workflowBusy === attempt.workflow_id ? "Loading…" : inspection ? "Refresh evidence" : "Inspect"}</button>}
+                        {advanced && <button className="secondary" type="button" disabled={workflowBusy !== null} onClick={() => void inspectCanonicalWorkflowActivity(attempt.workflow_id)}>{workflowBusy === attempt.workflow_id ? "Loading…" : activity ? "Refresh activity" : "Inspect activity"}</button>}
                       {workflowCanRequestCancellation(attempt.state) && <button className="secondary" type="button" disabled={workflowBusy !== null} onClick={() => void requestCanonicalWorkflowCancellation(attempt)}>Request cancellation</button>}
                     </div>
-                    {advanced && inspection && <div className="workflow-inspection">
-                      <p><strong>Contract v{inspection.task_contract.version}</strong> · {inspection.task_contract.acceptance_criteria.length} acceptance criteria · {inspection.events.length} ordered events</p>
+                      {advanced && inspection && <div className="workflow-inspection">
+                        <p><strong>Contract v{inspection.task_contract.version}</strong> · {inspection.task_contract.acceptance_criteria.length} acceptance criteria · {inspection.events.length} ordered events</p>
+                        {activity && <div className="instance-list" aria-label={`Workflow ${attempt.workflow_id} invocation activity`}>
+                          {activity.invocations.length === 0 ? <p className="empty-state">No Runtime invocations are attached to this current attempt.</p> : activity.invocations.map((invocation) => <div className="instance-row canonical-invocation-row" key={invocation.invocation_id} data-invocation-state={invocation.model_run_state ?? "unplanned"}>
+                            <span><strong>{invocation.role === "work" ? "Work" : "Verification"}</strong><small>{invocationStateLabel(invocation.model_run_state)}{userSettings?.interface_complexity === "developer" ? ` · ${invocation.invocation_id}` : ""}</small></span>
+                            <button className="secondary" type="button" disabled={invocationBusy !== null} onClick={() => void inspectCanonicalInvocation(invocation.invocation_id)}>Inspect invocation</button>
+                          </div>)}
+                          {activity.invocations_truncated && <p className="warning-box">Only the bounded current-attempt invocation window is shown.</p>}
+                        </div>}
                       {inspection.task_contract.acceptance_criteria.length > 0 && <ul>{inspection.task_contract.acceptance_criteria.map((criterion) => <li key={criterion.clause_id}>{criterion.statement}</li>)}</ul>}
-                      {userSettings?.interface_complexity === "developer" && <TechnicalDetails title="Canonical workflow evidence" summary={`${inspection.events.length} Root-owned events`}>
+                        {userSettings?.interface_complexity === "developer" && <TechnicalDetails title="Canonical workflow activity evidence" summary={`${inspection.events.length} Root-owned events · ${activity?.invocations.length ?? 0} invocations`}>
                         <p className="form-note">Read-only canonical evidence. Correlation, causation, revision, generation, and idempotency identities are disclosed without exposing Root mutation authority.</p>
-                        <pre aria-label={`Canonical workflow ${attempt.workflow_id} evidence`} aria-readonly="true" role="textbox" tabIndex={0}>{JSON.stringify(inspection, null, 2)}</pre>
+                          <pre aria-label={`Canonical workflow ${attempt.workflow_id} evidence`} aria-readonly="true" role="textbox" tabIndex={0}>{JSON.stringify(activity ?? inspection, null, 2)}</pre>
                       </TechnicalDetails>}
                     </div>}
                   </div>;

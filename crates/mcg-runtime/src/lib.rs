@@ -64,7 +64,8 @@ use mcg_contracts::{
     InvocationSummary, ModelRun, ModelRunState, ReconciliationJob, ReconciliationJobId,
     ReconciliationObservation, RuntimeActorId, RuntimeIdentity, RuntimeInvocationRequest,
     RuntimeInvocationResult, SourceRef, StableTypeId, WorkflowAttempt, WorkflowCancelRequest,
-    WorkflowId, WorkflowInspection, WorkflowState, canonical_contract_hash,
+    WorkflowId, WorkflowInspection, WorkflowInvocationActivity, WorkflowState,
+    canonical_contract_hash,
 };
 use mcg_domain::{
     AgentContextCheckpoint, AgentContextCheckpointCause, AgentContextCheckpointId,
@@ -3961,6 +3962,50 @@ impl AppRuntime {
             task_contract,
             events,
         }))
+    }
+
+    /// Loads one canonical workflow together with bounded invocation activity for its current attempt.
+    ///
+    /// # Errors
+    /// Returns a runtime error for unreadable, malformed, or substituted authoritative evidence.
+    pub fn canonical_workflow_activity(
+        &self,
+        workflow_id: WorkflowId,
+        invocation_limit: usize,
+    ) -> Result<Option<WorkflowInvocationActivity>, RuntimeError> {
+        let store = self.store()?;
+        let Some(attempt) = store.workflow_attempt_for_workflow(workflow_id)? else {
+            return Ok(None);
+        };
+        let task_contract = store
+            .task_contract_version(attempt.task_contract.id, attempt.task_contract.version)?
+            .ok_or_else(|| {
+                StorageError::InvalidData(
+                    "workflow attempt references a missing task-contract version".into(),
+                )
+            })?;
+        let events = store.workflow_events(workflow_id)?;
+        let mut invocations = store.invocation_summaries_for_attempt(
+            attempt.attempt_id,
+            invocation_limit.checked_add(1).ok_or_else(|| {
+                StorageError::InvalidData("workflow activity invocation limit overflowed".into())
+            })?,
+        )?;
+        let invocations_truncated = invocations.len() > invocation_limit;
+        invocations.truncate(invocation_limit);
+        let activity = WorkflowInvocationActivity {
+            workflow: WorkflowInspection {
+                attempt,
+                task_contract,
+                events,
+            },
+            invocations,
+            invocations_truncated,
+        };
+        activity
+            .validate()
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        Ok(Some(activity))
     }
 
     /// Persists complete reconstructable invocation intent and the initial planned model run

@@ -305,6 +305,14 @@ test.beforeEach(async ({ page }) => {
             if (args.workflowId !== canonicalWorkflowId) return null;
             return { attempt: canonicalWorkflow, task_contract: canonicalTaskContract, events: canonicalEvents };
           }
+          if (command === "protected_root_workflow_activity") {
+            if (args.workflowId !== canonicalWorkflowId) return null;
+            return {
+              workflow: { attempt: canonicalWorkflow, task_contract: canonicalTaskContract, events: canonicalEvents },
+              invocations: [canonicalInvocation],
+              invocations_truncated: false
+            };
+          }
           if (command === "protected_root_actions") return [canonicalAction, compensatableAction, ...(compensationInitiated ? [{ ...compensatableAction, action_id: compensationActionId, execution_id: compensationInspection.executions[0].id, state: "effect_confirmed", revision: 4, lease_generation: 3 }] : [])];
           if (command === "protected_root_action") {
             if (args.actionId === canonicalActionId) return canonicalActionInspection;
@@ -645,21 +653,22 @@ test("durable workflows keep one Root truth across Simple Advanced and Developer
   await page.goto("/");
   await page.getByRole("link", { name: "Agents", exact: true }).click();
 
-  let workflows = page.getByRole("article", { name: "Durable workflows" });
+  let workflows = page.getByRole("article", { name: "Governed workflow activity" });
   await expect(workflows.getByText("Working", { exact: true })).toBeVisible();
   await expect(workflows.getByText(/attempt 1/)).toHaveCount(0);
-  await expect(workflows.getByRole("button", { name: "Inspect" })).toHaveCount(0);
-  await expect(workflows.getByRole("button", { name: "Canonical workflow evidence" })).toHaveCount(0);
+  await expect(workflows.getByRole("button", { name: "Inspect activity" })).toHaveCount(0);
+  await expect(workflows.getByRole("button", { name: "Canonical workflow activity evidence" })).toHaveCount(0);
 
   await enableAdvancedMode(page);
   await page.getByRole("link", { name: "Agents", exact: true }).click();
-  workflows = page.getByRole("article", { name: "Durable workflows" });
+  workflows = page.getByRole("article", { name: "Governed workflow activity" });
   await expect(workflows.getByText(/Working · attempt 1 · revision 7 · generation 3/)).toBeVisible();
   await expect(workflows.getByText(/Lease owner/)).toContainText("runtime-worker-1");
-  await workflows.getByRole("button", { name: "Inspect" }).click();
+  await workflows.getByRole("button", { name: "Inspect activity" }).click();
   await expect(workflows.getByText("Recover the exact durable workflow")).toBeVisible();
   await expect(workflows.getByText("The same attempt and event sequence remain visible after reconnect.")).toBeVisible();
-  await expect(workflows.getByRole("button", { name: "Canonical workflow evidence" })).toHaveCount(0);
+  await expect(workflows.getByRole("button", { name: "Canonical workflow activity evidence" })).toHaveCount(0);
+  await expect(workflows.getByText("Work", { exact: true })).toBeVisible();
 
   await openOwnerSurface(page, "Settings");
   await page.getByRole("button", { name: "General", exact: true }).click();
@@ -667,8 +676,8 @@ test("durable workflows keep one Root truth across Simple Advanced and Developer
   await expect(page.getByRole("radio", { name: /Developer/ })).toBeChecked();
   await page.getByRole("button", { name: "Back to app" }).click();
   await page.getByRole("link", { name: "Agents", exact: true }).click();
-  workflows = page.getByRole("article", { name: "Durable workflows" });
-  const evidence = workflows.getByRole("button", { name: "Canonical workflow evidence" });
+  workflows = page.getByRole("article", { name: "Governed workflow activity" });
+  const evidence = workflows.getByRole("button", { name: "Canonical workflow activity evidence" });
   await evidence.click();
   await expect(workflows.getByRole("textbox", { name: /Canonical workflow .* evidence/ })).toContainText("mcg.workflow.attempt.claimed");
   await expect(workflows.getByRole("textbox", { name: /Canonical workflow .* evidence/ })).toContainText("correlation_id");
@@ -682,9 +691,9 @@ test("durable workflows keep one Root truth across Simple Advanced and Developer
   await page.getByRole("radio", { name: /Simple/ }).click();
   await page.getByRole("button", { name: "Back to app" }).click();
   await page.getByRole("link", { name: "Agents", exact: true }).click();
-  workflows = page.getByRole("article", { name: "Durable workflows" });
+  workflows = page.getByRole("article", { name: "Governed workflow activity" });
   await expect(workflows.getByText("Stopping safely", { exact: true })).toBeVisible();
-  await expect(workflows.getByRole("button", { name: "Canonical workflow evidence" })).toHaveCount(0);
+  await expect(workflows.getByRole("button", { name: "Canonical workflow activity evidence" })).toHaveCount(0);
 });
 
 test("governed actions keep one Root truth across Simple Advanced and Developer", async ({ page }) => {
@@ -813,7 +822,7 @@ test("global agent browser searches every active conversation with progressive d
   await page.goto("/");
   await page.getByRole("link", { name: "Agents", exact: true }).click();
 
-  let browser = page.getByRole("article", { name: "Global agent sessions" });
+  let browser = page.getByRole("article", { name: "Compatibility agent sessions" });
   await expect(browser.getByText("Coding Agent Atlas", { exact: true })).toBeVisible();
   await expect(browser.getByText("Tester", { exact: true })).toBeVisible();
   await expect(browser.getByText(/00000000-0000-4000-8000-000000000620/)).toHaveCount(0);
@@ -823,7 +832,7 @@ test("global agent browser searches every active conversation with progressive d
 
   await enableAdvancedMode(page);
   await page.getByRole("link", { name: "Agents", exact: true }).click();
-  browser = page.getByRole("article", { name: "Global agent sessions" });
+  browser = page.getByRole("article", { name: "Compatibility agent sessions" });
   await browser.getByRole("searchbox", { name: "Search global agent sessions" }).fill("atlas");
   await expect(browser.getByText(/Session 00000000-0000-4000-8000-000000000620/)).toBeVisible();
 
@@ -832,7 +841,7 @@ test("global agent browser searches every active conversation with progressive d
   await page.getByRole("radio", { name: /Developer/ }).click();
   await page.getByRole("button", { name: "Back to app" }).click();
   await page.getByRole("link", { name: "Agents", exact: true }).click();
-  browser = page.getByRole("article", { name: "Global agent sessions" });
+  browser = page.getByRole("article", { name: "Compatibility agent sessions" });
   await expect(browser.getByText(/Codex thread thread-atlas/)).toBeVisible();
   await expect(browser.getByText(/organization revision/)).toBeVisible();
   const accessibility = await new AxeBuilder({ page }).include(".global-agent-session-section").analyze();

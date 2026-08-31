@@ -1329,6 +1329,14 @@ enum WorkflowCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Show the exact workflow together with bounded Work/Verify invocation activity.
+    Activity {
+        id: String,
+        #[arg(long, default_value_t = 100)]
+        invocation_limit: usize,
+        #[arg(long)]
+        json: bool,
+    },
     /// Durably request cancellation using current revision/generation fencing.
     Cancel {
         id: String,
@@ -11134,6 +11142,46 @@ async fn run_root_workflow(
                 println!("  events: {}", inspection.events.len());
             }
         }
+        WorkflowCommand::Activity {
+            id,
+            invocation_limit,
+            json,
+        } => {
+            let workflow_id = WorkflowId(uuid::Uuid::parse_str(id)?);
+            let activity = mcg_platform::query_root_workflow_activity(
+                data_directory,
+                workflow_id,
+                *invocation_limit,
+            )
+            .await?
+            .ok_or_else(|| format!("canonical workflow {workflow_id} was not found"))?;
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&activity)?);
+            } else {
+                println!(
+                    "Workflow {} activity",
+                    activity.workflow.attempt.workflow_id
+                );
+                println!("  objective: {}", activity.workflow.task_contract.objective);
+                println!("  state: {:?}", activity.workflow.attempt.state);
+                println!("  attempt: {}", activity.workflow.attempt.attempt_number);
+                println!(
+                    "  invocations: {}{}",
+                    activity.invocations.len(),
+                    if activity.invocations_truncated {
+                        " (bounded window)"
+                    } else {
+                        ""
+                    }
+                );
+                for invocation in activity.invocations {
+                    println!(
+                        "  {:?}  {}  {:?}",
+                        invocation.role, invocation.invocation_id, invocation.model_run_state
+                    );
+                }
+            }
+        }
         WorkflowCommand::Cancel {
             id,
             idempotency_key,
@@ -16338,6 +16386,26 @@ mod tests {
             show.command.expect("command"),
             Command::Workflow {
                 command: WorkflowCommand::Show { json: false, .. }
+            }
+        ));
+        let activity = Cli::try_parse_from([
+            "mcg",
+            "workflow",
+            "activity",
+            id,
+            "--invocation-limit",
+            "25",
+            "--json",
+        ])
+        .expect("workflow activity command");
+        assert!(matches!(
+            activity.command.expect("command"),
+            Command::Workflow {
+                command: WorkflowCommand::Activity {
+                    invocation_limit: 25,
+                    json: true,
+                    ..
+                }
             }
         ));
         let cancel = Cli::try_parse_from([

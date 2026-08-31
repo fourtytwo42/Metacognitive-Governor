@@ -200,6 +200,24 @@ async fn protected_root_workflow(
 }
 
 #[tauri::command]
+async fn protected_root_workflow_activity(
+    workflow_id: String,
+    invocation_limit: usize,
+) -> Result<Option<mcg_contracts::WorkflowInvocationActivity>, String> {
+    let workflow_id = mcg_contracts::WorkflowId(
+        uuid::Uuid::parse_str(&workflow_id)
+            .map_err(|error| format!("Workflow ID is invalid: {error}"))?,
+    );
+    mcg_platform::query_root_workflow_activity(
+        &AppConfig::default().data_directory,
+        workflow_id,
+        invocation_limit,
+    )
+    .await
+    .map_err(|error| format!("Protected Root workflow activity could not be loaded: {error}"))
+}
+
+#[tauri::command]
 async fn protected_root_actions(limit: usize) -> Result<Vec<mcg_contracts::ActionSummary>, String> {
     mcg_platform::query_root_actions(&AppConfig::default().data_directory, limit)
         .await
@@ -4091,6 +4109,7 @@ pub fn run() {
             protected_root_status,
             protected_root_workflows,
             protected_root_workflow,
+            protected_root_workflow_activity,
             protected_root_actions,
             protected_root_action,
             compensate_protected_root_action,

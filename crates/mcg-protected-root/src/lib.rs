@@ -42,12 +42,13 @@ use mcg_contracts::{
     decode_canonical_cbor_v1,
 };
 use mcg_platform::{
-    MAX_ROOT_INVOCATION_MODEL_RUNS, MAX_ROOT_INVOCATION_SUMMARIES, PlatformError,
-    ROOT_ACTION_COMPENSATE_REQUEST_TYPE, ROOT_ACTION_COMPENSATE_RESPONSE_TYPE,
+    MAX_ROOT_INVOCATION_MODEL_RUNS, MAX_ROOT_INVOCATION_SUMMARIES, MAX_ROOT_WORKFLOW_INVOCATIONS,
+    PlatformError, ROOT_ACTION_COMPENSATE_REQUEST_TYPE, ROOT_ACTION_COMPENSATE_RESPONSE_TYPE,
     ROOT_ACTION_LIST_REQUEST_TYPE, ROOT_ACTION_LIST_RESPONSE_TYPE, ROOT_ACTION_SHOW_REQUEST_TYPE,
     ROOT_ACTION_SHOW_RESPONSE_TYPE, ROOT_INVOCATION_LIST_REQUEST_TYPE,
     ROOT_INVOCATION_LIST_RESPONSE_TYPE, ROOT_INVOCATION_SHOW_REQUEST_TYPE,
     ROOT_INVOCATION_SHOW_RESPONSE_TYPE, ROOT_STATUS_REQUEST_TYPE, ROOT_STATUS_RESPONSE_TYPE,
+    ROOT_WORKFLOW_ACTIVITY_REQUEST_TYPE, ROOT_WORKFLOW_ACTIVITY_RESPONSE_TYPE,
     ROOT_WORKFLOW_CANCEL_REQUEST_TYPE, ROOT_WORKFLOW_CANCEL_RESPONSE_TYPE,
     ROOT_WORKFLOW_LIST_REQUEST_TYPE, ROOT_WORKFLOW_LIST_RESPONSE_TYPE,
     ROOT_WORKFLOW_SHOW_REQUEST_TYPE, ROOT_WORKFLOW_SHOW_RESPONSE_TYPE, RootIpcSession,
@@ -1595,6 +1596,12 @@ struct WorkflowShowRequest {
 }
 
 #[derive(serde::Deserialize)]
+struct WorkflowActivityRequest {
+    workflow_id: WorkflowId,
+    invocation_limit: usize,
+}
+
+#[derive(serde::Deserialize)]
 struct ActionListRequest {
     limit: usize,
 }
@@ -1751,6 +1758,7 @@ where
         ROOT_STATUS_REQUEST_TYPE
             | ROOT_WORKFLOW_LIST_REQUEST_TYPE
             | ROOT_WORKFLOW_SHOW_REQUEST_TYPE
+            | ROOT_WORKFLOW_ACTIVITY_REQUEST_TYPE
             | ROOT_WORKFLOW_CANCEL_REQUEST_TYPE
             | ROOT_ACTION_LIST_REQUEST_TYPE
             | ROOT_ACTION_SHOW_REQUEST_TYPE
@@ -1839,6 +1847,21 @@ async fn dispatch_root_ipc_request(
             (
                 ROOT_WORKFLOW_SHOW_RESPONSE_TYPE,
                 serde_json::to_value(runtime.canonical_workflow(show.workflow_id)?)?,
+            )
+        }
+        ROOT_WORKFLOW_ACTIVITY_REQUEST_TYPE => {
+            let activity: WorkflowActivityRequest = serde_json::from_value(request_value)?;
+            if activity.invocation_limit == 0
+                || activity.invocation_limit > MAX_ROOT_WORKFLOW_INVOCATIONS
+            {
+                return Err(PlatformError::InvalidInspectionBound.into());
+            }
+            (
+                ROOT_WORKFLOW_ACTIVITY_RESPONSE_TYPE,
+                serde_json::to_value(runtime.canonical_workflow_activity(
+                    activity.workflow_id,
+                    activity.invocation_limit,
+                )?)?,
             )
         }
         ROOT_WORKFLOW_CANCEL_REQUEST_TYPE => {
@@ -2022,7 +2045,7 @@ mod tests {
     use mcg_platform::{
         cancel_root_workflow, exchange_root_rpc, query_root_action, query_root_actions,
         query_root_invocation, query_root_invocations, query_root_status, query_root_workflow,
-        query_root_workflows, root_ipc_session_path,
+        query_root_workflow_activity, query_root_workflows, root_ipc_session_path,
     };
     use mcg_storage::{SqliteEventStore, task_contract_content_hash, verify_backup_bundle};
 
@@ -2729,6 +2752,18 @@ mod tests {
             .expect("invocation list");
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].invocation_id, manifest.id);
+        let activity = query_root_workflow_activity(temporary.path(), attempt.workflow_id, 10)
+            .await
+            .expect("workflow activity")
+            .expect("workflow activity inspection");
+        assert_eq!(activity.workflow.task_contract, contract);
+        assert_eq!(activity.invocations, listed);
+        assert!(!activity.invocations_truncated);
+        assert!(
+            query_root_workflow_activity(temporary.path(), attempt.workflow_id, 0)
+                .await
+                .is_err()
+        );
         assert_eq!(listed[0].workflow_id, attempt.workflow_id);
         assert_eq!(listed[0].model_run_id, Some(run.id));
         assert_eq!(listed[0].model_run_state, Some(ModelRunState::Planned));
