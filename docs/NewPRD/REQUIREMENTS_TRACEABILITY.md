@@ -1,6 +1,6 @@
 # Cognitive Runtime Requirements Traceability
 
-**Status:** Active implementation matrix; Stages 1–2 implementation complete with owner-bound package lanes open, Stages 3–4 substantially implemented, and Stage 5 reconstruction contracts/Root persistence underway
+**Status:** Active implementation matrix; Stages 1–2 implementation complete with owner-bound package lanes open, Stages 3–4 substantially implemented, and Stage 5 complete through Root-owned real-process orchestration/recovery
 **Purpose:** Map normative requirements to implementation stages, automated evidence, E2E/UAT evidence, and release artifacts
 
 This matrix is updated as implementation lands. `Implemented / cumulative UAT pending` means local implementation and its stage-level automated evidence pass, while final native/cross-platform evidence remains open.
@@ -76,13 +76,13 @@ This matrix is updated as implementation lands. `Implemented / cumulative UAT pe
 
 | Requirement | Stage | Automated evidence | E2E/UAT evidence | Status |
 |---|---:|---|---|---|
-| Every material call has a reconstructable `InvocationManifest` | 5 | Manifest completeness tests | CLI reconstruction | Complete bounded DTO, canonical hash fixture, schema-56 immutable persistence, exact replay/substitution, restart reconstruction, model-run lineage, and a separate deterministic Runtime producer process implemented / Protected Root orchestration, Root IPC, CLI, Desktop, and product E2E pending |
-| Exact context refs are captured in `ContextManifest` | 5, 8 | Context tests | Developer inspector | Exact source/perspective/influence/transformation/order/token/selection/expansion contract and content-addressed schema-56 storage implemented / live Runtime capture, Developer inspection, and Stage 8 retrieval integration pending |
+| Every material call has a reconstructable `InvocationManifest` | 5 | Manifest completeness tests | CLI reconstruction | Complete bounded DTO, canonical hash fixture, schema-56–58 immutable persistence, exact replay/substitution, restart reconstruction, model-run lineage, separate deterministic Runtime process, and Root-owned plan-before-dispatch/result-fenced orchestration implemented / Root inspection IPC, CLI, Desktop, and product E2E pending |
+| Exact context refs are captured in `ContextManifest` | 5, 8 | Context tests | Developer inspector | Exact source/perspective/influence/transformation/order/token/selection/expansion contract, content-addressed schema-56 storage, Root-bound real-process dispatch, and restart reconstruction implemented / live product capture, Developer inspection, and Stage 8 retrieval integration pending |
 | Remote model calls require Root-bound egress permit | 6 | Permit/policy tests | Unauthorized destination/context attack | Planned |
 | Runtime receives no ambient provider secrets | 6 | Secret scanning/process tests | Compromised Runtime probe | Deterministic runtime-worker launches with a cleared environment, receives only its short-lived IPC bootstrap over inherited stdin, and has no provider/network/secret dependency / Stage 6 governed real-provider secret-handle path pending |
 | Secret handles resolve only for exact authorized execution | 6 | Gateway tests | Wrong provider/action handle | Planned |
 | Provider retry respects effect and idempotency semantics | 6 | Fake provider fault tests | Dropped/late stream | Planned |
-| Resolved provider/model/config fingerprint is persisted | 5, 6 | Manifest tests | Run inspection | InvocationManifest contract and immutable Root storage bind resolved provider/model, observed fingerprint, configuration, prompts, role, sampling, reasoning, environment, build, and request/response hashes / deterministic Runtime producer and Stage 6 real gateway pending |
+| Resolved provider/model/config fingerprint is persisted | 5, 6 | Manifest tests | Run inspection | InvocationManifest and immutable Root storage bind resolved provider/model, observed fingerprint, configuration, prompts, role, sampling, reasoning, environment, executable build, request hash, and immutable Runtime response hash/payload; real Work/Verify reconstruction passes / Stage 6 real gateway pending |
 | Private prompts, scratch reasoning, and secrets are excluded from generic telemetry | 5, 6 | Redaction tests | Logs/backups/UI inspection | Context and invocation records retain governed refs/hashes and bounded metadata rather than materialized prompt contents; schema-56 inspection is bounded / Runtime log, backup, UI, and Stage 6 secret-redaction adversarial gates pending |
 
 ## 7. Tools, Skills, Capabilities, and Sandboxing
