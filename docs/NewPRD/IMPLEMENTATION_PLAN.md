@@ -1,6 +1,6 @@
 # MetaCog Cognitive Runtime Implementation Plan
 
-**Status:** Active staged delivery plan; Stages 0–4 have implementation checkpoints and Stage 5 is implemented through Root-owned real-process Work/Verify, authenticated Root/CLI/Desktop reconstruction, generation-safe service replacement, active cancellation, and a governed global agent browser
+**Status:** Active staged delivery plan; Stages 0–4 have implementation checkpoints and Stage 5 is implemented through Root-owned real-process Work/Verify, authenticated Root/CLI/Desktop reconstruction, generation-safe service replacement, active cancellation, governed global agent browsing, and canonical workflow/current-attempt invocation drill-down
 **Scope:** Alignment with the Adaptive Cognitive Agent Runtime PRD v1.4.2, Cognitive Runtime Implementation Contract v0.1, and Cognitive Runtime Experimental Protocol Specification v0.2
 **Product:** MetaCog desktop and `mcg` CLI on Windows, macOS, and Linux
 
@@ -289,7 +289,7 @@ Separate writable cognition from Root authority and prove reconstructable Work a
 
 - Replace permanent-agent assumptions with workflow/invocation presentation.
 - Preserve friendly current labels where needed, while Developer shows exact Chat/Work/Verify roles.
-- Add the global workflow/invocation browser and remote inspection only after the canonical ownership model exists. The bounded global agent inventory and exact local selection are implemented; combined workflow/invocation drill-down and direct remote-server inventory semantics remain.
+- Add the global workflow/invocation browser and remote inspection only after the canonical ownership model exists. The bounded compatibility-agent inventory, exact local selection, and Root-owned workflow/current-attempt invocation drill-down are implemented; direct remote-server inventory semantics remain.
 - CLI can reconstruct and print the conditions of any material invocation.
 
 ### Testing and exit gate
@@ -679,7 +679,7 @@ Do not claim consciousness, subjective identity, unrestricted self-improvement, 
 
 1. Complete Stage 3 compatibility reattachment, child propagation, event streaming, wake triggers, and the remaining nonterminal crash/reassignment matrix.
 2. Extend Stage 4's implemented owner-authorized compensation and real-child fault paths through packaged adversarial and native three-platform qualification.
-3. Finish Stage 5 combined workflow/invocation drill-down, direct remote-server inventory semantics where support is discoverable, and packaged cancellation/replacement qualification.
+3. Finish Stage 5 direct remote-server inventory semantics where support is discoverable and packaged cancellation/replacement qualification; the canonical workflow/current-attempt invocation drill-down is implemented.
 4. Implement the Stage 6 Root-bound provider/tool/secret permit pipeline and prove one real end-to-end governed request.
 5. Build and pass the Stage 7 Protected Evaluator and Phase 0 integrity gate before beginning recursive improvement work.
 6. Continue through Stages 8–13 only behind the recorded scientific and production gates, with matched Windows/macOS/Linux package and native UAT evidence at every affected boundary.

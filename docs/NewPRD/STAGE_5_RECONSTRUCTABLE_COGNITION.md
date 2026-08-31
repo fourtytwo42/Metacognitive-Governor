@@ -1,6 +1,6 @@
 # Stage 5 — Runtime Worker and Reconstructable Deterministic Cognition
 
-**Status:** Contract/persistence foundation (`83b5629`), separate authenticated worker (`522ba92`), Root-owned real-process orchestration/recovery (`4a2a905`), authenticated Root/CLI reconstruction (`bde06f0`), progressive Desktop reconstruction (`1e94efb`), generation-safe idle service supervision (`dc54a88`), active invocation cancellation (`65f7073`), and the governed global agent browser (`44c6389`) implemented; combined workflow/invocation drill-down and release qualification remain open
+**Status:** Contract/persistence foundation (`83b5629`), separate authenticated worker (`522ba92`), Root-owned real-process orchestration/recovery (`4a2a905`), authenticated Root/CLI reconstruction (`bde06f0`), progressive Desktop reconstruction (`1e94efb`), generation-safe idle service supervision (`dc54a88`), active invocation cancellation (`65f7073`), governed global agent browser (`44c6389`), and canonical workflow/current-attempt invocation drill-down (`3d55d05`) implemented; direct governed remote inventory and release qualification remain open
 
 ## Delivered contract boundary
 
@@ -150,6 +150,21 @@ agent/conversation/state identity; Advanced adds exact session/update/model cont
 read-only conversation, role, organization revision, and Codex-thread locators. Search spans the
 bounded in-memory projection, and opening a row uses its exact conversation identity.
 
+## Canonical workflow activity drill-down checkpoint
+
+Checkpoint `3d55d05` makes the Agents surface present Root-owned workflow activity separately from compatibility agent
+sessions. `WorkflowInvocationActivity` binds one exact latest workflow attempt, TaskContract, and
+bounded chronological invocation projection. Every invocation must match all three identities and
+be unique; substituted or duplicate evidence fails closed after IPC deserialization. The query
+uses a limit-plus-one window and reports truncation rather than implying completeness.
+
+Protected Root exposes the projection only through a versioned authenticated request capped at
+200 invocations. `mcg workflow activity <id> [--invocation-limit N] [--json]` provides the same
+human or machine-readable truth. Advanced Desktop users can drill from the workflow into exact
+Work/Verification lifecycle records and then into invocation reconstruction; Developer adds the
+combined read-only canonical JSON. Compatibility sessions remain searchable and conversation-
+linked, but are explicitly labeled until Stage 3 provides a persisted canonical attachment.
+
 ## Verification
 
 - `cargo test -p mcg-contracts` — 17/17 passed.
@@ -174,7 +189,7 @@ Strict whole-storage Clippy still reaches the repository’s documented pre-exis
 
 Stage 5 is not complete until all of the following are implemented and qualified:
 
-1. Combine the global agent inventory with canonical workflow/invocation drill-down and, where the governed transport can prove equivalent authority, implement direct remote-server inventory semantics rather than treating post-selection transport binding as remote enumeration.
+1. Where the governed transport can prove equivalent authority, implement direct remote-server inventory semantics rather than treating post-selection transport binding as remote enumeration.
 2. Connect real governed provider/model execution through Stage 6 permits without giving Runtime ambient network, storage, or secret authority.
 3. Run packaged active cancellation/service replacement, broader combined workflow/Runtime crash injection, native GUI UAT, migration, and matched Windows/Linux/macOS package gates.
 
