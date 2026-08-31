@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use chrono::{Duration, Utc};
 use mcg_config::AutonomyPreset;
+use mcg_contracts::{SourceRef, StableTypeId, canonical_contract_hash};
 use mcg_domain::{ApprovalId, ToolExecutionId, ToolRequestId};
 use mcg_policy::{
     ActionClass, CapabilityEffect, CapabilityPolicy, CapabilityRequest, OwnerConstitution,
@@ -14,10 +15,52 @@ use sha2::{Digest, Sha256};
 use url::Url;
 
 use crate::{
-    ApprovalRequest, ApprovalState, ExecutionLeaseRepository, LeaseState, OutputRedactor,
-    TOOL_SCHEMA_VERSION, ToolAuditPhase, ToolAuditRecord, ToolError, ToolExecutor, ToolOutcome,
-    ToolOutcomeStatus, ToolRequest, ToolRequestKind,
+    ApprovalOrigin, ApprovalRequest, ApprovalState, ExecutionLeaseRepository, LeaseState,
+    OutputRedactor, TOOL_SCHEMA_VERSION, ToolAuditPhase, ToolAuditRecord, ToolError, ToolExecutor,
+    ToolOutcome, ToolOutcomeStatus, ToolRequest, ToolRequestKind,
 };
+
+fn approval_source_ref<T: serde::Serialize>(
+    type_id: &str,
+    semantic_domain: &str,
+    locator: impl Into<String>,
+    value: &T,
+) -> Result<SourceRef, ToolError> {
+    let source_type = StableTypeId::parse(type_id)
+        .map_err(|error| ToolError::Invalid(format!("approval source type is invalid: {error}")))?;
+    let content_hash =
+        canonical_contract_hash(type_id, semantic_domain, value).map_err(|error| {
+            ToolError::Invalid(format!(
+                "approval source hash could not be derived: {error}"
+            ))
+        })?;
+    Ok(SourceRef {
+        source_type,
+        locator: locator.into(),
+        content_hash,
+    })
+}
+
+fn tool_approval_origin(request: &ToolRequest) -> Result<ApprovalOrigin, ToolError> {
+    Ok(ApprovalOrigin {
+        conversation: None,
+        turn: None,
+        invocation: None,
+        command: Some(approval_source_ref(
+            "mcg.tool_request.v1",
+            "MetaCog.ApprovalCommand",
+            request.id.to_string(),
+            request,
+        )?),
+        agent: None,
+        evidence: vec![approval_source_ref(
+            "mcg.tool_request_kind.v1",
+            "MetaCog.ApprovalEvidence",
+            format!("{}:kind", request.id),
+            &request.kind,
+        )?],
+    })
+}
 
 #[async_trait]
 pub trait ApprovalRepository: Send + Sync {
@@ -162,7 +205,7 @@ where
                                 action: request.kind.stable_name(),
                                 resource: resource.clone(),
                                 reason: reason.clone(),
-                                origin: None,
+                                origin: Some(tool_approval_origin(request)?),
                                 state: ApprovalState::Pending,
                                 requested_at: Utc::now(),
                                 expires_at: Utc::now() + Duration::hours(24),
@@ -964,6 +1007,48 @@ mod tests {
         let mut request = ToolRequest::new(task_id, "fixture request", kind);
         request.namespace = ToolNamespace::Host;
         request
+    }
+
+    #[test]
+    fn tool_approval_origin_is_stable_exact_and_content_bound() {
+        let request = request(
+            TaskId::new(),
+            ToolRequestKind::FsDelete {
+                path: "generated.txt".into(),
+                recursive: false,
+            },
+        );
+        let first = tool_approval_origin(&request).expect("approval origin");
+        let repeated = tool_approval_origin(&request).expect("stable approval origin");
+        assert_eq!(first, repeated);
+        assert_eq!(
+            first.command.as_ref().unwrap().locator,
+            request.id.to_string()
+        );
+        assert_eq!(first.evidence[0].locator, format!("{}:kind", request.id));
+        assert_eq!(
+            first.command.as_ref().unwrap().content_hash.domain,
+            "MetaCog.ApprovalCommand"
+        );
+        assert_eq!(
+            first.evidence[0].content_hash.domain,
+            "MetaCog.ApprovalEvidence"
+        );
+
+        let mut changed = request.clone();
+        changed.kind = ToolRequestKind::FsDelete {
+            path: "other.txt".into(),
+            recursive: false,
+        };
+        let changed = tool_approval_origin(&changed).expect("changed approval origin");
+        assert_ne!(
+            first.command.unwrap().content_hash,
+            changed.command.unwrap().content_hash
+        );
+        assert_ne!(
+            first.evidence[0].content_hash,
+            changed.evidence[0].content_hash
+        );
     }
 
     #[tokio::test]

@@ -1200,6 +1200,8 @@ test("Developer progressively inspects canonical governed-action evidence", asyn
   const turnId = "00000000-0000-4000-8000-000000000554";
   const agentId = "00000000-0000-4000-8000-000000000555";
   const approvalId = "00000000-0000-4000-8000-000000000549";
+  const invocationId = "00000000-0000-4000-8000-000000000547";
+  const invocationHash = { algorithm: "blake3-256", domain: "MetaCog.InvocationManifest", digest_hex: "2".repeat(64) };
   const action = {
     action_id: "00000000-0000-4000-8000-000000000541",
     execution_id: "00000000-0000-4000-8000-000000000542",
@@ -1215,7 +1217,7 @@ test("Developer progressively inspects canonical governed-action evidence", asyn
   };
   const payload = { type_id: "mcg.governed_filesystem_operation.v1", schema_version: 1, canonical_encoding: "canonical-cbor-v1", normalization: "canonical-json-v1", bytes: [1, 2, 3] };
   const inspection = {
-    envelope: { id: action.action_id, workflow_id: action.workflow_id, attempt_id: action.attempt_id, actor: action.actor, origin: { conversation: { source_type: "mcg.conversation.v1", locator: conversationId, content_hash: { algorithm: "blake3-256", domain: "MetaCog.Conversation", digest_hex: "1".repeat(64) } }, invocation: { source_type: "mcg.invocation_manifest.v1", locator: "00000000-0000-4000-8000-000000000547", content_hash: { algorithm: "blake3-256", domain: "MetaCog.Invocation", digest_hex: "2".repeat(64) } }, command: { source_type: "mcg.command_execution.v1", locator: "command-548", content_hash: { algorithm: "blake3-256", domain: "MetaCog.Command", digest_hex: "3".repeat(64) } }, approval: { source_type: "mcg.approval_request.v1", locator: approvalId, content_hash: { algorithm: "blake3-256", domain: "MetaCog.Approval", digest_hex: "4".repeat(64) } }, agent: { source_type: "mcg.runtime_actor.v1", locator: action.actor, content_hash: { algorithm: "blake3-256", domain: "MetaCog.Actor", digest_hex: "5".repeat(64) } }, evidence: [{ source_type: "mcg.action_evidence.v1", locator: "artifact-550", content_hash: { algorithm: "blake3-256", domain: "MetaCog.Evidence", digest_hex: "6".repeat(64) } }] }, effect_class: action.effect_class, operation: payload, operation_hash: { algorithm: "blake3-256", domain: "MetaCog.ActionOperation", digest_hex: "d".repeat(64) }, created_at: action.updated_at },
+    envelope: { id: action.action_id, workflow_id: action.workflow_id, attempt_id: action.attempt_id, actor: action.actor, origin: { conversation: { source_type: "mcg.conversation.v1", locator: conversationId, content_hash: { algorithm: "blake3-256", domain: "MetaCog.Conversation", digest_hex: "1".repeat(64) } }, invocation: { source_type: "mcg.invocation_manifest.v1", locator: invocationId, content_hash: invocationHash }, command: { source_type: "mcg.command_execution.v1", locator: "command-548", content_hash: { algorithm: "blake3-256", domain: "MetaCog.Command", digest_hex: "3".repeat(64) } }, approval: { source_type: "mcg.approval_request.v1", locator: approvalId, content_hash: { algorithm: "blake3-256", domain: "MetaCog.Approval", digest_hex: "4".repeat(64) } }, agent: { source_type: "mcg.runtime_actor.v1", locator: action.actor, content_hash: { algorithm: "blake3-256", domain: "MetaCog.Actor", digest_hex: "5".repeat(64) } }, evidence: [{ source_type: "mcg.action_evidence.v1", locator: "artifact-550", content_hash: { algorithm: "blake3-256", domain: "MetaCog.Evidence", digest_hex: "6".repeat(64) } }] }, effect_class: action.effect_class, operation: payload, operation_hash: { algorithm: "blake3-256", domain: "MetaCog.ActionOperation", digest_hex: "d".repeat(64) }, created_at: action.updated_at },
     compensation_actions: ["00000000-0000-4000-8000-000000000552"],
     executions: [{ id: action.execution_id, action_id: action.action_id, attempt_number: 1, state: action.state, revision: 3, lease_generation: 2, executor: action.actor, outcome: action.outcome, created_at: action.updated_at, updated_at: action.updated_at }],
     receipts: [],
@@ -1250,7 +1252,7 @@ test("Developer progressively inspects canonical governed-action evidence", asyn
     origin: {
       conversation: { source_type: "mcg.conversation.v2", locator: conversationId, content_hash: { algorithm: "blake3-256", domain: "MetaCog.ApprovalConversation", digest_hex: "7".repeat(64) } },
       turn: { source_type: "mcg.conversation_turn.v1", locator: turnId, content_hash: { algorithm: "blake3-256", domain: "MetaCog.ApprovalTurn", digest_hex: "8".repeat(64) } },
-      invocation: null,
+      invocation: { source_type: "mcg.invocation_manifest.v1", locator: invocationId, content_hash: invocationHash },
       command: { source_type: "codex.command_approval_request.v1", locator: "command-548", content_hash: { algorithm: "blake3-256", domain: "MetaCog.ApprovalCommand", digest_hex: "9".repeat(64) } },
       agent: { source_type: "mcg.conversation_agent_session.v8", locator: agentId, content_hash: { algorithm: "blake3-256", domain: "MetaCog.ApprovalAgent", digest_hex: "a".repeat(64) } },
       evidence: [{ source_type: "codex.command_approval_evidence.v1", locator: "command-548:params", content_hash: { algorithm: "blake3-256", domain: "MetaCog.ApprovalEvidence", digest_hex: "b".repeat(64) } }]
@@ -1259,6 +1261,40 @@ test("Developer progressively inspects canonical governed-action evidence", asyn
     requested_at: action.updated_at,
     expires_at: "2026-08-30T13:00:00Z"
   });
+  const invocationSummary = {
+    invocation_id: invocationId,
+    workflow_id: action.workflow_id,
+    attempt_id: action.attempt_id,
+    role: "work",
+    task_contract: { id: "00000000-0000-4000-8000-000000000557", version: 1, content_hash: { algorithm: "blake3-256", domain: "MetaCog.TaskContract", digest_hex: "c".repeat(64) } },
+    model_run_id: null,
+    model_run_state: "completed",
+    model_run_revision: 1,
+    persisted_at: action.updated_at,
+    updated_at: action.updated_at
+  };
+  const invocationInspection = {
+    manifest: {
+      id: invocationId,
+      role: "work",
+      attempt_id: action.attempt_id,
+      task_contract: invocationSummary.task_contract,
+      runtime_identity: { instance_id: "runtime-approval", build_hash: { algorithm: "blake3-256", domain: "MetaCog.RuntimeExecutable", digest_hex: "d".repeat(64) }, protocol_version: 1, started_at: action.updated_at },
+      resolved_provider: { source_type: "mcg.provider.v1", locator: "governed-provider", content_hash: { algorithm: "blake3-256", domain: "MetaCog.Provider", digest_hex: "e".repeat(64) } },
+      resolved_model: { source_type: "mcg.model.v1", locator: "approval-model", content_hash: { algorithm: "blake3-256", domain: "MetaCog.Model", digest_hex: "f".repeat(64) } },
+      observed_model_fingerprint: null,
+      runtime_build: { algorithm: "blake3-256", domain: "MetaCog.RuntimeBuild", digest_hex: "1".repeat(64) },
+      request_hash: { algorithm: "blake3-256", domain: "MetaCog.ModelRequest", digest_hex: "2".repeat(64) },
+      response_hash: null
+    },
+    manifest_hash: invocationHash,
+    context_manifest: { id: "00000000-0000-4000-8000-000000000558", attempt_id: action.attempt_id, selected_sources: [], approximate_tokens: 0 },
+    context_manifest_hash: { algorithm: "blake3-256", domain: "MetaCog.ContextManifest", digest_hex: "3".repeat(64) },
+    model_runs: [],
+    model_runs_truncated: false
+  };
+  client.protectedRootInvocations.mockResolvedValue([invocationSummary]);
+  client.protectedRootInvocation.mockResolvedValue(invocationInspection);
 
   render(<App />);
   fireEvent.click(await screen.findByRole("link", { name: /Agents/ }));
@@ -1288,6 +1324,19 @@ test("Developer progressively inspects canonical governed-action evidence", asyn
   expect(source).toHaveTextContent("cargo test");
   expect(source).toHaveTextContent("command-548:params");
   expect(source).toHaveTextContent("777777777777");
+  fireEvent.click(within(source).getByRole("button", { name: /Open exact Runtime invocation/ }));
+  await waitFor(() => expect(client.protectedRootInvocation).toHaveBeenCalledWith(invocationId));
+  const invocationFocus = await screen.findByRole("status", { name: "Focused approval invocation" });
+  expect(invocationFocus).toHaveTextContent(invocationId);
+  expect(invocationFocus).toHaveTextContent("governed-provider / approval-model");
+  client.protectedRootInvocation.mockResolvedValueOnce({
+    ...invocationInspection,
+    manifest_hash: { ...invocationHash, digest_hex: "0".repeat(64) }
+  });
+  const actionsAfterFocus = screen.getByRole("article", { name: "Governed actions" });
+  fireEvent.click(within(actionsAfterFocus).getAllByRole("button", { name: /Open exact Runtime invocation/ })[0]);
+  const invocationsAfterMismatch = screen.getByRole("article", { name: "Runtime invocations" });
+  expect(await within(invocationsAfterMismatch).findByRole("alert")).toHaveTextContent("no longer matches its immutable approval binding");
 });
 
 test("Runtime invocations preserve one Root truth across Simple Advanced and Developer", async () => {

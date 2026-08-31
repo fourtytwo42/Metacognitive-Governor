@@ -420,6 +420,7 @@ import {
   type CanonicalWorkflowInspection,
   type CanonicalActionSummary,
   type CanonicalActionInspection,
+  type CanonicalSourceRef,
   type CanonicalInvocationSummary,
   type CanonicalInvocationInspection,
   type CanonicalModelRunState,
@@ -2652,6 +2653,7 @@ export function App() {
   const [actionError, setActionError] = useState<string | null>(null);
   const [canonicalInvocations, setCanonicalInvocations] = useState<CanonicalInvocationSummary[]>([]);
   const [invocationInspections, setInvocationInspections] = useState<Record<string, CanonicalInvocationInspection>>({});
+  const [focusedInvocationId, setFocusedInvocationId] = useState<string | null>(null);
   const [invocationBusy, setInvocationBusy] = useState<string | null>(null);
   const [invocationError, setInvocationError] = useState<string | null>(null);
   const [advanced, setAdvanced] = useState(false);
@@ -6248,6 +6250,41 @@ export function App() {
     }
   }
 
+  async function openCanonicalInvocationSource(source: CanonicalSourceRef) {
+    setInvocationBusy(source.locator);
+    setInvocationError(null);
+    setApprovalSourceError(null);
+    try {
+      if (source.source_type !== "mcg.invocation_manifest.v1") {
+        throw new Error(`Invocation source type ${source.source_type} is not a canonical InvocationManifest.`);
+      }
+      const inspection = await getProtectedRootInvocation(source.locator);
+      if (!inspection) throw new Error(`Exact invocation ${source.locator} is unavailable from Protected Root.`);
+      if (inspection.manifest.id !== source.locator) {
+        throw new Error(`Invocation inspection returned ${inspection.manifest.id} instead of exact origin ${source.locator}.`);
+      }
+      const actualHash = inspection.manifest_hash;
+      if (actualHash.algorithm !== source.content_hash.algorithm
+        || actualHash.domain !== source.content_hash.domain
+        || actualHash.digest_hex !== source.content_hash.digest_hex) {
+        throw new Error(`Invocation ${source.locator} no longer matches its immutable approval binding.`);
+      }
+      setInvocationInspections((current) => ({ ...current, [source.locator]: inspection }));
+      setFocusedInvocationId(source.locator);
+      setAgentTab("overview");
+      navigateSurface("agents");
+      window.requestAnimationFrame(() => {
+        document.getElementById(`invocation-${source.locator}`)?.scrollIntoView?.({ block: "center" });
+      });
+    } catch (error) {
+      const message = errorMessage(error);
+      setInvocationError(message);
+      setApprovalSourceError(message);
+    } finally {
+      setInvocationBusy(null);
+    }
+  }
+
   async function changeTaskState(taskId: string, state: "cancelled") {
     setTaskBusy(true);
     setTaskError(null);
@@ -7931,6 +7968,9 @@ export function App() {
   const focusedApprovalCommand = focusedApprovalConversationMatches && focusedApprovalOrigin?.command
     ? visibleConversation?.activities.find((activity) => activity.codex_item_id === focusedApprovalOrigin.command?.locator)
     : undefined;
+  const focusedInvocationInspection = focusedInvocationId
+    ? invocationInspections[focusedInvocationId]
+    : undefined;
   const directoryPlugins = plugins.filter((plugin) => {
     const manifest = plugin.active_revision.manifest;
     const matchesSearch = `${manifest.display_name} ${manifest.id}`.toLowerCase().includes(pluginSearch.trim().toLowerCase());
@@ -8475,6 +8515,7 @@ export function App() {
                 </dl>
                 <p><strong>Resource</strong> <code>{focusedApprovalSource.resource}</code></p>
                 {focusedApprovalOrigin.evidence.length > 0 && <ul>{focusedApprovalOrigin.evidence.map((source) => <li key={`${source.source_type}-${source.locator}`}><strong>Evidence</strong> <code>{source.locator}</code> · hash {source.content_hash.digest_hex.slice(0, 12)}…</li>)}</ul>}
+                {focusedApprovalOrigin.invocation && <button className="link-button" type="button" disabled={invocationBusy !== null} onClick={() => void openCanonicalInvocationSource(focusedApprovalOrigin.invocation!)}>{invocationBusy === focusedApprovalOrigin.invocation.locator ? "Opening exact invocation…" : "Open exact Runtime invocation →"}</button>}
                 <p className="form-note">These are the immutable locators and hashes captured when the request was persisted. Missing compatibility projections stay explicit and are never replaced by a nearby conversation, agent, or command.</p>
               </section>}
               {approvalSourceError && <p className="error-message" role="alert">{approvalSourceError}</p>}
@@ -9102,11 +9143,16 @@ export function App() {
                 <button className="secondary" type="button" disabled={invocationBusy !== null} onClick={() => void refreshCanonicalInvocations()}>{invocationBusy === "list" ? "Refreshing…" : "Refresh"}</button>
               </div>
               {invocationError && <p className="error-message" role="alert">{invocationError}</p>}
+              {focusedInvocationId && focusedInvocationInspection && <div className="approval-invocation-focus" role="status" aria-label="Focused approval invocation">
+                <strong>Exact approval-bound invocation</strong>
+                <span><code>{focusedInvocationId}</code> · {focusedInvocationInspection.manifest.role === "work" ? "Work" : "Verification"} · {focusedInvocationInspection.manifest.resolved_provider.locator} / {focusedInvocationInspection.manifest.resolved_model.locator}</span>
+                <button className="link-button" type="button" onClick={() => setFocusedInvocationId(null)}>Clear focus</button>
+              </div>}
               {canonicalInvocations.length === 0 ? <p className="empty-state">No reconstructable Runtime invocations yet.</p> : <div className="instance-list">
                 {canonicalInvocations.map((invocation) => {
                   const inspection = invocationInspections[invocation.invocation_id];
                   const latestRun = inspection?.model_runs.at(-1)?.run;
-                  return <div className="instance-row canonical-invocation-row" key={invocation.invocation_id} data-invocation-state={invocation.model_run_state ?? "unplanned"}>
+                  return <div className={`instance-row canonical-invocation-row${focusedInvocationId === invocation.invocation_id ? " focused" : ""}`} id={`invocation-${invocation.invocation_id}`} key={invocation.invocation_id} data-invocation-id={invocation.invocation_id} data-invocation-state={invocation.model_run_state ?? "unplanned"} aria-current={focusedInvocationId === invocation.invocation_id ? "true" : undefined}>
                     <span>
                       <strong>{invocation.role === "work" ? "Work run" : "Verification run"}</strong>
                       <small>{invocationStateLabel(invocation.model_run_state)}{advanced ? ` · revision ${invocation.model_run_revision ?? 0} · updated ${new Date(invocation.updated_at).toLocaleString()}` : ""}</small>
@@ -9167,6 +9213,7 @@ export function App() {
                           {inspection.envelope.origin.evidence.map((source) => <li key={`Evidence-${source.source_type}-${source.locator}`}><strong>Evidence</strong> <code>{source.locator}</code> <small>{source.content_hash.digest_hex.slice(0, 12)}…</small></li>)}
                         </ul>
                         {inspection.envelope.origin.conversation && <button className="link-button" type="button" disabled={!conversations.some((conversation) => conversation.id === inspection.envelope.origin?.conversation?.locator)} title={conversations.some((conversation) => conversation.id === inspection.envelope.origin?.conversation?.locator) ? "Open the exact originating conversation" : "The originating conversation has not been projected into this compatibility session yet"} onClick={() => openChat(inspection.envelope.origin!.conversation!.locator)}>Open originating conversation →</button>}
+                        {inspection.envelope.origin.invocation && <button className="link-button" type="button" disabled={invocationBusy !== null} onClick={() => void openCanonicalInvocationSource(inspection.envelope.origin!.invocation!)}>{invocationBusy === inspection.envelope.origin.invocation.locator ? "Opening exact invocation…" : "Open exact Runtime invocation →"}</button>}
                         {inspection.envelope.origin.approval && <button className="link-button" type="button" disabled={approvalSourceBusy !== null} onClick={() => void openApprovalSource(inspection.envelope.origin!.approval!.locator)}>{approvalSourceBusy === inspection.envelope.origin.approval.locator ? "Opening approval source…" : "Open approval, agent, command, and evidence →"}</button>}
                       </div>}
                       {(typeof inspection.envelope.compensates_action === "string" || (inspection.compensation_actions?.length ?? 0) > 0) && <div className="action-compensation-history" aria-label="Compensation history" role="region">

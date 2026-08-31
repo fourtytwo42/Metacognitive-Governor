@@ -850,6 +850,52 @@ fn codex_approval_origin(
     })
 }
 
+#[derive(Serialize)]
+struct GuidedEvaluationApprovalCommand<'a> {
+    request_id: ToolRequestId,
+    run_id: RunId,
+    attempt: u16,
+    conditions: &'a [SuccessCondition],
+}
+
+fn guided_evaluation_approval_origin(
+    request_id: ToolRequestId,
+    run_id: RunId,
+    attempt: u16,
+    conditions: &[SuccessCondition],
+    evaluator: &AgentInstance,
+) -> Result<ApprovalOrigin, RuntimeError> {
+    let command = GuidedEvaluationApprovalCommand {
+        request_id,
+        run_id,
+        attempt,
+        conditions,
+    };
+    Ok(ApprovalOrigin {
+        conversation: None,
+        turn: None,
+        invocation: None,
+        command: Some(approval_source_ref(
+            "mcg.guided_evaluation_approval.v1",
+            "MetaCog.ApprovalCommand",
+            request_id.to_string(),
+            &command,
+        )?),
+        agent: Some(approval_source_ref(
+            "mcg.agent_instance.v1",
+            "MetaCog.ApprovalAgent",
+            evaluator.id.to_string(),
+            evaluator,
+        )?),
+        evidence: vec![approval_source_ref(
+            "mcg.guided_evaluation_conditions.v1",
+            "MetaCog.ApprovalEvidence",
+            format!("{request_id}:conditions"),
+            &conditions,
+        )?],
+    })
+}
+
 impl RuntimeError {
     #[must_use]
     pub const fn is_not_found(&self) -> bool {
@@ -22436,19 +22482,19 @@ impl AppRuntime {
             .filter(|role| role.kind == RoleKind::Evaluator)
             .map(|role| role.id)
             .collect::<Vec<_>>();
-        let evaluator_instance_id = view
+        let evaluator_instance = view
             .instances
             .iter()
             .find(|instance| {
                 instance.state == AgentState::Completed
                     && evaluator_roles.contains(&instance.role_id)
             })
-            .map(|instance| instance.id)
             .ok_or_else(|| {
                 StorageError::Conflict(
                     "consumer evaluation requires a completed independent evaluator".into(),
                 )
             })?;
+        let evaluator_instance_id = evaluator_instance.id;
         let mut conditions = Vec::new();
         for item in &view.plan.items {
             for condition in &item.success_conditions {
@@ -22539,7 +22585,13 @@ impl AppRuntime {
                         reason: format!(
                             "Guided mode requires approval to run these exact objective checks: {checks}"
                         ),
-                        origin: None,
+                        origin: Some(guided_evaluation_approval_origin(
+                            request_id,
+                            run_id,
+                            checkpoint.attempt,
+                            &conditions,
+                            evaluator_instance,
+                        )?),
                         state: ApprovalState::Pending,
                         requested_at: Utc::now(),
                         expires_at: Utc::now() + Duration::hours(24),
@@ -29128,6 +29180,65 @@ mod tests {
         let agentless = codex_approval_origin(&conversation, &turn, &request, None)
             .expect("agentless approval origin");
         assert!(agentless.agent.is_none());
+    }
+
+    #[test]
+    fn guided_evaluation_approval_origin_is_stable_exact_and_content_bound() {
+        let now = Utc::now();
+        let run_id = RunId::new();
+        let request_id = ToolRequestId::new();
+        let evaluator = AgentInstance {
+            schema_version: AGENT_RUN_SCHEMA_VERSION,
+            id: AgentInstanceId::new(),
+            role_id: mcg_domain::RoleId::new(),
+            run_id,
+            task_id: TaskId::new(),
+            state: AgentState::Completed,
+            model: None,
+            context_fingerprint: "evaluation-context".into(),
+            confidence: ConfidenceEstimate {
+                basis_points: 9_000,
+                sample_size: 4,
+            },
+            created_at: now,
+            updated_at: now,
+        };
+        let conditions = vec![SuccessCondition::Test {
+            command: "cargo test --workspace".into(),
+        }];
+        let first =
+            guided_evaluation_approval_origin(request_id, run_id, 2, &conditions, &evaluator)
+                .expect("guided approval origin");
+        let repeated =
+            guided_evaluation_approval_origin(request_id, run_id, 2, &conditions, &evaluator)
+                .expect("stable guided approval origin");
+        assert_eq!(first, repeated);
+        assert_eq!(
+            first.command.as_ref().unwrap().locator,
+            request_id.to_string()
+        );
+        assert_eq!(
+            first.agent.as_ref().unwrap().locator,
+            evaluator.id.to_string()
+        );
+        assert_eq!(
+            first.evidence[0].locator,
+            format!("{request_id}:conditions")
+        );
+
+        let changed = guided_evaluation_approval_origin(
+            request_id,
+            run_id,
+            2,
+            &[SuccessCondition::Test {
+                command: "cargo test --all-targets".into(),
+            }],
+            &evaluator,
+        )
+        .expect("changed guided approval origin");
+        assert_eq!(first.agent, changed.agent);
+        assert_ne!(first.command, changed.command);
+        assert_ne!(first.evidence, changed.evidence);
     }
 
     #[test]
