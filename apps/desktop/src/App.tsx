@@ -208,6 +208,8 @@ import {
   getProtectedRootWorkflow,
   listProtectedRootActions,
   getProtectedRootAction,
+  listProtectedRootInvocations,
+  getProtectedRootInvocation,
   cancelProtectedRootWorkflow,
   getGovernorOverview,
   getGovernorControlPolicy,
@@ -415,6 +417,9 @@ import {
   type CanonicalWorkflowInspection,
   type CanonicalActionSummary,
   type CanonicalActionInspection,
+  type CanonicalInvocationSummary,
+  type CanonicalInvocationInspection,
+  type CanonicalModelRunState,
   type ActionExecutionState,
   type WorkflowState,
   type UpdateCheck,
@@ -487,6 +492,18 @@ function actionStateLabel(state: ActionExecutionState): string {
     quarantined: "Needs attention",
     compensated: "Reverted"
   } as Record<ActionExecutionState, string>)[state];
+}
+
+function invocationStateLabel(state: CanonicalModelRunState | null): string {
+  if (state === null) return "Preparing";
+  return ({
+    planned: "Preparing",
+    dispatched: "Working",
+    completed: "Completed",
+    failed: "Failed",
+    cancelled: "Cancelled",
+    outcome_unknown: "Recovering"
+  } as Record<CanonicalModelRunState, string>)[state];
 }
 
 function codexFeatureStageLabel(stage: CodexFeature["stage"]): string {
@@ -2630,6 +2647,10 @@ export function App() {
   const [actionInspections, setActionInspections] = useState<Record<string, CanonicalActionInspection>>({});
   const [actionBusy, setActionBusy] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [canonicalInvocations, setCanonicalInvocations] = useState<CanonicalInvocationSummary[]>([]);
+  const [invocationInspections, setInvocationInspections] = useState<Record<string, CanonicalInvocationInspection>>({});
+  const [invocationBusy, setInvocationBusy] = useState<string | null>(null);
+  const [invocationError, setInvocationError] = useState<string | null>(null);
   const [advanced, setAdvanced] = useState(false);
   const [userSettings, setUserSettings] = useState<UserSettings | null>(null);
   const [settingsHistory, setSettingsHistory] = useState<UserSettingsRevision[]>([]);
@@ -4110,6 +4131,32 @@ export function App() {
     }
   }
 
+  async function refreshCanonicalInvocations() {
+    setInvocationBusy("list");
+    setInvocationError(null);
+    try {
+      setCanonicalInvocations(await listProtectedRootInvocations());
+    } catch (error) {
+      setInvocationError(errorMessage(error));
+    } finally {
+      setInvocationBusy(null);
+    }
+  }
+
+  async function inspectCanonicalInvocation(invocationId: string) {
+    setInvocationBusy(invocationId);
+    setInvocationError(null);
+    try {
+      const inspection = await getProtectedRootInvocation(invocationId);
+      if (!inspection) throw new Error(`Invocation ${invocationId} was not found.`);
+      setInvocationInspections((current) => ({ ...current, [invocationId]: inspection }));
+    } catch (error) {
+      setInvocationError(errorMessage(error));
+    } finally {
+      setInvocationBusy(null);
+    }
+  }
+
   useEffect(() => {
     let active = true;
     getLocalServiceStatus()
@@ -4145,6 +4192,13 @@ export function App() {
       })
       .catch((error) => {
         if (active) setActionError(errorMessage(error));
+      });
+    listProtectedRootInvocations()
+      .then((invocations) => {
+        if (active) setCanonicalInvocations(invocations);
+      })
+      .catch((error) => {
+        if (active) setInvocationError(errorMessage(error));
       });
     getUpdateConfiguration()
       .then((configuration) => {
@@ -8920,6 +8974,41 @@ export function App() {
                       {userSettings?.interface_complexity === "developer" && <TechnicalDetails title="Canonical workflow evidence" summary={`${inspection.events.length} Root-owned events`}>
                         <p className="form-note">Read-only canonical evidence. Correlation, causation, revision, generation, and idempotency identities are disclosed without exposing Root mutation authority.</p>
                         <pre aria-label={`Canonical workflow ${attempt.workflow_id} evidence`} aria-readonly="true" role="textbox" tabIndex={0}>{JSON.stringify(inspection, null, 2)}</pre>
+                      </TechnicalDetails>}
+                    </div>}
+                  </div>;
+                })}
+              </div>}
+            </article>
+
+            <article className="agent-section-card canonical-invocation-section" aria-label="Runtime invocations">
+              <div className="section-heading compact-heading">
+                <div><h3>Runtime invocations</h3><p className="muted">Work and independent verification use reconstructable evidence owned by Protected Root.</p></div>
+                <button className="secondary" type="button" disabled={invocationBusy !== null} onClick={() => void refreshCanonicalInvocations()}>{invocationBusy === "list" ? "Refreshing…" : "Refresh"}</button>
+              </div>
+              {invocationError && <p className="error-message" role="alert">{invocationError}</p>}
+              {canonicalInvocations.length === 0 ? <p className="empty-state">No reconstructable Runtime invocations yet.</p> : <div className="instance-list">
+                {canonicalInvocations.map((invocation) => {
+                  const inspection = invocationInspections[invocation.invocation_id];
+                  const latestRun = inspection?.model_runs.at(-1)?.run;
+                  return <div className="instance-row canonical-invocation-row" key={invocation.invocation_id} data-invocation-state={invocation.model_run_state ?? "unplanned"}>
+                    <span>
+                      <strong>{invocation.role === "work" ? "Work run" : "Verification run"}</strong>
+                      <small>{invocationStateLabel(invocation.model_run_state)}{advanced ? ` · revision ${invocation.model_run_revision ?? 0} · updated ${new Date(invocation.updated_at).toLocaleString()}` : ""}</small>
+                      {advanced && <small>Invocation <code>{invocation.invocation_id}</code> · workflow <code>{invocation.workflow_id}</code></small>}
+                    </span>
+                    {advanced && <div className="memory-actions">
+                      <button className="secondary" type="button" disabled={invocationBusy !== null} onClick={() => void inspectCanonicalInvocation(invocation.invocation_id)}>{invocationBusy === invocation.invocation_id ? "Loading…" : inspection ? "Refresh evidence" : "Inspect"}</button>
+                    </div>}
+                    {advanced && inspection && <div className="invocation-inspection">
+                      <p><strong>{inspection.manifest.resolved_provider.locator}</strong> · {inspection.manifest.resolved_model.locator}{inspection.manifest.observed_model_fingerprint ? ` · ${inspection.manifest.observed_model_fingerprint}` : ""}</p>
+                      <p>{inspection.context_manifest.selected_sources.length} governed context source{inspection.context_manifest.selected_sources.length === 1 ? "" : "s"} · approximately {inspection.context_manifest.approximate_tokens.toLocaleString()} tokens · {inspection.model_runs.length} immutable run revision{inspection.model_runs.length === 1 ? "" : "s"}</p>
+                      <p>TaskContract v{inspection.manifest.task_contract.version} · request <code>{inspection.manifest.request_hash.digest_hex.slice(0, 12)}…</code>{latestRun?.response_artifact ? <> · response <code>{latestRun.response_artifact.content_hash.digest_hex.slice(0, 12)}…</code></> : null}</p>
+                      {inspection.model_runs_truncated && <p className="warning-box">Only the bounded reconstruction window is shown.</p>}
+                      <button className="link-button" type="button" disabled={workflowBusy !== null} onClick={() => void inspectCanonicalWorkflow(invocation.workflow_id)}>Load source workflow evidence →</button>
+                      {userSettings?.interface_complexity === "developer" && <TechnicalDetails title="Canonical invocation evidence" summary={`${inspection.model_runs.length} immutable model-run revisions`}>
+                        <p className="form-note">Read-only reconstruction evidence. Developer mode exposes exact manifest, context references, hashes, Runtime identity, and lifecycle history without prompt material, response content, secrets, private reasoning, database access, or Root mutation authority.</p>
+                        <pre aria-label={`Canonical invocation ${invocation.invocation_id} evidence`} aria-readonly="true" role="textbox" tabIndex={0}>{JSON.stringify(inspection, null, 2)}</pre>
                       </TechnicalDetails>}
                     </div>}
                   </div>;

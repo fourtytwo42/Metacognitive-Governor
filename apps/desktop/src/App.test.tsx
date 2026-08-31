@@ -216,6 +216,8 @@ const client = vi.hoisted(() => ({
   ,protectedRootWorkflow: vi.fn()
   ,protectedRootActions: vi.fn()
   ,protectedRootAction: vi.fn()
+  ,protectedRootInvocations: vi.fn()
+  ,protectedRootInvocation: vi.fn()
   ,cancelProtectedRootWorkflow: vi.fn()
   ,listOpenInApplications: vi.fn()
   ,openWorkspaceIn: vi.fn()
@@ -425,6 +427,8 @@ vi.mock("./desktop-client", () => ({
   getProtectedRootWorkflow: client.protectedRootWorkflow,
   listProtectedRootActions: client.protectedRootActions,
   getProtectedRootAction: client.protectedRootAction,
+  listProtectedRootInvocations: client.protectedRootInvocations,
+  getProtectedRootInvocation: client.protectedRootInvocation,
   cancelProtectedRootWorkflow: client.cancelProtectedRootWorkflow,
   listOpenInApplications: client.listOpenInApplications,
   openWorkspaceIn: client.openWorkspaceIn,
@@ -456,6 +460,8 @@ beforeEach(() => {
   client.protectedRootWorkflow.mockReset();
   client.protectedRootActions.mockReset();
   client.protectedRootAction.mockReset();
+  client.protectedRootInvocations.mockReset();
+  client.protectedRootInvocation.mockReset();
   client.cancelProtectedRootWorkflow.mockReset();
   client.start.mockReset();
   client.complete.mockReset();
@@ -961,6 +967,8 @@ beforeEach(() => {
   client.protectedRootWorkflow.mockResolvedValue(null);
   client.protectedRootActions.mockResolvedValue([]);
   client.protectedRootAction.mockResolvedValue(null);
+  client.protectedRootInvocations.mockResolvedValue([]);
+  client.protectedRootInvocation.mockResolvedValue(null);
   client.cancelProtectedRootWorkflow.mockRejectedValue(new Error("No workflow fixture configured."));
   client.updateSettings.mockImplementation(async (request) => ({
     schema_version: 1,
@@ -1231,6 +1239,106 @@ test("Developer progressively inspects canonical governed-action evidence", asyn
   fireEvent.click(within(actions).getByRole("button", { name: /Inspect compensation/ }));
   await waitFor(() => expect(client.protectedRootAction).toHaveBeenLastCalledWith("00000000-0000-4000-8000-000000000552"));
   await waitFor(() => expect(actions.querySelectorAll(".canonical-action-row")).toHaveLength(2));
+});
+
+test("Runtime invocations preserve one Root truth across Simple Advanced and Developer", async () => {
+  const invocationId = "00000000-0000-4000-8000-000000000561";
+  const workflowId = "00000000-0000-4000-8000-000000000562";
+  const attemptId = "00000000-0000-4000-8000-000000000563";
+  const updatedAt = "2026-08-30T14:00:00Z";
+  const hash = (domain: string, digit: string) => ({ algorithm: "blake3-256", domain, digest_hex: digit.repeat(64) });
+  const taskContract = { id: "00000000-0000-4000-8000-000000000564", version: 4, content_hash: hash("MetaCog.TaskContract", "a") };
+  const summary = {
+    invocation_id: invocationId,
+    workflow_id: workflowId,
+    attempt_id: attemptId,
+    role: "work",
+    task_contract: taskContract,
+    model_run_id: "00000000-0000-4000-8000-000000000565",
+    model_run_state: "completed",
+    model_run_revision: 3,
+    persisted_at: updatedAt,
+    updated_at: updatedAt
+  };
+  const inspection = {
+    manifest: {
+      id: invocationId,
+      role: "work",
+      attempt_id: attemptId,
+      task_contract: taskContract,
+      runtime_identity: { instance_id: "runtime-generation-7", build_hash: hash("MetaCog.RuntimeExecutable", "b"), protocol_version: 1, started_at: updatedAt },
+      resolved_provider: { source_type: "mcg.provider.v1", locator: "governed-provider", content_hash: hash("MetaCog.Provider", "c") },
+      resolved_model: { source_type: "mcg.model.v1", locator: "deterministic-work-v1", content_hash: hash("MetaCog.Model", "d") },
+      observed_model_fingerprint: "deterministic-fixture-1",
+      runtime_build: hash("MetaCog.RuntimeBuild", "e"),
+      request_hash: hash("MetaCog.ModelRequest", "f"),
+      response_hash: hash("MetaCog.ModelResponse", "1")
+    },
+    manifest_hash: hash("MetaCog.InvocationManifest", "2"),
+    context_manifest: {
+      id: "00000000-0000-4000-8000-000000000566",
+      attempt_id: attemptId,
+      selected_sources: [{ source: { source_type: "mcg.task-contract.v1", locator: taskContract.id, content_hash: taskContract.content_hash }, perspective: null, placement: 0, approximate_tokens: 144 }],
+      approximate_tokens: 144
+    },
+    context_manifest_hash: hash("MetaCog.ContextManifest", "3"),
+    model_runs: [{
+      revision: 3,
+      content_hash: hash("MetaCog.ModelRun", "4"),
+      run: {
+        id: summary.model_run_id,
+        invocation_id: invocationId,
+        role: "work",
+        state: "completed",
+        provider_request_id: "provider-request-567",
+        response_artifact: { content_hash: hash("MetaCog.RuntimeResponse", "5"), media_type: "application/vnd.metacog.runtime-response+json", byte_length: 512 },
+        started_at: updatedAt,
+        finished_at: "2026-08-30T14:00:01Z"
+      },
+      recorded_at: "2026-08-30T14:00:01Z"
+    }],
+    model_runs_truncated: false
+  };
+  client.protectedRootInvocations.mockResolvedValue([summary]);
+  client.protectedRootInvocation.mockResolvedValue(inspection);
+
+  render(<App />);
+  fireEvent.click(await screen.findByRole("link", { name: /Agents/ }));
+  let invocations = await screen.findByRole("article", { name: "Runtime invocations" });
+  expect(within(invocations).getByText("Work run")).toBeInTheDocument();
+  expect(within(invocations).getByText("Completed")).toBeInTheDocument();
+  expect(within(invocations).queryByText(invocationId)).not.toBeInTheDocument();
+  expect(within(invocations).queryByRole("button", { name: "Inspect" })).not.toBeInTheDocument();
+
+  await enableAdvancedMode();
+  invocations = screen.getByRole("article", { name: "Runtime invocations" });
+  expect(within(invocations).getByText(/Completed · revision 3/)).toBeInTheDocument();
+  expect(within(invocations).getByText(new RegExp(invocationId))).toBeInTheDocument();
+  fireEvent.click(within(invocations).getByRole("button", { name: "Inspect" }));
+  expect(await within(invocations).findByText(/governed-provider/)).toBeInTheDocument();
+  expect(within(invocations).getByText(/deterministic-work-v1/)).toBeInTheDocument();
+  expect(within(invocations).getByText(/1 governed context source · approximately 144 tokens/)).toBeInTheDocument();
+  expect(within(invocations).queryByRole("button", { name: "Canonical invocation evidence" })).not.toBeInTheDocument();
+
+  const complexity = screen.getByRole("button", { name: "Cycle interface complexity" });
+  fireEvent.click(complexity);
+  await waitFor(() => expect(complexity).toHaveTextContent("Developer"));
+  invocations = screen.getByRole("article", { name: "Runtime invocations" });
+  fireEvent.click(within(invocations).getByRole("button", { name: "Canonical invocation evidence" }));
+  const evidence = within(invocations).getByRole("textbox", { name: `Canonical invocation ${invocationId} evidence` });
+  expect(evidence).toHaveAttribute("aria-readonly", "true");
+  expect(evidence).toHaveTextContent("provider-request-567");
+  expect(evidence).toHaveTextContent("MetaCog.ModelRequest");
+  expect(evidence).toHaveTextContent("response_artifact");
+
+  fireEvent.click(complexity);
+  await waitFor(() => expect(complexity).toHaveTextContent("Simple"));
+  await waitFor(() => expect(document.querySelector(".app-shell.simple-mode")).toBeInTheDocument());
+  invocations = screen.getByRole("article", { name: "Runtime invocations" });
+  expect(within(invocations).getByText("Completed")).toBeInTheDocument();
+  expect(within(invocations).queryByRole("button", { name: "Inspect" })).not.toBeInTheDocument();
+  expect(within(invocations).queryByRole("button", { name: "Canonical invocation evidence" })).not.toBeInTheDocument();
+  expect(client.protectedRootInvocation).toHaveBeenCalledWith(invocationId);
 });
 
 test("Codex-style sidebar groups project chats, searches them, and persists pins", async () => {

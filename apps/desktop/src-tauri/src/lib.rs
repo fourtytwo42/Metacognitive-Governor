@@ -220,6 +220,33 @@ async fn protected_root_action(
 }
 
 #[tauri::command]
+async fn protected_root_invocations(
+    limit: usize,
+) -> Result<Vec<mcg_contracts::InvocationSummary>, String> {
+    mcg_platform::query_root_invocations(&AppConfig::default().data_directory, limit)
+        .await
+        .map_err(|error| format!("Protected Root invocations could not be loaded: {error}"))
+}
+
+#[tauri::command]
+async fn protected_root_invocation(
+    invocation_id: String,
+    model_run_limit: usize,
+) -> Result<Option<mcg_contracts::InvocationInspection>, String> {
+    let invocation_id = mcg_contracts::InvocationId(
+        uuid::Uuid::parse_str(&invocation_id)
+            .map_err(|error| format!("Invocation ID is invalid: {error}"))?,
+    );
+    mcg_platform::query_root_invocation(
+        &AppConfig::default().data_directory,
+        invocation_id,
+        model_run_limit,
+    )
+    .await
+    .map_err(|error| format!("Protected Root invocation could not be loaded: {error}"))
+}
+
+#[tauri::command]
 async fn cancel_protected_root_workflow(
     request: mcg_contracts::WorkflowCancelRequest,
 ) -> Result<mcg_contracts::WorkflowAttempt, String> {
@@ -4031,6 +4058,8 @@ pub fn run() {
             protected_root_workflow,
             protected_root_actions,
             protected_root_action,
+            protected_root_invocations,
+            protected_root_invocation,
             cancel_protected_root_workflow,
             run_diagnostics,
             updater::update_configuration,

@@ -1850,9 +1850,9 @@ input:focus, select:focus, textarea:focus { border-color: #777; box-shadow: 0 0 
 .assignment-row small, .team-row small, .instance-row small { color: var(--mcg-muted); }
 .canonical-workflow-row, .canonical-action-row { flex-wrap: wrap; align-items: flex-start; }
 .canonical-workflow-row > span, .canonical-action-row > span { flex: 1 1 360px; }
-.workflow-inspection, .action-inspection { flex: 1 0 100%; display: grid; gap: 10px; padding: 12px; border: 1px solid var(--mcg-border); border-radius: 10px; background: var(--mcg-bg); }
-.workflow-inspection p, .workflow-inspection ul, .action-inspection p, .action-inspection ul { margin: 0; }
-.workflow-inspection pre, .action-inspection pre { max-height: 360px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+.workflow-inspection, .action-inspection, .invocation-inspection { flex: 1 0 100%; display: grid; gap: 10px; padding: 12px; border: 1px solid var(--mcg-border); border-radius: 10px; background: var(--mcg-bg); }
+.workflow-inspection p, .workflow-inspection ul, .action-inspection p, .action-inspection ul, .invocation-inspection p, .invocation-inspection ul { margin: 0; }
+.workflow-inspection pre, .action-inspection pre, .invocation-inspection pre { max-height: 360px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
 .action-origin { display: grid; gap: 8px; padding: 10px; border-left: 3px solid var(--mcg-accent); background: color-mix(in srgb, var(--mcg-accent) 5%, transparent); }
 .action-origin ul { display: grid; gap: 5px; padding-left: 20px; }
 .action-origin li { overflow-wrap: anywhere; }

@@ -176,6 +176,59 @@ test.beforeEach(async ({ page }) => {
       reconciliation_jobs: [{ id: "00000000-0000-4000-8000-00000000060a", action_id: canonicalActionId, execution_id: canonicalExecutionId, adapter: actionPayload, state: "pending", revision: 1, lease_generation: 0, lease_owner: null, lease_expires_at: null, next_attempt_at: now, attempts: 0, deadline: "2026-08-18T01:00:00Z", last_hint: null, created_at: now, updated_at: now }],
       events: [{ id: "00000000-0000-4000-8000-00000000060b", type_id: "mcg.action_classified.v1", schema_version: 1, sequence: 4, action_id: canonicalActionId, execution_id: canonicalExecutionId, correlation_id: "00000000-0000-4000-8000-00000000060c", causation_id: null, idempotency_key: "action-classify-1", occurred_at: now, payload: actionPayload }]
     };
+    const canonicalInvocationId = "00000000-0000-4000-8000-000000000612";
+    const invocationHash = (domain: string, digit: string) => ({ algorithm: "blake3-256", domain, digest_hex: digit.repeat(64) });
+    const canonicalInvocation = {
+      invocation_id: canonicalInvocationId,
+      workflow_id: canonicalWorkflowId,
+      attempt_id: canonicalAttemptId,
+      role: "work",
+      task_contract: canonicalWorkflow.task_contract,
+      model_run_id: "00000000-0000-4000-8000-000000000613",
+      model_run_state: "completed",
+      model_run_revision: 3,
+      persisted_at: now,
+      updated_at: now
+    };
+    const canonicalInvocationInspection = {
+      manifest: {
+        id: canonicalInvocationId,
+        role: "work",
+        attempt_id: canonicalAttemptId,
+        task_contract: canonicalWorkflow.task_contract,
+        runtime_identity: { instance_id: "runtime-generation-7", build_hash: invocationHash("MetaCog.RuntimeExecutable", "7"), protocol_version: 1, started_at: now },
+        resolved_provider: { source_type: "mcg.provider.v1", locator: "governed-provider", content_hash: invocationHash("MetaCog.Provider", "8") },
+        resolved_model: { source_type: "mcg.model.v1", locator: "deterministic-work-v1", content_hash: invocationHash("MetaCog.Model", "9") },
+        observed_model_fingerprint: "deterministic-fixture-1",
+        runtime_build: invocationHash("MetaCog.RuntimeBuild", "a"),
+        request_hash: invocationHash("MetaCog.ModelRequest", "b"),
+        response_hash: invocationHash("MetaCog.ModelResponse", "c")
+      },
+      manifest_hash: invocationHash("MetaCog.InvocationManifest", "d"),
+      context_manifest: {
+        id: "00000000-0000-4000-8000-000000000614",
+        attempt_id: canonicalAttemptId,
+        selected_sources: [{ source: { source_type: "mcg.task-contract.v1", locator: canonicalWorkflow.task_contract.id, content_hash: canonicalWorkflow.task_contract.content_hash }, perspective: null, placement: 0, approximate_tokens: 144 }],
+        approximate_tokens: 144
+      },
+      context_manifest_hash: invocationHash("MetaCog.ContextManifest", "e"),
+      model_runs: [{
+        revision: 3,
+        content_hash: invocationHash("MetaCog.ModelRun", "f"),
+        run: {
+          id: canonicalInvocation.model_run_id,
+          invocation_id: canonicalInvocationId,
+          role: "work",
+          state: "completed",
+          provider_request_id: "provider-request-615",
+          response_artifact: { content_hash: invocationHash("MetaCog.RuntimeResponse", "1"), media_type: "application/vnd.metacog.runtime-response+json", byte_length: 512 },
+          started_at: now,
+          finished_at: "2026-08-18T00:00:01Z"
+        },
+        recorded_at: "2026-08-18T00:00:01Z"
+      }],
+      model_runs_truncated: false
+    };
     const history = [{ settings: initial, reason: "initial settings", changed_at: initial.updated_at }];
     Object.defineProperty(window, "__TAURI_INTERNALS__", {
       value: {
@@ -199,6 +252,8 @@ test.beforeEach(async ({ page }) => {
           }
           if (command === "protected_root_actions") return [canonicalAction];
           if (command === "protected_root_action") return args.actionId === canonicalActionId ? canonicalActionInspection : null;
+          if (command === "protected_root_invocations") return [canonicalInvocation];
+          if (command === "protected_root_invocation") return args.invocationId === canonicalInvocationId ? canonicalInvocationInspection : null;
           if (command === "cancel_protected_root_workflow") {
             if (args.request.attempt_id !== canonicalAttemptId || args.request.expected_revision !== 7 || args.request.expected_generation !== 3) {
               throw new Error("stale workflow cancellation fence");
@@ -599,6 +654,54 @@ test("governed actions keep one Root truth across Simple Advanced and Developer"
   await expect(actions.getByText("Checking what happened", { exact: true })).toBeVisible();
   await expect(actions.getByRole("button", { name: "Inspect" })).toHaveCount(0);
   await expect(actions.getByRole("button", { name: "Canonical action evidence" })).toHaveCount(0);
+});
+
+test("Runtime invocations keep one Root truth across Simple Advanced and Developer", async ({ page }) => {
+  test.setTimeout(90_000);
+  await page.goto("/");
+  await page.getByRole("link", { name: "Agents", exact: true }).click();
+
+  let invocations = page.getByRole("article", { name: "Runtime invocations" });
+  await expect(invocations.getByText("Work run", { exact: true })).toBeVisible();
+  await expect(invocations.getByText("Completed", { exact: true })).toBeVisible();
+  await expect(invocations.getByText(/revision 3/)).toHaveCount(0);
+  await expect(invocations.getByRole("button", { name: "Inspect" })).toHaveCount(0);
+  await expect(invocations.getByRole("button", { name: "Canonical invocation evidence" })).toHaveCount(0);
+
+  await enableAdvancedMode(page);
+  await page.getByRole("link", { name: "Agents", exact: true }).click();
+  invocations = page.getByRole("article", { name: "Runtime invocations" });
+  await expect(invocations.getByText(/Completed · revision 3/)).toBeVisible();
+  await expect(invocations.getByText(/00000000-0000-4000-8000-000000000612/)).toBeVisible();
+  await invocations.getByRole("button", { name: "Inspect" }).click();
+  await expect(invocations.getByText(/governed-provider/)).toBeVisible();
+  await expect(invocations.getByText(/deterministic-work-v1/)).toBeVisible();
+  await expect(invocations.getByText(/1 governed context source · approximately 144 tokens/)).toBeVisible();
+  await expect(invocations.getByRole("button", { name: "Canonical invocation evidence" })).toHaveCount(0);
+
+  await openOwnerSurface(page, "Settings");
+  await page.getByRole("button", { name: "General", exact: true }).click();
+  await page.getByRole("radio", { name: /Developer/ }).click();
+  await page.getByRole("button", { name: "Back to app" }).click();
+  await page.getByRole("link", { name: "Agents", exact: true }).click();
+  invocations = page.getByRole("article", { name: "Runtime invocations" });
+  await invocations.getByRole("button", { name: "Canonical invocation evidence" }).click();
+  const evidence = invocations.getByRole("textbox", { name: /Canonical invocation .* evidence/ });
+  await expect(evidence).toContainText("provider-request-615");
+  await expect(evidence).toContainText("MetaCog.ModelRequest");
+  await expect(evidence).toContainText("response_artifact");
+  const accessibility = await new AxeBuilder({ page }).include(".canonical-invocation-section").analyze();
+  expect(accessibility.violations, "Runtime-invocation accessibility violations").toEqual([]);
+
+  await openOwnerSurface(page, "Settings");
+  await page.getByRole("button", { name: "General", exact: true }).click();
+  await page.getByRole("radio", { name: /Simple/ }).click();
+  await page.getByRole("button", { name: "Back to app" }).click();
+  await page.getByRole("link", { name: "Agents", exact: true }).click();
+  invocations = page.getByRole("article", { name: "Runtime invocations" });
+  await expect(invocations.getByText("Completed", { exact: true })).toBeVisible();
+  await expect(invocations.getByRole("button", { name: "Inspect" })).toHaveCount(0);
+  await expect(invocations.getByRole("button", { name: "Canonical invocation evidence" })).toHaveCount(0);
 });
 
 test("consumer shell starts simple and can reveal advanced status", async ({ page }) => {

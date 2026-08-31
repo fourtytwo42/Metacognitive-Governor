@@ -1330,6 +1330,70 @@ export interface CanonicalWorkflowCancelRequest {
   idempotency_key: string;
 }
 
+export type CanonicalInvocationRole = "work" | "verify";
+export type CanonicalModelRunState = "planned" | "dispatched" | "completed" | "failed" | "cancelled" | "outcome_unknown";
+export interface CanonicalInvocationSummary {
+  invocation_id: string;
+  workflow_id: string;
+  attempt_id: string;
+  role: CanonicalInvocationRole;
+  task_contract: { id: string; version: number; content_hash: { algorithm: string; domain: string; digest_hex: string } };
+  model_run_id: string | null;
+  model_run_state: CanonicalModelRunState | null;
+  model_run_revision: number | null;
+  persisted_at: string;
+  updated_at: string;
+}
+
+export interface CanonicalInvocationInspection {
+  manifest: {
+    id: string;
+    role: CanonicalInvocationRole;
+    attempt_id: string;
+    task_contract: CanonicalInvocationSummary["task_contract"];
+    runtime_identity: { instance_id: string; build_hash: { algorithm: string; domain: string; digest_hex: string }; protocol_version: number; started_at: string };
+    resolved_provider: CanonicalSourceRef;
+    resolved_model: CanonicalSourceRef;
+    observed_model_fingerprint: string | null;
+    runtime_build: { algorithm: string; domain: string; digest_hex: string };
+    request_hash: { algorithm: string; domain: string; digest_hex: string };
+    response_hash: { algorithm: string; domain: string; digest_hex: string } | null;
+    [key: string]: unknown;
+  };
+  manifest_hash: { algorithm: string; domain: string; digest_hex: string };
+  context_manifest: {
+    id: string;
+    attempt_id: string;
+    selected_sources: Array<{
+      source: CanonicalSourceRef;
+      perspective: CanonicalSourceRef | null;
+      placement: number;
+      approximate_tokens: number;
+      [key: string]: unknown;
+    }>;
+    approximate_tokens: number;
+    [key: string]: unknown;
+  };
+  context_manifest_hash: { algorithm: string; domain: string; digest_hex: string };
+  model_runs: Array<{
+    revision: number;
+    content_hash: { algorithm: string; domain: string; digest_hex: string };
+    run: {
+      id: string;
+      invocation_id: string;
+      role: CanonicalInvocationRole;
+      state: CanonicalModelRunState;
+      provider_request_id: string | null;
+      response_artifact: { content_hash: { algorithm: string; domain: string; digest_hex: string }; media_type: string; byte_length: number } | null;
+      started_at: string;
+      finished_at: string | null;
+      [key: string]: unknown;
+    };
+    recorded_at: string;
+  }>;
+  model_runs_truncated: boolean;
+}
+
 export interface PortableOrganizationGenome {
   schema_version: number;
   source: {
@@ -2108,6 +2172,14 @@ export function listProtectedRootActions(limit = 100): Promise<CanonicalActionSu
 
 export function getProtectedRootAction(actionId: string, eventLimit = 500): Promise<CanonicalActionInspection | null> {
   return invoke("protected_root_action", { actionId, eventLimit });
+}
+
+export function listProtectedRootInvocations(limit = 100): Promise<CanonicalInvocationSummary[]> {
+  return invoke("protected_root_invocations", { limit });
+}
+
+export function getProtectedRootInvocation(invocationId: string, modelRunLimit = 100): Promise<CanonicalInvocationInspection | null> {
+  return invoke("protected_root_invocation", { invocationId, modelRunLimit });
 }
 
 export function cancelProtectedRootWorkflow(request: CanonicalWorkflowCancelRequest): Promise<CanonicalWorkflowAttempt> {
