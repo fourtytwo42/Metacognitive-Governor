@@ -172,6 +172,7 @@ import {
   providerProxyUsage,
   replayAgentRun,
   listApprovals,
+  getApproval,
   listBackups,
   listSchedules,
   listSchedulerNotifications,
@@ -2896,6 +2897,9 @@ export function App() {
   const [projectError, setProjectError] = useState<string | null>(null);
   const [projectErrorSurface, setProjectErrorSurface] = useState<"task" | "projects">("projects");
   const [approvals, setApprovals] = useState<ApprovalRequest[]>([]);
+  const [focusedApprovalSource, setFocusedApprovalSource] = useState<ApprovalRequest | null>(null);
+  const [approvalSourceBusy, setApprovalSourceBusy] = useState<string | null>(null);
+  const [approvalSourceError, setApprovalSourceError] = useState<string | null>(null);
   const [schedules, setSchedules] = useState<ScheduleDefinition[]>([]);
   const [scheduleNotifications, setScheduleNotifications] = useState<SchedulerNotification[]>([]);
   const [scheduleHistory, setScheduleHistory] = useState<Record<string, ScheduleHistoryResponse | undefined>>({});
@@ -6217,6 +6221,33 @@ export function App() {
     }
   }
 
+  async function openApprovalSource(approvalId: string) {
+    setApprovalSourceBusy(approvalId);
+    setApprovalSourceError(null);
+    try {
+      const approval = await getApproval(approvalId);
+      const conversationId = approval.origin?.conversation?.locator;
+      if (!conversationId) throw new Error("This approval predates exact source binding or was created outside a conversation.");
+      if (!conversations.some((conversation) => conversation.id === conversationId)) {
+        throw new Error(`Originating conversation ${conversationId} is not available in the current compatibility projection.`);
+      }
+      const view = conversationViews[conversationId] ?? await getConversation(conversationId);
+      if (view.conversation.id !== conversationId) {
+        throw new Error(`Conversation inspection returned ${view.conversation.id} instead of exact origin ${conversationId}.`);
+      }
+      setConversationViews((current) => ({ ...current, [conversationId]: view }));
+      setApprovals((current) => current.some((candidate) => candidate.id === approval.id)
+        ? current.map((candidate) => candidate.id === approval.id ? approval : candidate)
+        : [...current, approval]);
+      setFocusedApprovalSource(approval);
+      openChat(conversationId);
+    } catch (error) {
+      setApprovalSourceError(errorMessage(error));
+    } finally {
+      setApprovalSourceBusy(null);
+    }
+  }
+
   async function changeTaskState(taskId: string, state: "cancelled") {
     setTaskBusy(true);
     setTaskError(null);
@@ -7889,6 +7920,17 @@ export function App() {
   const activeConversationApproval = activeConversationTurn?.task_id
     ? approvals.find((approval) => approval.task_id === activeConversationTurn.task_id)
     : undefined;
+  const focusedApprovalOrigin = focusedApprovalSource?.origin;
+  const focusedApprovalConversationMatches = Boolean(
+    visibleConversation
+    && focusedApprovalOrigin?.conversation?.locator === visibleConversation.conversation.id
+  );
+  const focusedApprovalAgent = focusedApprovalConversationMatches && focusedApprovalOrigin?.agent
+    ? visibleConversation?.team?.sessions.find((session) => session.id === focusedApprovalOrigin.agent?.locator)
+    : undefined;
+  const focusedApprovalCommand = focusedApprovalConversationMatches && focusedApprovalOrigin?.command
+    ? visibleConversation?.activities.find((activity) => activity.codex_item_id === focusedApprovalOrigin.command?.locator)
+    : undefined;
   const directoryPlugins = plugins.filter((plugin) => {
     const manifest = plugin.active_revision.manifest;
     const matchesSearch = `${manifest.display_name} ${manifest.id}`.toLowerCase().includes(pluginSearch.trim().toLowerCase());
@@ -8418,11 +8460,30 @@ export function App() {
                   onView={(view) => setConversationViews((current) => ({ ...current, [view.conversation.id]: view }))}
                   onOpenPreview={openConversationPreview}
                 />)}
+              {focusedApprovalSource && focusedApprovalConversationMatches && focusedApprovalOrigin && <section className="approval-source-focus" aria-label="Approval source evidence">
+                <div className="section-heading compact-heading">
+                  <div><strong>Exact approval source</strong><p>{focusedApprovalSource.reason}</p></div>
+                  <button className="secondary" type="button" onClick={() => setFocusedApprovalSource(null)}>Close</button>
+                </div>
+                <dl>
+                  <div><dt>Approval</dt><dd><code>{focusedApprovalSource.id}</code> · {focusedApprovalSource.state}</dd></div>
+                  {focusedApprovalOrigin.conversation && <div><dt>Conversation</dt><dd><code>{focusedApprovalOrigin.conversation.locator}</code> · hash {focusedApprovalOrigin.conversation.content_hash.digest_hex.slice(0, 12)}…</dd></div>}
+                  {focusedApprovalOrigin.turn && <div><dt>Turn</dt><dd><code>{focusedApprovalOrigin.turn.locator}</code> · hash {focusedApprovalOrigin.turn.content_hash.digest_hex.slice(0, 12)}…</dd></div>}
+                  {focusedApprovalOrigin.invocation && <div><dt>Invocation</dt><dd><code>{focusedApprovalOrigin.invocation.locator}</code> · hash {focusedApprovalOrigin.invocation.content_hash.digest_hex.slice(0, 12)}…</dd></div>}
+                  {focusedApprovalOrigin.agent && <div><dt>Agent</dt><dd>{focusedApprovalAgent ? <><strong>{focusedApprovalAgent.display_name}</strong> · {focusedApprovalAgent.kind.replaceAll("_", " ")} · </> : <span className="warning-text">Exact agent projection unavailable · </span>}<code>{focusedApprovalOrigin.agent.locator}</code> · hash {focusedApprovalOrigin.agent.content_hash.digest_hex.slice(0, 12)}…</dd></div>}
+                  {focusedApprovalOrigin.command && <div><dt>Command</dt><dd>{focusedApprovalCommand ? <><strong>{focusedApprovalCommand.command ?? focusedApprovalCommand.kind.replaceAll("_", " ")}</strong> · {focusedApprovalCommand.state} · </> : <span className="warning-text">Exact command projection unavailable · </span>}<code>{focusedApprovalOrigin.command.locator}</code> · hash {focusedApprovalOrigin.command.content_hash.digest_hex.slice(0, 12)}…</dd></div>}
+                </dl>
+                <p><strong>Resource</strong> <code>{focusedApprovalSource.resource}</code></p>
+                {focusedApprovalOrigin.evidence.length > 0 && <ul>{focusedApprovalOrigin.evidence.map((source) => <li key={`${source.source_type}-${source.locator}`}><strong>Evidence</strong> <code>{source.locator}</code> · hash {source.content_hash.digest_hex.slice(0, 12)}…</li>)}</ul>}
+                <p className="form-note">These are the immutable locators and hashes captured when the request was persisted. Missing compatibility projections stay explicit and are never replaced by a nearby conversation, agent, or command.</p>
+              </section>}
+              {approvalSourceError && <p className="error-message" role="alert">{approvalSourceError}</p>}
               {activeConversationTurn?.state === "waiting_for_approval" && activeConversationApproval && <section className="chat-permission" aria-label="Codex permission request">
                 <strong>Permission needed to continue</strong>
                 <p>{activeConversationApproval.reason}</p>
                 <code>{activeConversationApproval.resource}</code>
                 <div>
+                  {activeConversationApproval.origin?.conversation && <button className="secondary" type="button" disabled={approvalSourceBusy !== null} onClick={() => void openApprovalSource(activeConversationApproval.id)}>{approvalSourceBusy === activeConversationApproval.id ? "Opening…" : "View exact source"}</button>}
                   <button className="primary" type="button" disabled={conversationApprovalBusy} onClick={() => void resolveConversationApproval(activeConversationApproval.id, true)}>{conversationApprovalBusy ? "Applying…" : "Allow once"}</button>
                   <button className="secondary" type="button" disabled={conversationApprovalBusy} onClick={() => void resolveConversationApproval(activeConversationApproval.id, false)}>Deny</button>
                 </div>
@@ -8750,7 +8811,17 @@ export function App() {
               <div><p className="eyebrow">ADVANCED</p><h3>Governed approvals</h3><p className="muted">Runtime permission requests are separate from pull-request reviews.</p></div>
               <span className="count-badge">{tasks.filter((task) => task.state === "waiting_for_approval").length} pending</span>
             </div>
-            {tasks.filter((task) => task.state === "waiting_for_approval").length === 0 ? <p className="empty-state">No runtime approvals need attention.</p> : <div className="task-list">{tasks.filter((task) => task.state === "waiting_for_approval").map((task) => <article className="task-card" key={task.id}><div className="task-card-main"><span className="task-state state-waiting_for_approval">permission</span><h3>{task.goal}</h3><small>{projects.find((project) => project.project_id === task.project_id)?.root ?? "General workspace"}</small></div><button className="secondary" type="button" onClick={() => openChat(task.id)}>Open chat</button></article>)}</div>}
+            {approvalSourceError && <p className="error-message" role="alert">{approvalSourceError}</p>}
+            {tasks.filter((task) => task.state === "waiting_for_approval").length === 0 ? <p className="empty-state">No runtime approvals need attention.</p> : <div className="task-list">{tasks.filter((task) => task.state === "waiting_for_approval").map((task) => {
+              const approval = approvals.find((candidate) => candidate.task_id === task.id && candidate.state === "pending");
+              return <article className="task-card" key={task.id}>
+                <div className="task-card-main"><span className="task-state state-waiting_for_approval">permission</span><h3>{task.goal}</h3><small>{projects.find((project) => project.project_id === task.project_id)?.root ?? "General workspace"}</small></div>
+                <div className="card-actions">
+                  {approval?.origin?.conversation && <button className="secondary" type="button" disabled={approvalSourceBusy !== null} onClick={() => void openApprovalSource(approval.id)}>{approvalSourceBusy === approval.id ? "Opening…" : "Open exact source"}</button>}
+                  <button className="secondary" type="button" onClick={() => openChat(task.id)}>Open chat</button>
+                </div>
+              </article>;
+            })}</div>}
           </div>}
           <p className="integration-note">GitHub pull request titles, comments, checks, and changed-file sync will appear here after the GitHub integration is connected. Local Git review works now.</p>
           </TechnicalDetails>}
@@ -9065,6 +9136,7 @@ export function App() {
                 <div><h3>Governed actions</h3><p className="muted">Protected Root records what was authorized, what was observed, and whether an external change is certain.</p></div>
                 <button className="secondary" type="button" disabled={actionBusy !== null} onClick={() => void refreshCanonicalActions()}>{actionBusy === "list" ? "Refreshing…" : "Refresh"}</button>
               </div>
+              {approvalSourceError && <p className="error-message" role="alert">{approvalSourceError}</p>}
               {actionError && <p className="error-message" role="alert">{actionError}</p>}
               {canonicalActions.length === 0 ? <p className="empty-state">No governed actions yet.</p> : <div className="instance-list">
                 {canonicalActions.map((action) => {
@@ -9095,6 +9167,7 @@ export function App() {
                           {inspection.envelope.origin.evidence.map((source) => <li key={`Evidence-${source.source_type}-${source.locator}`}><strong>Evidence</strong> <code>{source.locator}</code> <small>{source.content_hash.digest_hex.slice(0, 12)}…</small></li>)}
                         </ul>
                         {inspection.envelope.origin.conversation && <button className="link-button" type="button" disabled={!conversations.some((conversation) => conversation.id === inspection.envelope.origin?.conversation?.locator)} title={conversations.some((conversation) => conversation.id === inspection.envelope.origin?.conversation?.locator) ? "Open the exact originating conversation" : "The originating conversation has not been projected into this compatibility session yet"} onClick={() => openChat(inspection.envelope.origin!.conversation!.locator)}>Open originating conversation →</button>}
+                        {inspection.envelope.origin.approval && <button className="link-button" type="button" disabled={approvalSourceBusy !== null} onClick={() => void openApprovalSource(inspection.envelope.origin!.approval!.locator)}>{approvalSourceBusy === inspection.envelope.origin.approval.locator ? "Opening approval source…" : "Open approval, agent, command, and evidence →"}</button>}
                       </div>}
                       {(typeof inspection.envelope.compensates_action === "string" || (inspection.compensation_actions?.length ?? 0) > 0) && <div className="action-compensation-history" aria-label="Compensation history" role="region">
                         <p><strong>Compensation history</strong> · exact causal action links</p>

@@ -3097,6 +3097,21 @@ async fn list_approvals() -> Result<ApprovalListResponse, String> {
 }
 
 #[tauri::command]
+async fn get_approval(approval_id: String) -> Result<ApprovalRequest, String> {
+    let approval_id = canonical_uuid(&approval_id, "Approval identity")?;
+    let approval: ApprovalRequest = daemon_json(
+        reqwest::Client::new().get(format!("{LOCAL_DAEMON}/api/v1/approvals/{approval_id}")),
+        None::<&()>,
+        "Approval inspection",
+    )
+    .await?;
+    if approval.id.to_string() != approval_id.to_string() {
+        return Err("Approval inspection returned a mismatched identity".into());
+    }
+    Ok(approval)
+}
+
+#[tauri::command]
 async fn resolve_approval(
     approval_id: String,
     request: ResolveApprovalRequest,
@@ -4262,6 +4277,7 @@ pub fn run() {
             retry_task,
             resume_task,
             list_approvals,
+            get_approval,
             resolve_approval,
             transition_task,
             task_events,

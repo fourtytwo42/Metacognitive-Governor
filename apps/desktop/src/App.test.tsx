@@ -91,6 +91,7 @@ const client = vi.hoisted(() => ({
   retryTask: vi.fn(),
   resumeTask: vi.fn(),
   listApprovals: vi.fn(),
+  getApproval: vi.fn(),
   approveRequest: vi.fn(),
   denyRequest: vi.fn(),
   transitionTask: vi.fn(),
@@ -303,6 +304,7 @@ vi.mock("./desktop-client", () => ({
   retryTask: client.retryTask,
   resumeTask: client.resumeTask,
   listApprovals: client.listApprovals,
+  getApproval: client.getApproval,
   approveRequest: client.approveRequest,
   denyRequest: client.denyRequest,
   transitionTask: client.transitionTask,
@@ -537,6 +539,7 @@ beforeEach(() => {
   client.retryTask.mockReset();
   client.resumeTask.mockReset();
   client.listApprovals.mockReset();
+  client.getApproval.mockReset();
   client.approveRequest.mockReset();
   client.denyRequest.mockReset();
   client.transitionTask.mockReset();
@@ -870,6 +873,7 @@ beforeEach(() => {
   client.listOrganizationPublishers.mockResolvedValue([]);
   client.listOrganizationShareReviews.mockResolvedValue([]);
   client.listApprovals.mockResolvedValue({ approvals: [] });
+  client.getApproval.mockRejectedValue(new Error("No approval fixture configured"));
   client.listSchedules.mockResolvedValue({ schedules: [] });
   client.listSchedulerNotifications.mockResolvedValue({ notifications: [] });
   client.loadPlatformCapabilities.mockResolvedValue({
@@ -1192,6 +1196,10 @@ test("durable workflows progressively disclose Root evidence and fence cancellat
 });
 
 test("Developer progressively inspects canonical governed-action evidence", async () => {
+  const conversationId = "00000000-0000-4000-8000-000000000546";
+  const turnId = "00000000-0000-4000-8000-000000000554";
+  const agentId = "00000000-0000-4000-8000-000000000555";
+  const approvalId = "00000000-0000-4000-8000-000000000549";
   const action = {
     action_id: "00000000-0000-4000-8000-000000000541",
     execution_id: "00000000-0000-4000-8000-000000000542",
@@ -1207,7 +1215,7 @@ test("Developer progressively inspects canonical governed-action evidence", asyn
   };
   const payload = { type_id: "mcg.governed_filesystem_operation.v1", schema_version: 1, canonical_encoding: "canonical-cbor-v1", normalization: "canonical-json-v1", bytes: [1, 2, 3] };
   const inspection = {
-    envelope: { id: action.action_id, workflow_id: action.workflow_id, attempt_id: action.attempt_id, actor: action.actor, origin: { conversation: { source_type: "mcg.conversation.v1", locator: "00000000-0000-4000-8000-000000000546", content_hash: { algorithm: "blake3-256", domain: "MetaCog.Conversation", digest_hex: "1".repeat(64) } }, invocation: { source_type: "mcg.invocation_manifest.v1", locator: "00000000-0000-4000-8000-000000000547", content_hash: { algorithm: "blake3-256", domain: "MetaCog.Invocation", digest_hex: "2".repeat(64) } }, command: { source_type: "mcg.command_execution.v1", locator: "command-548", content_hash: { algorithm: "blake3-256", domain: "MetaCog.Command", digest_hex: "3".repeat(64) } }, approval: { source_type: "mcg.approval_request.v1", locator: "00000000-0000-4000-8000-000000000549", content_hash: { algorithm: "blake3-256", domain: "MetaCog.Approval", digest_hex: "4".repeat(64) } }, agent: { source_type: "mcg.runtime_actor.v1", locator: action.actor, content_hash: { algorithm: "blake3-256", domain: "MetaCog.Actor", digest_hex: "5".repeat(64) } }, evidence: [{ source_type: "mcg.action_evidence.v1", locator: "artifact-550", content_hash: { algorithm: "blake3-256", domain: "MetaCog.Evidence", digest_hex: "6".repeat(64) } }] }, effect_class: action.effect_class, operation: payload, operation_hash: { algorithm: "blake3-256", domain: "MetaCog.ActionOperation", digest_hex: "d".repeat(64) }, created_at: action.updated_at },
+    envelope: { id: action.action_id, workflow_id: action.workflow_id, attempt_id: action.attempt_id, actor: action.actor, origin: { conversation: { source_type: "mcg.conversation.v1", locator: conversationId, content_hash: { algorithm: "blake3-256", domain: "MetaCog.Conversation", digest_hex: "1".repeat(64) } }, invocation: { source_type: "mcg.invocation_manifest.v1", locator: "00000000-0000-4000-8000-000000000547", content_hash: { algorithm: "blake3-256", domain: "MetaCog.Invocation", digest_hex: "2".repeat(64) } }, command: { source_type: "mcg.command_execution.v1", locator: "command-548", content_hash: { algorithm: "blake3-256", domain: "MetaCog.Command", digest_hex: "3".repeat(64) } }, approval: { source_type: "mcg.approval_request.v1", locator: approvalId, content_hash: { algorithm: "blake3-256", domain: "MetaCog.Approval", digest_hex: "4".repeat(64) } }, agent: { source_type: "mcg.runtime_actor.v1", locator: action.actor, content_hash: { algorithm: "blake3-256", domain: "MetaCog.Actor", digest_hex: "5".repeat(64) } }, evidence: [{ source_type: "mcg.action_evidence.v1", locator: "artifact-550", content_hash: { algorithm: "blake3-256", domain: "MetaCog.Evidence", digest_hex: "6".repeat(64) } }] }, effect_class: action.effect_class, operation: payload, operation_hash: { algorithm: "blake3-256", domain: "MetaCog.ActionOperation", digest_hex: "d".repeat(64) }, created_at: action.updated_at },
     compensation_actions: ["00000000-0000-4000-8000-000000000552"],
     executions: [{ id: action.execution_id, action_id: action.action_id, attempt_number: 1, state: action.state, revision: 3, lease_generation: 2, executor: action.actor, outcome: action.outcome, created_at: action.updated_at, updated_at: action.updated_at }],
     receipts: [],
@@ -1222,6 +1230,35 @@ test("Developer progressively inspects canonical governed-action evidence", asyn
     compensation_actions: [],
     executions: inspection.executions.map((execution) => ({ ...execution, id: "00000000-0000-4000-8000-000000000553", action_id: actionId }))
   }));
+  const conversation = { schema_version: 2, id: conversationId, title: "Exact approval conversation", state: "active", execution_preferences: {}, created_at: action.updated_at, updated_at: action.updated_at };
+  client.listConversations.mockResolvedValue({ conversations: [conversation] });
+  client.getConversation.mockResolvedValue({
+    conversation,
+    turns: [{ schema_version: 1, id: turnId, conversation_id: conversationId, state: "waiting_for_approval", execution_preferences: {}, task_id: action.workflow_id, created_at: action.updated_at, updated_at: action.updated_at }],
+    messages: [],
+    activities: [{ schema_version: 1, conversation_id: conversationId, turn_id: turnId, agent_session_id: agentId, codex_item_id: "command-548", kind: "command", state: "completed", command: "cargo test", started_at: action.updated_at, updated_at: action.updated_at }],
+    team: { sessions: [{ schema_version: 8, id: agentId, conversation_id: conversationId, role_id: "role-coder", organization_revision_id: "org-revision", kind: "coder", display_name: "Coding Agent Atlas", state: "waiting", codex_thread_id: "thread-approval", prompt_revision: 1, created_at: action.updated_at, updated_at: action.updated_at }], delegations: [], messages: [], blackboard: [], worktrees: [] }
+  });
+  client.getApproval.mockResolvedValue({
+    schema_version: 1,
+    id: approvalId,
+    tool_request_id: "00000000-0000-4000-8000-000000000556",
+    task_id: action.workflow_id,
+    action: "item/commandExecution/requestApproval",
+    resource: "cargo test",
+    reason: "Run the exact test command",
+    origin: {
+      conversation: { source_type: "mcg.conversation.v2", locator: conversationId, content_hash: { algorithm: "blake3-256", domain: "MetaCog.ApprovalConversation", digest_hex: "7".repeat(64) } },
+      turn: { source_type: "mcg.conversation_turn.v1", locator: turnId, content_hash: { algorithm: "blake3-256", domain: "MetaCog.ApprovalTurn", digest_hex: "8".repeat(64) } },
+      invocation: null,
+      command: { source_type: "codex.command_approval_request.v1", locator: "command-548", content_hash: { algorithm: "blake3-256", domain: "MetaCog.ApprovalCommand", digest_hex: "9".repeat(64) } },
+      agent: { source_type: "mcg.conversation_agent_session.v8", locator: agentId, content_hash: { algorithm: "blake3-256", domain: "MetaCog.ApprovalAgent", digest_hex: "a".repeat(64) } },
+      evidence: [{ source_type: "codex.command_approval_evidence.v1", locator: "command-548:params", content_hash: { algorithm: "blake3-256", domain: "MetaCog.ApprovalEvidence", digest_hex: "b".repeat(64) } }]
+    },
+    state: "pending",
+    requested_at: action.updated_at,
+    expires_at: "2026-08-30T13:00:00Z"
+  });
 
   render(<App />);
   fireEvent.click(await screen.findByRole("link", { name: /Agents/ }));
@@ -1232,7 +1269,7 @@ test("Developer progressively inspects canonical governed-action evidence", asyn
   expect(within(actions).getByText("Reconciliation: pending")).toBeInTheDocument();
   expect(within(actions).getByRole("region", { name: "Bound action origin" })).toHaveTextContent("command-548");
   expect(within(actions).getByRole("region", { name: "Bound action origin" })).toHaveTextContent("artifact-550");
-  expect(within(actions).getByRole("button", { name: /Open originating conversation/ })).toBeDisabled();
+  expect(within(actions).getByRole("button", { name: /Open originating conversation/ })).toBeEnabled();
   expect(within(actions).getByRole("region", { name: "Compensation history" })).toHaveTextContent("00000000-0000-4000-8000-000000000552");
   expect(within(actions).getByRole("button", { name: "Canonical action evidence" })).toBeInTheDocument();
   fireEvent.click(within(actions).getByRole("button", { name: "Canonical action evidence" }));
@@ -1243,6 +1280,14 @@ test("Developer progressively inspects canonical governed-action evidence", asyn
   fireEvent.click(within(actions).getByRole("button", { name: /Inspect compensation/ }));
   await waitFor(() => expect(client.protectedRootAction).toHaveBeenLastCalledWith("00000000-0000-4000-8000-000000000552"));
   await waitFor(() => expect(actions.querySelectorAll(".canonical-action-row")).toHaveLength(2));
+  fireEvent.click(within(actions).getAllByRole("button", { name: /Open approval, agent, command, and evidence/ })[0]);
+  await waitFor(() => expect(client.getApproval).toHaveBeenCalledWith(approvalId));
+  const source = await screen.findByRole("region", { name: "Approval source evidence" });
+  expect(source).toHaveTextContent("Exact approval source");
+  expect(source).toHaveTextContent("Coding Agent Atlas");
+  expect(source).toHaveTextContent("cargo test");
+  expect(source).toHaveTextContent("command-548:params");
+  expect(source).toHaveTextContent("777777777777");
 });
 
 test("Runtime invocations preserve one Root truth across Simple Advanced and Developer", async () => {
@@ -4812,6 +4857,14 @@ test("conversation approval is shown in chat and resolves without restarting the
     action: "item/commandExecution/requestApproval",
     resource: "npm package download for the Sites starter",
     reason: "The starter package requires network access.",
+    origin: {
+      conversation: { source_type: "mcg.conversation.v2", locator: "00000000-0000-4000-8000-000000000d99", content_hash: { algorithm: "blake3-256", domain: "MetaCog.ApprovalConversation", digest_hex: "a".repeat(64) } },
+      turn: null,
+      invocation: null,
+      command: null,
+      agent: null,
+      evidence: []
+    },
     state: "pending"
   };
   const waitingView = {
@@ -4825,6 +4878,7 @@ test("conversation approval is shown in chat and resolves without restarting the
   let finishSend: ((view: typeof waitingView) => void) | undefined;
   client.getConversation.mockResolvedValue(waitingView);
   client.listApprovals.mockResolvedValue({ approvals: [approval] });
+  client.getApproval.mockResolvedValue(approval);
   client.approveRequest.mockResolvedValue({ ...approval, state: "approved" });
   client.sendConversationMessage.mockReturnValue(new Promise((resolve) => { finishSend = resolve; }));
   render(<App />);
@@ -4835,6 +4889,9 @@ test("conversation approval is shown in chat and resolves without restarting the
   expect(await screen.findByText("Permission needed to continue", {}, { timeout: 1500 })).toBeInTheDocument();
   expect(screen.getByText(approval.reason)).toBeInTheDocument();
   expect(screen.getByText(approval.resource)).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "View exact source" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("is not available in the current compatibility projection");
+  expect(client.getConversation).not.toHaveBeenCalledWith(approval.origin.conversation.locator);
   fireEvent.click(screen.getByRole("button", { name: "Allow once" }));
 
   await waitFor(() => expect(client.approveRequest).toHaveBeenCalledWith(approval.id));

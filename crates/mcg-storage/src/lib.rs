@@ -1,6 +1,10 @@
 //! Crash-safe `SQLite` persistence for versioned events and rebuildable projections.
 
-use std::{collections::HashMap, path::Path, time::Duration};
+use std::{
+    collections::{BTreeSet, HashMap},
+    path::Path,
+    time::Duration,
+};
 
 use chrono::{DateTime, Utc};
 use mcg_agents::{AgentInstance, AgentLease, AgentRun, WorkPlan};
@@ -24,7 +28,8 @@ use mcg_projects::{
     ProvenanceKind, memory_claim_sha256,
 };
 use mcg_tools::{
-    ApprovalRequest, ApprovalResolution, ApprovalState, ExecutionLease, LeaseState, ToolAuditRecord,
+    ApprovalOrigin, ApprovalRequest, ApprovalResolution, ApprovalState, ExecutionLease, LeaseState,
+    ToolAuditRecord,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use thiserror::Error;
@@ -5519,6 +5524,9 @@ impl SqliteEventStore {
                 "new approvals must be pending".into(),
             ));
         }
+        if let Some(origin) = &approval.origin {
+            validate_approval_origin(origin)?;
+        }
         let event = EventEnvelope::new(
             EventKind::ApprovalRequested,
             Some(approval.task_id),
@@ -6074,6 +6082,44 @@ impl SqliteEventStore {
             provider_dispatch_failed_count,
         })
     }
+}
+
+fn validate_approval_origin(origin: &ApprovalOrigin) -> Result<(), StorageError> {
+    const MAX_ORIGIN_EVIDENCE: usize = 64;
+
+    if origin.evidence.len() > MAX_ORIGIN_EVIDENCE {
+        return Err(StorageError::InvalidData(
+            "approval origin contains too many evidence references".into(),
+        ));
+    }
+    let sources = [
+        origin.conversation.as_ref(),
+        origin.turn.as_ref(),
+        origin.invocation.as_ref(),
+        origin.command.as_ref(),
+        origin.agent.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    .chain(origin.evidence.iter())
+    .collect::<Vec<_>>();
+    if sources.is_empty() {
+        return Err(StorageError::InvalidData(
+            "approval origin must contain at least one source reference".into(),
+        ));
+    }
+    let mut identities = BTreeSet::new();
+    for source in sources {
+        source.validate().map_err(|error| {
+            StorageError::InvalidData(format!("approval origin source is invalid: {error}"))
+        })?;
+        if !identities.insert((source.source_type.as_str(), source.locator.trim())) {
+            return Err(StorageError::InvalidData(
+                "approval origin repeats the same source reference".into(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 const fn approval_state_name(state: ApprovalState) -> &'static str {
@@ -7298,6 +7344,7 @@ mod tests {
             action: "fs.delete".into(),
             resource: "project/generated".into(),
             reason: "destructive action".into(),
+            origin: None,
             state: ApprovalState::Pending,
             requested_at: Utc::now(),
             expires_at: Utc::now() + chrono::Duration::hours(1),
@@ -7326,6 +7373,84 @@ mod tests {
         assert_eq!(resolved.state, ApprovalState::Approved);
         assert_eq!(event.kind, EventKind::ApprovalResolved);
         assert_eq!(reopened.event_count().expect("event count"), 2);
+    }
+
+    #[test]
+    fn approval_origin_rejects_empty_malformed_and_duplicate_sources() {
+        fn source(locator: &str) -> mcg_contracts::SourceRef {
+            mcg_contracts::SourceRef {
+                source_type: mcg_contracts::StableTypeId::parse("mcg.approval_source.v1")
+                    .expect("stable source type"),
+                locator: locator.into(),
+                content_hash: mcg_contracts::ContentHash {
+                    algorithm: mcg_contracts::HashAlgorithm::Blake3_256,
+                    domain: "MetaCog.ApprovalSource".into(),
+                    digest_hex: "a".repeat(64),
+                },
+            }
+        }
+        fn approval(origin: ApprovalOrigin) -> ApprovalRequest {
+            ApprovalRequest {
+                schema_version: TOOL_SCHEMA_VERSION,
+                id: ApprovalId::new(),
+                tool_request_id: ToolRequestId::new(),
+                task_id: TaskId::new(),
+                action: "fs.read".into(),
+                resource: "README.md".into(),
+                reason: "inspect source".into(),
+                origin: Some(origin),
+                state: ApprovalState::Pending,
+                requested_at: Utc::now(),
+                expires_at: Utc::now() + chrono::Duration::hours(1),
+            }
+        }
+
+        let empty = approval(ApprovalOrigin {
+            conversation: None,
+            turn: None,
+            invocation: None,
+            command: None,
+            agent: None,
+            evidence: Vec::new(),
+        });
+        let mut store = SqliteEventStore::open_in_memory().expect("store");
+        assert!(store.create_approval(&empty).is_err());
+
+        let duplicate_source = source("command-1");
+        let duplicate = approval(ApprovalOrigin {
+            conversation: None,
+            turn: None,
+            invocation: None,
+            command: Some(duplicate_source.clone()),
+            agent: None,
+            evidence: vec![duplicate_source],
+        });
+        assert!(store.create_approval(&duplicate).is_err());
+
+        let mut malformed_source = source("command-2");
+        malformed_source.content_hash.digest_hex = "ABC".into();
+        let malformed = approval(ApprovalOrigin {
+            conversation: None,
+            turn: None,
+            invocation: None,
+            command: Some(malformed_source),
+            agent: None,
+            evidence: Vec::new(),
+        });
+        assert!(store.create_approval(&malformed).is_err());
+
+        let valid = approval(ApprovalOrigin {
+            conversation: Some(source("conversation-1")),
+            turn: None,
+            invocation: None,
+            command: Some(source("command-3")),
+            agent: None,
+            evidence: vec![source("evidence-1")],
+        });
+        store
+            .create_approval(&valid)
+            .expect("valid bounded origin persists");
+        assert_eq!(store.approval(valid.id).expect("lookup"), Some(valid));
     }
 
     #[test]

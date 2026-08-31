@@ -162,6 +162,7 @@ where
                                 action: request.kind.stable_name(),
                                 resource: resource.clone(),
                                 reason: reason.clone(),
+                                origin: None,
                                 state: ApprovalState::Pending,
                                 requested_at: Utc::now(),
                                 expires_at: Utc::now() + Duration::hours(24),

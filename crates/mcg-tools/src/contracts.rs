@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use mcg_contracts::SourceRef;
 use mcg_domain::{
     ApprovalId, ArtifactId, ComputerActionBatchId, LeaseId, ManagedProcessId, PlatformSessionId,
     SiteDeploymentId, SiteId, TaskId, ToolExecutionId, ToolRequestId,
@@ -460,6 +461,21 @@ pub enum ApprovalState {
     Cancelled,
 }
 
+/// Immutable owner-visible records that caused an approval request.
+///
+/// Older and non-conversation approvals may omit this structure. Each populated reference binds
+/// the exact source locator and content hash observed when the request was persisted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ApprovalOrigin {
+    pub conversation: Option<SourceRef>,
+    pub turn: Option<SourceRef>,
+    pub invocation: Option<SourceRef>,
+    pub command: Option<SourceRef>,
+    pub agent: Option<SourceRef>,
+    #[serde(default)]
+    pub evidence: Vec<SourceRef>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApprovalRequest {
     pub schema_version: u16,
@@ -469,6 +485,8 @@ pub struct ApprovalRequest {
     pub action: String,
     pub resource: String,
     pub reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<ApprovalOrigin>,
     pub state: ApprovalState,
     pub requested_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
@@ -641,6 +659,29 @@ mod tests {
         let decoded: ToolRequest = serde_json::from_str(&encoded).expect("deserialize");
         assert_eq!(decoded, request);
         assert_eq!(decoded.schema_version, TOOL_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn legacy_approval_without_origin_round_trips_without_inventing_provenance() {
+        let legacy = serde_json::json!({
+            "schema_version": TOOL_SCHEMA_VERSION,
+            "id": "00000000-0000-4000-8000-000000000101",
+            "tool_request_id": "00000000-0000-4000-8000-000000000102",
+            "task_id": "00000000-0000-4000-8000-000000000103",
+            "action": "fs.read",
+            "resource": "README.md",
+            "reason": "Legacy request",
+            "state": "pending",
+            "requested_at": "2026-08-30T12:00:00Z",
+            "expires_at": "2026-08-30T12:05:00Z"
+        });
+
+        let approval: ApprovalRequest =
+            serde_json::from_value(legacy).expect("legacy approval remains decodable");
+        assert!(approval.origin.is_none());
+
+        let encoded = serde_json::to_value(approval).expect("approval remains serializable");
+        assert!(encoded.get("origin").is_none());
     }
 
     #[test]

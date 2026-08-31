@@ -17035,6 +17035,7 @@ form.addEventListener('submit', (event) => {
             action: "fs.delete".into(),
             resource: "project/generated".into(),
             reason: "destructive action".into(),
+            origin: None,
             state: ApprovalState::Pending,
             requested_at: Utc::now(),
             expires_at: Utc::now() + chrono::Duration::hours(1),

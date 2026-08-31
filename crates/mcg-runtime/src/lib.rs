@@ -62,8 +62,9 @@ use mcg_contracts::{
     ActionSummary, ArtifactRef, CompletionCertificate, CompletionVerdict, ContentHash,
     CorrelationId, EffectOutcome, InvocationId, InvocationInspection, InvocationSummary, ModelRun,
     ModelRunState, ReconciliationJob, ReconciliationJobId, ReconciliationObservation,
-    RuntimeActorId, RuntimeIdentity, RuntimeInvocationRequest, RuntimeInvocationResult,
-    WorkflowAttempt, WorkflowCancelRequest, WorkflowId, WorkflowInspection, WorkflowState,
+    RuntimeActorId, RuntimeIdentity, RuntimeInvocationRequest, RuntimeInvocationResult, SourceRef,
+    StableTypeId, WorkflowAttempt, WorkflowCancelRequest, WorkflowId, WorkflowInspection,
+    WorkflowState, canonical_contract_hash,
 };
 use mcg_domain::{
     AgentContextCheckpoint, AgentContextCheckpointCause, AgentContextCheckpointId,
@@ -161,8 +162,8 @@ pub use mcg_storage::{
     ShadowWorkspaceMutation, create_backup_bundle_from_snapshot, verify_backup_bundle,
 };
 use mcg_tools::{
-    ApprovalRepository, ApprovalRequest, ApprovalResolution, ApprovalState, ArtifactStore,
-    BrokerControls, BrowserExecutor, BrowserWorkflowDocument, BrowserWorkflowStep,
+    ApprovalOrigin, ApprovalRepository, ApprovalRequest, ApprovalResolution, ApprovalState,
+    ArtifactStore, BrokerControls, BrowserExecutor, BrowserWorkflowDocument, BrowserWorkflowStep,
     ComputerUseAction, ComputerUseBatchResult, ComputerUseFrame, ComputerUseManager,
     ComputerUseObservation, CredentialReference, CredentialResolver, ExecutionLease,
     ExecutionLeaseRepository, FilesystemExecutor, GitExecutor, HeaderValue, HostExecutor,
@@ -780,6 +781,73 @@ pub enum RuntimeError {
     StorageLock,
     #[error("local authentication token is invalid")]
     InvalidAuthToken,
+}
+
+fn approval_source_ref<T: Serialize>(
+    type_id: &str,
+    semantic_domain: &str,
+    locator: impl Into<String>,
+    value: &T,
+) -> Result<SourceRef, RuntimeError> {
+    let source_type = StableTypeId::parse(type_id).map_err(|error| {
+        StorageError::InvalidData(format!("approval source type is invalid: {error}"))
+    })?;
+    let content_hash =
+        canonical_contract_hash(type_id, semantic_domain, value).map_err(|error| {
+            StorageError::InvalidData(format!(
+                "approval source hash could not be derived: {error}"
+            ))
+        })?;
+    Ok(SourceRef {
+        source_type,
+        locator: locator.into(),
+        content_hash,
+    })
+}
+
+fn codex_approval_origin(
+    conversation: &Conversation,
+    turn: &ConversationTurn,
+    request: &CodexApprovalRequest,
+    agent: Option<&ConversationAgentSession>,
+) -> Result<ApprovalOrigin, RuntimeError> {
+    Ok(ApprovalOrigin {
+        conversation: Some(approval_source_ref(
+            "mcg.conversation.v2",
+            "MetaCog.ApprovalConversation",
+            conversation.id.to_string(),
+            conversation,
+        )?),
+        turn: Some(approval_source_ref(
+            "mcg.conversation_turn.v1",
+            "MetaCog.ApprovalTurn",
+            turn.id.to_string(),
+            turn,
+        )?),
+        invocation: None,
+        command: Some(approval_source_ref(
+            "codex.command_approval_request.v1",
+            "MetaCog.ApprovalCommand",
+            request.item_id.clone(),
+            request,
+        )?),
+        agent: agent
+            .map(|session| {
+                approval_source_ref(
+                    "mcg.conversation_agent_session.v8",
+                    "MetaCog.ApprovalAgent",
+                    session.id.to_string(),
+                    session,
+                )
+            })
+            .transpose()?,
+        evidence: vec![approval_source_ref(
+            "codex.command_approval_evidence.v1",
+            "MetaCog.ApprovalEvidence",
+            format!("{}:params", request.item_id),
+            &request.params,
+        )?],
+    })
 }
 
 impl RuntimeError {
@@ -14643,6 +14711,12 @@ impl AppRuntime {
         };
         let now = Utc::now();
         let tool_request_id = ToolRequestId::new();
+        let team = self.store()?.conversation_team_state(conversation.id)?;
+        let agent = team.sessions.iter().find(|session| {
+            session.conversation_id == conversation.id
+                && session.codex_thread_id.as_deref() == Some(request.thread_id.as_str())
+        });
+        let origin = codex_approval_origin(conversation, turn, request, agent)?;
         let approval = ApprovalRequest {
             schema_version: TOOL_SCHEMA_VERSION,
             id: ApprovalId::new(),
@@ -14653,6 +14727,7 @@ impl AppRuntime {
             reason: request.reason.clone().unwrap_or_else(|| {
                 "Codex needs permission to continue this conversation turn.".into()
             }),
+            origin: Some(origin),
             state: ApprovalState::Pending,
             requested_at: now,
             expires_at: now + Duration::minutes(5),
@@ -22464,6 +22539,7 @@ impl AppRuntime {
                         reason: format!(
                             "Guided mode requires approval to run these exact objective checks: {checks}"
                         ),
+                        origin: None,
                         state: ApprovalState::Pending,
                         requested_at: Utc::now(),
                         expires_at: Utc::now() + Duration::hours(24),
@@ -28963,6 +29039,95 @@ mod tests {
             started_activity.codex_item_id,
             completed_activity.codex_item_id
         );
+    }
+
+    #[test]
+    fn codex_approval_origin_is_exact_stable_and_content_bound() {
+        let conversation = Conversation::new("Approval provenance", None);
+        let now = Utc::now();
+        let turn = ConversationTurn {
+            schema_version: 1,
+            id: ConversationTurnId::new(),
+            conversation_id: conversation.id,
+            state: ConversationTurnState::WaitingForApproval,
+            execution_preferences: ExecutionPreferences::default(),
+            codex_thread_id: Some("thread-approval".into()),
+            codex_turn_id: Some("turn-approval".into()),
+            task_id: Some(TaskId::new()),
+            run_id: None,
+            error: None,
+            created_at: now,
+            updated_at: now,
+        };
+        let agent = ConversationAgentSession {
+            schema_version: CONVERSATION_TEAM_SCHEMA_VERSION,
+            id: ConversationAgentSessionId::new(),
+            conversation_id: conversation.id,
+            role_id: mcg_domain::RoleId::new(),
+            organization_revision_id: OrganizationRevisionId::new(),
+            kind: ConversationAgentKind::Coder,
+            display_name: "Coder".into(),
+            parent_session_id: None,
+            state: ConversationAgentSessionState::Waiting,
+            codex_thread_id: Some("thread-approval".into()),
+            model: Some("codex".into()),
+            prompt_revision: 7,
+            created_at: now,
+            updated_at: now,
+        };
+        let request = CodexApprovalRequest {
+            request_id: serde_json::json!("approval-request-1"),
+            method: "item/commandExecution/requestApproval".into(),
+            thread_id: "thread-approval".into(),
+            turn_id: "turn-approval".into(),
+            item_id: "command-approval-1".into(),
+            reason: Some("Run the exact command".into()),
+            resource: "cargo test".into(),
+            params: serde_json::json!({"command":"cargo test","cwd":"project"}),
+        };
+
+        let first = codex_approval_origin(&conversation, &turn, &request, Some(&agent))
+            .expect("approval origin");
+        let repeated = codex_approval_origin(&conversation, &turn, &request, Some(&agent))
+            .expect("stable approval origin");
+        assert_eq!(first, repeated);
+        let conversation_locator = conversation.id.to_string();
+        let turn_locator = turn.id.to_string();
+        let agent_locator = agent.id.to_string();
+        assert_eq!(
+            first
+                .conversation
+                .as_ref()
+                .map(|source| source.locator.as_str()),
+            Some(conversation_locator.as_str())
+        );
+        assert_eq!(
+            first.turn.as_ref().map(|source| source.locator.as_str()),
+            Some(turn_locator.as_str())
+        );
+        assert_eq!(
+            first.agent.as_ref().map(|source| source.locator.as_str()),
+            Some(agent_locator.as_str())
+        );
+        assert_eq!(
+            first.command.as_ref().map(|source| source.locator.as_str()),
+            Some("command-approval-1")
+        );
+        assert_eq!(first.evidence[0].locator, "command-approval-1:params");
+
+        let mut changed = request.clone();
+        changed.params = serde_json::json!({"command":"cargo test --all","cwd":"project"});
+        let changed = codex_approval_origin(&conversation, &turn, &changed, Some(&agent))
+            .expect("changed approval origin");
+        assert_eq!(first.conversation, changed.conversation);
+        assert_eq!(first.turn, changed.turn);
+        assert_eq!(first.agent, changed.agent);
+        assert_ne!(first.command, changed.command);
+        assert_ne!(first.evidence, changed.evidence);
+
+        let agentless = codex_approval_origin(&conversation, &turn, &request, None)
+            .expect("agentless approval origin");
+        assert!(agentless.agent.is_none());
     }
 
     #[test]

@@ -176,6 +176,38 @@ test.beforeEach(async ({ page }) => {
       reconciliation_jobs: [{ id: "00000000-0000-4000-8000-00000000060a", action_id: canonicalActionId, execution_id: canonicalExecutionId, adapter: actionPayload, state: "pending", revision: 1, lease_generation: 0, lease_owner: null, lease_expires_at: null, next_attempt_at: now, attempts: 0, deadline: "2026-08-18T01:00:00Z", last_hint: null, created_at: now, updated_at: now }],
       events: [{ id: "00000000-0000-4000-8000-00000000060b", type_id: "mcg.action_classified.v1", schema_version: 1, sequence: 4, action_id: canonicalActionId, execution_id: canonicalExecutionId, correlation_id: "00000000-0000-4000-8000-00000000060c", causation_id: null, idempotency_key: "action-classify-1", occurred_at: now, payload: actionPayload }]
     };
+    const approvalConversationId = "00000000-0000-4000-8000-00000000060d";
+    const approvalTurnId = "00000000-0000-4000-8000-000000000626";
+    const approvalAgentId = "00000000-0000-4000-8000-000000000627";
+    const approvalId = "00000000-0000-4000-8000-000000000610";
+    const approvalConversation = { schema_version: 2, id: approvalConversationId, title: "Governed release approval", state: "active", execution_preferences: {}, created_at: now, updated_at: now };
+    const approvalConversationView = {
+      conversation: approvalConversation,
+      turns: [{ schema_version: 1, id: approvalTurnId, conversation_id: approvalConversationId, state: "waiting_for_approval", execution_preferences: {}, task_id: canonicalWorkflowId, created_at: now, updated_at: now }],
+      messages: [],
+      activities: [{ schema_version: 1, conversation_id: approvalConversationId, turn_id: approvalTurnId, agent_session_id: approvalAgentId, codex_item_id: "command-60f", kind: "command", state: "completed", command: "cargo test --workspace", started_at: now, updated_at: now }],
+      team: { sessions: [{ schema_version: 8, id: approvalAgentId, conversation_id: approvalConversationId, role_id: "role-coder", organization_revision_id: baseOrganization.revision_id, kind: "coder", display_name: "Coding Agent Atlas", state: "waiting", codex_thread_id: "thread-release-approval", prompt_revision: 1, created_at: now, updated_at: now }], delegations: [], messages: [], blackboard: [], worktrees: [] }
+    };
+    const approval = {
+      schema_version: 1,
+      id: approvalId,
+      tool_request_id: "00000000-0000-4000-8000-000000000628",
+      task_id: canonicalWorkflowId,
+      action: "item/commandExecution/requestApproval",
+      resource: "cargo test --workspace",
+      reason: "Run the exact release verification command",
+      origin: {
+        conversation: { source_type: "mcg.conversation.v2", locator: approvalConversationId, content_hash: { algorithm: "blake3-256", domain: "MetaCog.ApprovalConversation", digest_hex: "7".repeat(64) } },
+        turn: { source_type: "mcg.conversation_turn.v1", locator: approvalTurnId, content_hash: { algorithm: "blake3-256", domain: "MetaCog.ApprovalTurn", digest_hex: "8".repeat(64) } },
+        invocation: null,
+        command: { source_type: "codex.command_approval_request.v1", locator: "command-60f", content_hash: { algorithm: "blake3-256", domain: "MetaCog.ApprovalCommand", digest_hex: "9".repeat(64) } },
+        agent: { source_type: "mcg.conversation_agent_session.v8", locator: approvalAgentId, content_hash: { algorithm: "blake3-256", domain: "MetaCog.ApprovalAgent", digest_hex: "a".repeat(64) } },
+        evidence: [{ source_type: "codex.command_approval_evidence.v1", locator: "command-60f:params", content_hash: { algorithm: "blake3-256", domain: "MetaCog.ApprovalEvidence", digest_hex: "b".repeat(64) } }]
+      },
+      state: "pending",
+      requested_at: now,
+      expires_at: "2026-08-18T00:05:00Z"
+    };
     const canonicalInvocationId = "00000000-0000-4000-8000-000000000612";
     const globalAgentSessions = [
       { schema_version: 1, session_id: "00000000-0000-4000-8000-000000000620", conversation_id: "00000000-0000-4000-8000-000000000621", conversation_title: "Release qualification", conversation_state: "active", role_id: "00000000-0000-4000-8000-000000000622", organization_revision_id: baseOrganization.revision_id, kind: "coder", display_name: "Coding Agent Atlas", state: "working", codex_thread_id: "thread-atlas", model: "gpt-5.6-sol", created_at: now, updated_at: now },
@@ -325,7 +357,11 @@ test.beforeEach(async ({ page }) => {
               { kind: "folder", label: "src", resource: "src", detail: "src" }
             ].filter((candidate) => !args.query || candidate.label.toLowerCase().includes(String(args.query).toLowerCase()))
           };
-          if (command === "list_conversations") return { conversations: [] };
+          if (command === "list_conversations") return { conversations: [approvalConversation] };
+          if (command === "get_conversation") {
+            if (args.conversationId !== approvalConversationId) throw new Error("unknown conversation fixture");
+            return approvalConversationView;
+          }
           if (command === "codex_features") return codexFeatures;
           if (command === "codex_configuration_status") return {
             requirements: {},
@@ -449,6 +485,10 @@ test.beforeEach(async ({ page }) => {
           }
           if (command === "cancel_reviewed_topology_plan") return { plan: { ...reviewedPlans[0], state: "cancelled" }, replayed: false, events: [], outcomes: [] };
           if (command === "list_approvals") return { approvals: [] };
+          if (command === "get_approval") {
+            if (args.approvalId !== approvalId) throw new Error("unknown approval fixture");
+            return approval;
+          }
           if (command === "resolve_approval") return {};
           if (command === "managed_project_memory") return { markdown: `# Managed Project Memory\n\n${memoryClaims.map((claim) => `- ${claim.key}: ${claim.value}`).join("\n")}` };
           if (command === "create_project_memory") {
@@ -635,7 +675,7 @@ test("governed actions keep one Root truth across Simple Advanced and Developer"
   await expect(actions.getByText("Reconciliation: pending")).toBeVisible();
   await expect(actions.getByRole("region", { name: "Bound action origin" })).toContainText("command-60f");
   await expect(actions.getByRole("region", { name: "Bound action origin" })).toContainText("artifact-611");
-  await expect(actions.getByRole("button", { name: /Open originating conversation/ })).toBeDisabled();
+  await expect(actions.getByRole("button", { name: /Open originating conversation/ })).toBeEnabled();
   await expect(actions.getByRole("button", { name: "Canonical action evidence" })).toHaveCount(0);
 
   await openOwnerSurface(page, "Settings");
@@ -650,6 +690,14 @@ test("governed actions keep one Root truth across Simple Advanced and Developer"
   await expect(evidence).toContainText("correlation_id");
   const accessibility = await new AxeBuilder({ page }).include(".canonical-action-section").analyze();
   expect(accessibility.violations, "governed-action accessibility violations").toEqual([]);
+  await actions.getByRole("button", { name: /Open approval, agent, command, and evidence/ }).click();
+  const source = page.getByRole("region", { name: "Approval source evidence" });
+  await expect(source).toContainText("Coding Agent Atlas");
+  await expect(source).toContainText("cargo test --workspace");
+  await expect(source).toContainText("command-60f:params");
+  await expect(source).toContainText("777777777777");
+  const sourceAccessibility = await new AxeBuilder({ page }).include(".approval-source-focus").analyze();
+  expect(sourceAccessibility.violations, "approval-source accessibility violations").toEqual([]);
 
   await openOwnerSurface(page, "Settings");
   await page.getByRole("button", { name: "General", exact: true }).click();
@@ -1293,7 +1341,7 @@ test("keyboard-only navigation reaches every workspace and exposes visible focus
   await expect(projectChat).toBeFocused();
   await expectVisibleKeyboardFocus(projectChat);
   const owner = page.getByRole("button", { name: "Open owner menu" });
-  for (let index = 0; index < 8 && !(await owner.evaluate((element) => document.activeElement === element)); index += 1) {
+  for (let index = 0; index < 32 && !(await owner.evaluate((element) => document.activeElement === element)); index += 1) {
     await page.keyboard.press("Tab");
   }
   await expect(owner).toBeFocused();

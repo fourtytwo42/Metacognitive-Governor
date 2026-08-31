@@ -2136,6 +2136,14 @@ export interface ApprovalRequest {
   action: string;
   resource: string;
   reason: string;
+  origin?: {
+    conversation: CanonicalSourceRef | null;
+    turn: CanonicalSourceRef | null;
+    invocation: CanonicalSourceRef | null;
+    command: CanonicalSourceRef | null;
+    agent: CanonicalSourceRef | null;
+    evidence: CanonicalSourceRef[];
+  } | null;
   state: "pending" | "approved" | "denied" | "expired" | "cancelled";
 }
 
@@ -2619,6 +2627,10 @@ export function resumeTask(taskId: string, preferences?: ChatRunPreferences): Pr
 
 export function listApprovals(): Promise<ApprovalListResponse> {
   return invoke("list_approvals");
+}
+
+export function getApproval(approvalId: string): Promise<ApprovalRequest> {
+  return invoke("get_approval", { approvalId });
 }
 
 export function approveRequest(approvalId: string): Promise<ApprovalRequest> {

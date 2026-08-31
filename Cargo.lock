@@ -4479,6 +4479,7 @@ dependencies = [
  "image 0.25.10",
  "mcg-browser-contracts",
  "mcg-config",
+ "mcg-contracts",
  "mcg-domain",
  "mcg-policy",
  "reqwest",
