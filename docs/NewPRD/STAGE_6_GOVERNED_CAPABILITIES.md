@@ -1,14 +1,14 @@
 # Stage 6 — Governed Providers, Tools, Hooks, and Plugins
 
-**Status:** Root-bound model-egress permit kernel and deterministic in-process governed provider gateway implemented; real provider execution, isolated adapter credentials, and the broader capability gateway remain open
+**Status:** Root-bound model-egress permit kernel, deterministic Root gateway, and isolated credential-resolving OpenAI-compatible provider runner implemented; production caller migration, retry/stream/cancellation, product inspection, and the broader capability gateway remain open
 
-**Product checkpoint:** `0e4c0e8` (`Add Root-bound model egress permits`)
+**Product checkpoints:** `0e4c0e8` (`Add Root-bound model egress permits`) and `deb4136` (`Add deterministic permit-consuming provider gateway`); the isolated runner checkpoint is under cumulative qualification and not yet committed
 
 ## Authority boundary
 
-Remote model execution is governed disclosure and cost, not authority-free inference. Runtime may propose one bounded invocation, but only Protected Root may validate the exact persisted workflow/context/provider state and issue durable authority. Runtime receives opaque secret-handle identifiers, never raw credentials. A provider adapter may eventually resolve a handle only for the exact active permit, provider connection, credential slot, and expiry.
+Remote model execution is governed disclosure and cost, not authority-free inference. Runtime may propose one bounded invocation, but only Protected Root may validate the exact persisted workflow/context/provider state and issue durable authority. Runtime receives opaque secret-handle identifiers, never raw credentials. The isolated provider runner resolves a handle only for the exact active permit, provider connection, credential slot, and expiry.
 
-The schema-59 permit kernel and deterministic gateway do not send network traffic. Existing network provider implementations remain compatibility foundations until their requests execute only through the governed gateway described below.
+The schema-59 permit kernel and deterministic in-process gateway do not send network traffic. The isolated provider runner now exercises one real OpenAI-compatible Responses HTTP route, but existing product provider callers remain compatibility foundations until they all execute only through the governed path described below.
 
 ## Implemented permit kernel
 
@@ -34,27 +34,37 @@ The schema-59 permit kernel and deterministic gateway do not send network traffi
 - Provider failures, invalid responses, and results arriving after workflow reassignment or revision change settle the already-dispatched run conservatively as `OutcomeUnknown`; they are never accepted or blindly retried.
 - A deterministic fake gateway proves exact one-call dispatch. Request/model substitution is rejected before the gateway is called, and a post-dispatch workflow revision change rejects the response and preserves `OutcomeUnknown` evidence.
 
+## Implemented isolated provider-runner checkpoint
+
+- `mcg-provider-runner` is a fixed adjacent one-request child with a bounded 16 MiB request/response protocol. Protected Root launches only that executable with a cleared environment, kill-on-drop supervision, Windows Job Object or POSIX process-group containment, concurrent bounded stdout/stderr drains, and a single deadline.
+- The child independently recomputes the complete proposal, disclosure, request, and permit hashes and validates the invocation, role, attempt revision, lease generation, Runtime actor and identity, TaskContract, route, provider, model, destination, limits, expiry, permit, and exact handle map before credential or network access.
+- The Root-to-runner request contains only an opaque connection/credential-slot binding. The child loads only that exact operating-system credential, refuses credential mutation, and zeroizes transient `ProviderCredential` material on drop and process exit. API-key, bearer-token, and credential-free OpenAI-compatible routes are supported; ChatGPT OAuth remains explicitly denied until a separately governed broker exists.
+- The provider client is configured for exactly one physical attempt. Any later retry must receive a distinct invocation, permit, and `ModelRun`; the child cannot create a hidden physical retry.
+- Provider failures cross the pipe only as categorical codes. Raw provider error bodies, messages, credentials, prompts, and arbitrary metadata are not returned as diagnostics or persisted by the runner.
+- A real-process loopback test exercises the OpenAI-compatible `/v1/responses` route through the fixed child. A separate credential test proves the API key is absent from the Root request, appears only in the outbound authorization header, and never enters the response artifact.
+- Packaging contracts include and qualify the runner for Windows installer/portable, Linux Debian/AppImage, and macOS payloads. Native installed-package execution remains part of the open Stage 6 exit gate.
+
 ## Verified evidence
 
 - `mcg-contracts`: 20/20, including model overscope, substitution, duplicate-handle, invalid-time, and bounded-evidence failures.
 - `mcg-storage`: 113/113, including schema-59 authorization, replay, secret opacity, handle expiry, and InvocationManifest permit binding.
 - `mcg-protected-root`: 14/14 plus the real-child recovery integration test; the Root permit test covers exact route/disclosure/budget binding, opaque handle resolution, replay, destination substitution, and under-disclosure.
+- `mcg-provider-runner`: two unit tests, dependency/qualification process tests, and one real-child OpenAI-compatible loopback test pass. The dependency audit excludes storage, Protected Root, Runtime, tools, MCP, API, SQLite, and browser engines.
 - `cargo check --workspace --all-targets` passes.
 - Strict contracts Clippy passes. The new storage path passes with only the repository's recorded legacy lint classes allowed; Root passes with only its recorded legacy oversized IPC-dispatch function allowed.
 - Documentation, packaging-contract, formatting, and diff checks pass.
 
 ## Next implementation slices
 
-### 6A — Deterministic governed provider gateway — partially complete
+### 6A — Deterministic governed provider gateway — substantially complete
 
-- Move the implemented in-process gateway behind a bounded provider-runner request/response protocol carrying the exact request artifact, permit, cancellation identity, and no ambient credentials.
-- Resolve opaque handles inside the authorized adapter boundary and zeroize transient credential material.
+- The bounded provider-runner protocol, independent permit validation, exact opaque-handle resolution, and transient credential zeroization are implemented.
 - Add declared retry/idempotency policy with a distinct invocation/permit/ModelRun for every physical attempt; the storage model intentionally allows one physical ModelRun head per invocation.
 - Route recorded parser fixtures through the implemented deterministic path and add cancellation plus invalid/oversized response cases.
 
-### 6B — Real governed provider route
+### 6B — Real governed provider route — partially complete
 
-- Route one existing provider through the same gateway without a compatibility bypass.
+- A real credential-free OpenAI-compatible Responses HTTP route passes through the isolated child in process tests. Migrate the existing product provider callers through this route without a compatibility bypass and add opt-in external-provider qualification.
 - Add streaming cancellation, response-size bounds, late/duplicate result fencing, retry fault injection, and observed provider/model fingerprint persistence.
 - Run opt-in real-provider tests and a bounded release smoke test without retaining prompts, responses, or credentials in generic logs/evidence.
 

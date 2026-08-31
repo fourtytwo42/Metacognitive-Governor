@@ -510,9 +510,28 @@ assert report["executable_hash"]["domain"] == "MetaCog.RuntimeWorkerExecutable"
 PY
 }
 
+test_provider_runner() {
+  local executable="$1"
+  local label="$2"
+  local report="$uat_root/$label-provider-runner.json"
+  runuser -u "$uat_user" -- "$executable" --qualify-provider-runner >"$report"
+  python3 - "$report" <<'PY'
+import json
+import pathlib
+import sys
+
+report = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+assert report["protocol_version"] == 1
+assert report["role"] == "provider_adapter"
+assert report["storage_linked"] is False
+assert report["credential_store"] == "operating_system"
+assert report["physical_retry_attempts"] == 1
+PY
+}
+
 dpkg -i "$deb" >"$uat_root/deb-install.log"
 package_installed=true
-for file in /usr/bin/mcg-desktop /usr/bin/mcg-service /usr/bin/mcg /usr/bin/mcg-action-runner /usr/bin/mcg-runtime-worker /usr/bin/mcg-plugin-runner /usr/bin/mcg-shadow-runner /usr/bin/mcg-updater \
+for file in /usr/bin/mcg-desktop /usr/bin/mcg-service /usr/bin/mcg /usr/bin/mcg-action-runner /usr/bin/mcg-provider-runner /usr/bin/mcg-runtime-worker /usr/bin/mcg-plugin-runner /usr/bin/mcg-shadow-runner /usr/bin/mcg-updater \
   /usr/lib/MCG/mcg-bwrap /etc/apparmor.d/metacognitive-governor-bwrap; do
   [[ -f "$file" ]] || { echo "Installed payload is missing $file." >&2; exit 1; }
 done
@@ -536,6 +555,7 @@ apparmor_status | grep -Fxq '   metacognitive-governor-unpriv-bwrap'
   --die-with-parent --ro-bind / / -- /usr/bin/true
 test_plugin_runner /usr/bin/mcg-plugin-runner installed
 test_action_runner /usr/bin/mcg-action-runner installed
+test_provider_runner /usr/bin/mcg-provider-runner installed
 test_runtime_worker /usr/bin/mcg-runtime-worker installed
 
 sentinel="$installed_data/linux-package-uat-retained.txt"
@@ -912,7 +932,7 @@ appimage_root="$uat_root/appimage"
 mkdir "$appimage_root"
 chown "$uat_user":"$(id -gn "$uat_user")" "$appimage_root"
 runuser -u "$uat_user" -- sh -c 'cd "$1" && "$2" --appimage-extract >/dev/null' sh "$appimage_root" "$appimage"
-for file in AppRun usr/bin/mcg-desktop usr/bin/mcg-service usr/bin/mcg usr/bin/mcg-action-runner usr/bin/mcg-runtime-worker usr/bin/mcg-plugin-runner usr/bin/mcg-shadow-runner usr/bin/mcg-updater; do
+for file in AppRun usr/bin/mcg-desktop usr/bin/mcg-service usr/bin/mcg usr/bin/mcg-action-runner usr/bin/mcg-provider-runner usr/bin/mcg-runtime-worker usr/bin/mcg-plugin-runner usr/bin/mcg-shadow-runner usr/bin/mcg-updater; do
   [[ -f "$appimage_root/squashfs-root/$file" ]] || { echo "AppImage is missing $file." >&2; exit 1; }
 done
 [[ -f "$appimage_root/squashfs-root/usr/share/applications/MetaCog.desktop" || \
@@ -925,6 +945,7 @@ find "$appimage_root/squashfs-root" -type f -name Apache-2.0.txt -print -quit | 
 find "$appimage_root/squashfs-root" -type f -name Wasmtime-Apache-2.0-WITH-LLVM-exception.txt -print -quit | grep -q .
 test_plugin_runner "$appimage_root/squashfs-root/usr/bin/mcg-plugin-runner" appimage
 test_action_runner "$appimage_root/squashfs-root/usr/bin/mcg-action-runner" appimage
+test_provider_runner "$appimage_root/squashfs-root/usr/bin/mcg-provider-runner" appimage
 test_runtime_worker "$appimage_root/squashfs-root/usr/bin/mcg-runtime-worker" appimage
 launch_and_capture "$appimage_root/squashfs-root/AppRun" "$appimage_data" 7777 appimage
 

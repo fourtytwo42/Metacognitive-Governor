@@ -345,7 +345,7 @@ try {
     }
     $installationRemoved = $false
 
-    $requiredPayload = @("mcg-desktop.exe", "mcg-service.exe", "mcg.exe", "mcg-agent-mcp.exe", "mcg-action-runner.exe", "mcg-runtime-worker.exe", "mcg-plugin-runner.exe", "mcg-shadow-runner.exe", "mcg-updater.exe", "THIRD_PARTY_NOTICES.md", "Apache-2.0.txt", "Wasmtime-Apache-2.0-WITH-LLVM-exception.txt")
+    $requiredPayload = @("mcg-desktop.exe", "mcg-service.exe", "mcg.exe", "mcg-agent-mcp.exe", "mcg-action-runner.exe", "mcg-provider-runner.exe", "mcg-runtime-worker.exe", "mcg-plugin-runner.exe", "mcg-shadow-runner.exe", "mcg-updater.exe", "THIRD_PARTY_NOTICES.md", "Apache-2.0.txt", "Wasmtime-Apache-2.0-WITH-LLVM-exception.txt")
     $installed = Get-ChildItem -LiteralPath $installRoot -Recurse -File
     foreach ($name in $requiredPayload) {
         if ($installed.Name -notcontains $name) {
@@ -390,6 +390,21 @@ try {
         throw "Packaged Runtime worker qualification report is incomplete."
     }
     [IO.File]::WriteAllText((Join-Path $uatRoot "runtime-worker.json"), $runtimeQualificationJson, [Text.UTF8Encoding]::new($false))
+
+    $providerRunner = Join-Path $installRoot "mcg-provider-runner.exe"
+    $providerQualificationJson = (& $providerRunner --qualify-provider-runner) -join "`n"
+    if ($LASTEXITCODE -ne 0) {
+        throw "Packaged provider runner qualification failed with exit code $LASTEXITCODE."
+    }
+    $providerQualification = $providerQualificationJson | ConvertFrom-Json
+    if ($providerQualification.protocol_version -ne 1 -or
+        $providerQualification.role -ne "provider_adapter" -or
+        $providerQualification.storage_linked -ne $false -or
+        $providerQualification.credential_store -ne "operating_system" -or
+        $providerQualification.physical_retry_attempts -ne 1) {
+        throw "Packaged provider runner qualification report is incomplete."
+    }
+    [IO.File]::WriteAllText((Join-Path $uatRoot "provider-runner.json"), $providerQualificationJson, [Text.UTF8Encoding]::new($false))
 
     $runner = Join-Path $installRoot "mcg-plugin-runner.exe"
     $module = @'

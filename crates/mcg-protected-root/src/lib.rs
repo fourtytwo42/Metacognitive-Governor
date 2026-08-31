@@ -56,9 +56,15 @@ use mcg_platform::{
     ROOT_WORKFLOW_SHOW_REQUEST_TYPE, ROOT_WORKFLOW_SHOW_RESPONSE_TYPE, RootIpcSession,
     create_root_ipc_session, read_canonical_frame, remove_root_ipc_session, write_canonical_frame,
 };
+use mcg_provider_runner::{
+    ProviderRunnerAuthorization, ProviderRunnerClient, ProviderRunnerRequest,
+    RunnerSecretHandleBinding, RunnerSecretSlot,
+    model_provider_request_artifact as runner_request_artifact,
+    model_provider_response_artifact as runner_response_artifact,
+};
 use mcg_providers::{
-    CONTRACT_VERSION, ModelRequest, ModelResponse, ProviderAuthMode, ProviderConnection,
-    ProviderError, ProviderKind,
+    CONTRACT_VERSION, ModelDescriptor, ModelRequest, ModelResponse, ProviderAuthMode,
+    ProviderConnection, ProviderError, ProviderKind,
 };
 use mcg_runtime::{AppRuntime, RuntimeError};
 use mcg_storage::{
@@ -344,12 +350,6 @@ pub fn authorize_runtime_model_egress(
     Ok(runtime.authorize_model_egress(proposal, policy, &permit, &bindings, now)?)
 }
 
-const MODEL_PROVIDER_REQUEST_TYPE: &str = "mcg.model_provider_request.v1";
-const MODEL_PROVIDER_REQUEST_HASH_DOMAIN: &str = "MetaCog.ModelProviderRequest";
-const MODEL_PROVIDER_RESPONSE_TYPE: &str = "mcg.model_provider_response.v1";
-const MODEL_PROVIDER_RESPONSE_HASH_DOMAIN: &str = "MetaCog.ModelProviderResponse";
-const MAX_GOVERNED_PROVIDER_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
-
 /// Canonically binds the exact provider request bytes authorized by Root.
 ///
 /// # Errors
@@ -357,65 +357,13 @@ const MAX_GOVERNED_PROVIDER_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
 pub fn model_provider_request_artifact(
     request: &ModelRequest,
 ) -> Result<ArtifactRef, ProtectedRootError> {
-    if request.temperature.is_some_and(|value| !value.is_finite())
-        || request.top_p.is_some_and(|value| !value.is_finite())
-    {
-        return Err(StorageError::InvalidData(
-            "governed provider request contains a non-finite sampling value".into(),
-        )
-        .into());
-    }
-    governed_provider_artifact(
-        MODEL_PROVIDER_REQUEST_TYPE,
-        MODEL_PROVIDER_REQUEST_HASH_DOMAIN,
-        "application/vnd.metacog.model-provider-request+json",
-        request,
-    )
+    runner_request_artifact(request).map_err(ProtectedRootError::Serialization)
 }
 
 fn model_provider_response_artifact(
     response: &ModelResponse,
 ) -> Result<ArtifactRef, ProtectedRootError> {
-    governed_provider_artifact(
-        MODEL_PROVIDER_RESPONSE_TYPE,
-        MODEL_PROVIDER_RESPONSE_HASH_DOMAIN,
-        "application/vnd.metacog.model-provider-response+json",
-        response,
-    )
-}
-
-fn governed_provider_artifact<T: serde::Serialize>(
-    type_id: &str,
-    hash_domain: &str,
-    media_type: &str,
-    value: &T,
-) -> Result<ArtifactRef, ProtectedRootError> {
-    StableTypeId::parse(type_id)?;
-    let bytes = serde_json::to_vec(value)?;
-    if bytes.is_empty() || bytes.len() > MAX_GOVERNED_PROVIDER_PAYLOAD_BYTES {
-        return Err(StorageError::InvalidData(
-            "governed provider payload is empty or exceeds its byte limit".into(),
-        )
-        .into());
-    }
-    let mut hasher = Sha256::new();
-    hasher.update(b"MetaCog.GovernedProviderArtifact:v1\0");
-    hasher.update(type_id.as_bytes());
-    hasher.update(b"\0");
-    hasher.update(hash_domain.as_bytes());
-    hasher.update(b"\0");
-    hasher.update(&bytes);
-    Ok(ArtifactRef {
-        content_hash: ContentHash {
-            algorithm: HashAlgorithm::Sha256,
-            domain: hash_domain.into(),
-            digest_hex: format!("{:x}", hasher.finalize()),
-        },
-        media_type: media_type.into(),
-        byte_length: u64::try_from(bytes.len()).map_err(|_| {
-            StorageError::InvalidData("governed provider payload length does not fit u64".into())
-        })?,
-    })
+    runner_response_artifact(response).map_err(ProtectedRootError::Serialization)
 }
 
 #[async_trait::async_trait]
@@ -425,6 +373,119 @@ pub trait GovernedModelProviderGateway: Send + Sync {
         authorization: &RuntimeModelEgressAuthorizationReceipt,
         request: &ModelRequest,
     ) -> Result<ModelResponse, ProviderError>;
+}
+
+/// Fixed adjacent process gateway for one exact Root-resolved provider and model.
+#[derive(Debug, Clone)]
+pub struct IsolatedProviderRunnerGateway {
+    client: ProviderRunnerClient,
+    connection: ProviderConnection,
+    model: ModelDescriptor,
+}
+
+impl IsolatedProviderRunnerGateway {
+    /// Resolves only the fixed provider runner adjacent to the trusted Root executable.
+    ///
+    /// # Errors
+    /// Returns an error when the fixed adjacent runner is unavailable or unsafe.
+    pub fn adjacent_to(
+        root_executable: impl AsRef<Path>,
+        connection: ProviderConnection,
+        model: ModelDescriptor,
+    ) -> Result<Self, ProtectedRootError> {
+        Ok(Self {
+            client: ProviderRunnerClient::adjacent_to(root_executable)
+                .map_err(|error| ProviderError::Configuration(error.to_string()))?,
+            connection,
+            model,
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl GovernedModelProviderGateway for IsolatedProviderRunnerGateway {
+    async fn invoke(
+        &self,
+        authorization: &RuntimeModelEgressAuthorizationReceipt,
+        request: &ModelRequest,
+    ) -> Result<ModelResponse, ProviderError> {
+        self.client
+            .invoke(&ProviderRunnerRequest {
+                protocol_version: mcg_provider_runner::PROVIDER_RUNNER_PROTOCOL_VERSION,
+                request_id: Uuid::new_v4(),
+                authorization: provider_runner_authorization(authorization),
+                connection: self.connection.clone(),
+                model: self.model.clone(),
+                request: request.clone(),
+            })
+            .await
+            .map_err(|error| ProviderError::Request {
+                message: error.to_string(),
+                retriable: false,
+            })
+    }
+}
+
+fn provider_runner_authorization(
+    authorization: &RuntimeModelEgressAuthorizationReceipt,
+) -> ProviderRunnerAuthorization {
+    ProviderRunnerAuthorization {
+        proposal: authorization.proposal.clone(),
+        proposal_hash: authorization.proposal_hash.clone(),
+        permit: authorization.permit.clone(),
+        permit_hash: authorization.permit_hash.clone(),
+        permit_ref: authorization.permit_ref.clone(),
+        secret_handles: authorization
+            .secret_handles
+            .iter()
+            .map(|binding| RunnerSecretHandleBinding {
+                handle_id: binding.handle_id,
+                permit_id: binding.permit_id,
+                connection_id: binding.connection_id.clone(),
+                slot: match binding.slot {
+                    ModelSecretSlot::Primary => RunnerSecretSlot::Primary,
+                    ModelSecretSlot::OAuthIdToken => RunnerSecretSlot::OAuthIdToken,
+                    ModelSecretSlot::OAuthRefreshToken => RunnerSecretSlot::OAuthRefreshToken,
+                },
+                expires_at: binding.expires_at,
+            })
+            .collect(),
+    }
+}
+
+/// Executes one governed request through the fixed adjacent isolated provider process.
+///
+/// Root reloads the current provider/catalog evidence used to configure the child. The child
+/// independently validates those identities against the permit and loads any credential only
+/// from its exact authorized operating-system slot.
+///
+/// # Errors
+/// Returns an error for stale authority, missing provider evidence, runner failure, invalid
+/// response, or durable settlement failure.
+pub async fn execute_authorized_model_invocation_isolated(
+    runtime: &AppRuntime,
+    root_executable: impl AsRef<Path>,
+    manifest: &InvocationManifest,
+    model_run_id: ModelRunId,
+    request: &ModelRequest,
+    now: chrono::DateTime<Utc>,
+) -> Result<GovernedModelProviderDispatchReceipt, ProtectedRootError> {
+    let authorization = runtime
+        .active_model_egress_authorization(manifest.id, now)?
+        .ok_or_else(|| {
+            StorageError::Conflict("model egress authorization does not exist".into())
+        })?;
+    let (connection, catalog) = runtime
+        .model_egress_route_state(&authorization.proposal.route.provider_id)?
+        .ok_or_else(|| StorageError::Conflict("model egress provider state disappeared".into()))?;
+    let model = catalog
+        .models
+        .into_iter()
+        .find(|model| model.id == authorization.proposal.route.model_id)
+        .ok_or_else(|| StorageError::Conflict("model egress model state disappeared".into()))?;
+    let gateway = IsolatedProviderRunnerGateway::adjacent_to(root_executable, connection, model)?;
+    execute_authorized_model_invocation(runtime, &gateway, manifest, model_run_id, request, now)
+        .await
 }
 
 /// Executes one exact provider request only through its active Root-issued egress permit.

@@ -4302,6 +4302,7 @@ dependencies = [
  "mcg-config",
  "mcg-contracts",
  "mcg-platform",
+ "mcg-provider-runner",
  "mcg-providers",
  "mcg-runtime",
  "mcg-storage",
@@ -4332,6 +4333,25 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "mcg-provider-runner"
+version = "0.4.67"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "mcg-contracts",
+ "mcg-providers",
+ "process-wrap",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "uuid",
+ "zeroize",
 ]
 
 [[package]]

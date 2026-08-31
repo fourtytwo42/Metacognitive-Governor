@@ -88,7 +88,7 @@ const updaterConfig = JSON.parse(await read("apps/desktop/src-tauri/tauri.update
 if (config.bundle?.active !== true || config.bundle?.targets !== "all") {
   throw new Error("Tauri production bundling must remain active for every native platform target.");
 }
-const expectedSidecars = ["binaries/mcg-service", "binaries/mcg", "binaries/mcg-agent-mcp", "binaries/mcg-action-runner", "binaries/mcg-runtime-worker", "binaries/mcg-plugin-runner", "binaries/mcg-shadow-runner", "binaries/mcg-updater"];
+const expectedSidecars = ["binaries/mcg-service", "binaries/mcg", "binaries/mcg-agent-mcp", "binaries/mcg-action-runner", "binaries/mcg-provider-runner", "binaries/mcg-runtime-worker", "binaries/mcg-plugin-runner", "binaries/mcg-shadow-runner", "binaries/mcg-updater"];
 if (JSON.stringify(config.bundle.externalBin) !== JSON.stringify(expectedSidecars)) {
   throw new Error("The installer sidecar contract changed or is incomplete.");
 }
@@ -135,7 +135,7 @@ if (JSON.stringify(developmentConfig.plugins?.updater) !== JSON.stringify({ endp
   throw new Error("The base Tauri config must provide a valid inert updater object so unsigned packages start without update authority.");
 }
 
-const [windowsBuilder, linuxBuilder, macosBuilder, macosDmgBuilder, updaterSigningTest, releaseArtifactScanner, releaseArtifactScannerTest, updaterBuildConfigWriter, updaterManifestWriter, updaterSignatureVerifier, updaterUatScenarioWriter, updaterUatTlsGenerator, updaterUatServer, updaterUatServerTest, updaterUatSourcePreparer, updaterUatSourcePreparerTest, updaterUatWorkspacePreparer, updaterUatWorkspacePreparerTest, windowsUpdaterHarness, windowsUpdaterHarnessTest, windowsVerifier, windowsPrepare, linuxPrepare, linuxSandboxPrepare, linuxDebHardener, linuxSandboxProfile, notices, apache, wasmtime, actionRunner, shadowRunner, shadowVerification, updaterSupervisor, windowsPackageHarness, linuxPackageHarness, macosPackageHarness, windowsNativeAccessibility, windowsPortableStage2, linuxNativeAccessibility, nativeReviewedTopology, macosNativeAccessibility, macosWindowCapture] = await Promise.all([
+const [windowsBuilder, linuxBuilder, macosBuilder, macosDmgBuilder, updaterSigningTest, releaseArtifactScanner, releaseArtifactScannerTest, updaterBuildConfigWriter, updaterManifestWriter, updaterSignatureVerifier, updaterUatScenarioWriter, updaterUatTlsGenerator, updaterUatServer, updaterUatServerTest, updaterUatSourcePreparer, updaterUatSourcePreparerTest, updaterUatWorkspacePreparer, updaterUatWorkspacePreparerTest, windowsUpdaterHarness, windowsUpdaterHarnessTest, windowsVerifier, windowsPrepare, linuxPrepare, linuxSandboxPrepare, linuxDebHardener, linuxSandboxProfile, notices, apache, wasmtime, actionRunner, providerRunner, shadowRunner, shadowVerification, updaterSupervisor, windowsPackageHarness, linuxPackageHarness, macosPackageHarness, windowsNativeAccessibility, windowsPortableStage2, linuxNativeAccessibility, nativeReviewedTopology, macosNativeAccessibility, macosWindowCapture] = await Promise.all([
   read("scripts/build-release.ps1"),
   read("scripts/build-release.sh"),
   read("scripts/build-release-macos.sh"),
@@ -166,6 +166,7 @@ const [windowsBuilder, linuxBuilder, macosBuilder, macosDmgBuilder, updaterSigni
   read("licenses/Apache-2.0.txt"),
   read("licenses/Wasmtime-Apache-2.0-WITH-LLVM-exception.txt"),
   read("apps/mcg-action-runner/src/lib.rs"),
+  read("apps/mcg-provider-runner/src/lib.rs"),
   read("apps/mcg-shadow-runner/src/main.rs"),
   read("crates/mcg-runtime/src/shadow_verification.rs"),
   read("apps/mcg-updater/src/lib.rs"),
@@ -292,7 +293,7 @@ for (const [source, label] of [[linuxBuilder, "Linux updater config cleanup"], [
   for (const invariant of ["mktemp -d", "trap cleanup_updater_config EXIT", 'rm -rf -- "$updater_config_directory"']) requireText(source, invariant, label);
 }
 for (const [source, label] of [[windowsPrepare, "Windows sidecar preparer"], [linuxPrepare, "Linux sidecar preparer"]]) {
-  for (const binary of ["mcg", "mcg-protected-rootd", "mcg-service", "mcg-agent-mcp", "mcg-action-runner", "mcg-runtime-worker", "mcg-plugin-runner", "mcg-shadow-runner", "mcg-updater"]) requireText(source, binary, label);
+  for (const binary of ["mcg", "mcg-protected-rootd", "mcg-service", "mcg-agent-mcp", "mcg-action-runner", "mcg-provider-runner", "mcg-runtime-worker", "mcg-plugin-runner", "mcg-shadow-runner", "mcg-updater"]) requireText(source, binary, label);
   requireText(source, "rustc -vV", label);
 }
 for (const invariant of ["target-feature=+crt-static", "VCRUNTIME", "MSVCP", "ReadAllBytes", '"rustc", "-p", "mcg-shadow-runner"']) {
@@ -303,6 +304,13 @@ for (const invariant of ["GOVERNED_ACTION_OPERATION_HASH_DOMAIN", "MetaCog.Actio
     requireText(windowsPackageHarness + linuxPackageHarness + macosPackageHarness, invariant, "packaged action runner qualification");
   } else {
     requireText(actionRunner, invariant, "governed action runner contract");
+  }
+}
+for (const invariant of ["PROVIDER_RUNNER_PROTOCOL_VERSION", "ProviderRunnerAuthorization", "env_clear", "ScopedCredentialStore", "max_attempts: 1", "--qualify-provider-runner"]) {
+  if (invariant === "--qualify-provider-runner") {
+    requireText(windowsPackageHarness + linuxPackageHarness + macosPackageHarness, invariant, "packaged provider runner qualification");
+  } else {
+    requireText(providerRunner, invariant, "governed provider runner contract");
   }
 }
 for (const invariant of ['REQUEST_SCHEMA_VERSION: u16 = 8', 'toolchain_root', 'C:\\mcg-toolchain', 'browser_executable', 'C:\\mcg-browser', 'Browser::launch', 'BROWSER_RENDER_TIMEOUT', 'ElementExists', 'Accessibility', 'BrowserWorkflow', 'ScreenshotMatches', 'expected_baseline_sha256', 'compare_png_screenshots', 'ACCESSIBILITY_AUDIT_SCRIPT', 'enable-logging']) {
@@ -351,6 +359,8 @@ for (const invariant of ["tauri.conf.json", "productName", "version", '${product
 for (const invariant of ["InstallerPath", "PythonPath", "NodeBinPath", "npm.cmd", "MCG_CODEX_APP_SERVER_EXECUTABLE", "codex-cli 0.150.1", "MCG_BIND_ADDRESS", "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", "--force-renderer-accessibility", "mcg-action-runner.exe", "--qualify-filesystem-root", "mcg-runtime-worker.exe", "--qualify-runtime-worker", "MetaCog.RuntimeWorkerExecutable", "mcg-plugin-runner.exe", "mcg-shadow-runner.exe", "mcg-updater.exe", "Wasmtime-Apache-2.0-WITH-LLVM-exception.txt", "module_digest_mismatch", "PluginRunnerQualified", "ActionRunnerQualified", "installer-uat-retained.txt", "Repair installation removed external MCG data", "Uninstall removed external MCG data", "doctor --json", "backup create --json", "server/discover", "tools/list", "test-installed-experiments.py", "experiments-restart.json", "test-installed-provider-success.py", "provider-success-restart.json", "test-installed-memory-transfer.py", "memory-transfer-restart.json", "test-installed-interface-success.py", "interface-success-restart.json", "test-installed-reviewed-topology.py", "ReviewedTopologyRestartReport", "test-installed-native-reviewed-topology.py", "NativeReviewedTopologyReport", "NativeReviewedTopologyScreenshot", "test-installed-real-project.py", "RealProjectRestartReport", "test-installed-real-api-project.py", "RealApiProjectRestartReport", "test-installed-real-fullstack-project.py", "RealFullstackProjectRestartReport", "Save-DesktopScreenshot", "Get-NetTCPConnection", "ReinstallPreservedData", "Refusing installer cleanup outside the exact UAT root"]) {
   requireText(installerUat, invariant, "Windows installer UAT");
 }
+requireText(installerUat, "mcg-provider-runner.exe", "Windows provider runner package UAT");
+requireText(installerUat, "--qualify-provider-runner", "Windows provider runner qualification");
 const linuxPackageUat = await read("scripts/test-linux-packages.sh");
 for (const invariant of ["tauri.conf.json", "productName", "version", "product_name", "deb_arch", "appimage_arch"]) {
   requireText(linuxPackageUat, invariant, "Linux package UAT artifact discovery");
@@ -358,6 +368,8 @@ for (const invariant of ["tauri.conf.json", "productName", "version", "product_n
 for (const invariant of ["MCG_BIND_ADDRESS", "mcg-action-runner", "--qualify-filesystem-root", "mcg-runtime-worker", "--qualify-runtime-worker", "MetaCog.RuntimeWorkerExecutable", "mcg-plugin-runner", "mcg-shadow-runner", "mcg-updater", "Wasmtime-Apache-2.0-WITH-LLVM-exception.txt", "Bubblewrap-GPL-2.0-or-later.txt", "bubblewrap-v0.11.2.tar.gz", "metacognitive-governor-unpriv-bwrap", "module_digest_mismatch", "ACTION_RUNNERS_QUALIFIED", "PLUGIN_RUNNERS_QUALIFIED", "linux-package-uat-retained.txt", "Repair installation removed external MCG data", "Uninstall removed external MCG data", "test-installed-experiments.py", "experiments-restart.json", "test-installed-provider-success.py", "provider-success-restart.json", "test-installed-memory-transfer.py", "memory-transfer-restart.json", "test-installed-interface-success.py", "interface-success-restart.json", "test-installed-reviewed-topology.py", "REVIEWED_TOPOLOGY_RESTART_REPORT", "test-installed-native-reviewed-topology.py", "INSTALLED_NATIVE_REVIEWED_TOPOLOGY", "APPIMAGE_NATIVE_REVIEWED_TOPOLOGY", "INSTALLED_REVIEWED_TOPOLOGY_SCREENSHOT", "APPIMAGE_REVIEWED_TOPOLOGY_SCREENSHOT", "test-installed-real-project.py", "REAL_PROJECT_RESTART_REPORT", "test-installed-real-api-project.py", "REAL_API_PROJECT_RESTART_REPORT", "test-installed-real-fullstack-project.py", "REAL_FULLSTACK_PROJECT_RESTART_REPORT", "--appimage-extract", "protocolVersion", "xdotool", "import -window", "screenshot_colors"]) {
   requireText(linuxPackageUat, invariant, "Linux package UAT");
 }
+requireText(linuxPackageUat, "mcg-provider-runner", "Linux provider runner package UAT");
+requireText(linuxPackageUat, "--qualify-provider-runner", "Linux provider runner qualification");
 const macosPackageUat = await read("scripts/test-macos-packages.sh");
 for (const invariant of ["tauri.conf.json", "version", 'MetaCog_${version}_${bundle_arch}.dmg']) {
   requireText(macosPackageUat, invariant, "macOS package UAT artifact discovery");
@@ -369,6 +381,8 @@ if (macosPackageUat.includes("gui_data_root")) {
 for (const invariant of ["MCG_BIND_ADDRESS", "mcg-action-runner", "--qualify-filesystem-root", "mcg-runtime-worker", "--qualify-runtime-worker", "MetaCog.RuntimeWorkerExecutable", "mcg-plugin-runner", "mcg-shadow-runner", "mcg-updater", "Wasmtime-Apache-2.0-WITH-LLVM-exception.txt", "module_digest_mismatch", "ACTION_RUNNERS_QUALIFIED", "PLUGIN_RUNNERS_QUALIFIED", "macos-package-uat-retained.txt", "Repair installation removed external MCG data", "Uninstall removed external MCG data", "test-installed-experiments.py", "experiments-restart.json", "test-installed-provider-success.py", "provider-success-restart.json", "test-installed-memory-transfer.py", "memory-transfer-restart.json", "test-installed-interface-success.py", "interface-success-restart.json", "test-installed-reviewed-topology.py", "REVIEWED_TOPOLOGY_RESTART_REPORT", "test-installed-real-project.py", "REAL_PROJECT_RESTART_REPORT", "test-installed-real-api-project.py", "REAL_API_PROJECT_RESTART_REPORT", "test-installed-real-fullstack-project.py", "REAL_FULLSTACK_PROJECT_RESTART_REPORT", "test-installed-native-accessibility-macos.swift", "NATIVE_ACCESSIBILITY_REPORT", "xcrun swift", "npm", "hdiutil verify", "codesign --verify", "MCG_MACOS_UAT_ALLOW_ADHOC", "MCG_MACOS_UAT_REQUIRE_NOTARIZED", "MCG_MACOS_UAT_EXTERNAL_CAPTURE_REQUEST", "MCG_MACOS_UAT_EXTERNAL_CAPTURE_TIMEOUT_SECONDS", "Refusing to replace external capture request", "pwd -P", "protocolVersion", "screencapture", "remove_installed_app"]) {
   requireText(macosPackageUat, invariant, "macOS package UAT");
 }
+requireText(macosPackageUat, "mcg-provider-runner", "macOS provider runner package UAT");
+requireText(macosPackageUat, "--qualify-provider-runner", "macOS provider runner qualification");
 const releaseSourceCheck = await read("scripts/check-release-source.mjs");
 requireText(releaseSourceCheck, "--untracked-files=all", "release source preflight");
 const unattendedSoakLauncher = await read("scripts/run-release-soak-unattended.mjs");

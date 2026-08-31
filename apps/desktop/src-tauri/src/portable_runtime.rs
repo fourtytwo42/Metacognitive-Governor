@@ -39,6 +39,13 @@ const PAYLOADS: &[Payload] = &[
         )),
     },
     Payload {
+        name: "mcg-provider-runner.exe",
+        bytes: include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../../target/release/mcg-provider-runner.exe"
+        )),
+    },
+    Payload {
         name: "mcg-runtime-worker.exe",
         bytes: include_bytes!(concat!(
             env!("CARGO_MANIFEST_DIR"),

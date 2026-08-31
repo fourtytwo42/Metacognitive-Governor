@@ -14,7 +14,7 @@ if [[ -z "$target_triple" ]]; then
   exit 1
 fi
 
-cargo_arguments=(build -p mcg-cli -p mcg-agent-mcp -p mcg-action-runner -p mcg-runtime-worker -p mcg-plugin-runner -p mcg-shadow-runner -p mcg-updater)
+cargo_arguments=(build -p mcg-cli -p mcg-agent-mcp -p mcg-action-runner -p mcg-provider-runner -p mcg-runtime-worker -p mcg-plugin-runner -p mcg-shadow-runner -p mcg-updater)
 if [[ "$profile" == "release" || ! -f "$repository_root/target/debug/mcg-protected-rootd" ]]; then
   cargo_arguments+=(-p mcg-protected-rootd)
 fi
@@ -26,7 +26,7 @@ cargo "${cargo_arguments[@]}"
 source_directory="$repository_root/target/$profile"
 sidecar_directory="$repository_root/apps/desktop/src-tauri/binaries"
 mkdir -p "$sidecar_directory"
-for mapping in mcg:mcg mcg-protected-rootd:mcg-service mcg-agent-mcp:mcg-agent-mcp mcg-action-runner:mcg-action-runner mcg-runtime-worker:mcg-runtime-worker mcg-plugin-runner:mcg-plugin-runner mcg-shadow-runner:mcg-shadow-runner mcg-updater:mcg-updater; do
+for mapping in mcg:mcg mcg-protected-rootd:mcg-service mcg-agent-mcp:mcg-agent-mcp mcg-action-runner:mcg-action-runner mcg-provider-runner:mcg-provider-runner mcg-runtime-worker:mcg-runtime-worker mcg-plugin-runner:mcg-plugin-runner mcg-shadow-runner:mcg-shadow-runner mcg-updater:mcg-updater; do
   binary="${mapping%%:*}"
   sidecar="${mapping##*:}"
   source="$source_directory/$binary"
