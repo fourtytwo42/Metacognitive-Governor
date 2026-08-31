@@ -189,4 +189,4 @@ This matrix is updated as implementation lands. `Implemented / cumulative UAT pe
 | Migration + backup/restore receipt | Every schema/ownership change | Schema 50→55 protected-root migration-process and focused schema-54 action-history migration tests pass / packaged backup/restore UAT pending |
 | Golden payload/hash compatibility receipt | Every codec/schema release | TaskContract v1 fixture/hash plus existing canonical-v1 fixtures pass / cross-version package replay pending |
 | Experiment artifact set | Every protected experiment | Planned |
-| Commit/remote parity and artifact manifest | Every verified major stage | Stage 5 direct remote Codex sub-agent inventory is committed at `fb03f89`; documentation evidence and final parity confirmation follow in the paired checkpoint. Cumulative release artifacts remain pending |
+| Commit/remote parity and artifact manifest | Every verified major stage | Stage 5 direct remote Codex sub-agent inventory `fb03f89` and documentation evidence `9645e5c` are pushed with exact local/remote parity. Cumulative release artifacts remain pending |
