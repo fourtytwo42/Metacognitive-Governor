@@ -22,10 +22,16 @@ pub const MAX_MANIFEST_ITEMS: usize = 4_096;
 pub const MAX_WORKFLOW_ACTIVITY_INVOCATIONS: usize = 200;
 pub const MAX_CONTEXT_TRANSFORMATIONS: usize = 64;
 pub const MAX_CONTEXT_EXPANSION_STEPS: usize = 256;
+pub const MAX_MODEL_EGRESS_ROUTES: usize = 64;
+pub const MAX_MODEL_SECRET_HANDLES: usize = 8;
 pub const MAX_REFERENCE_LOCATOR_BYTES: usize = 4_096;
 pub const MAX_MANIFEST_TEXT_BYTES: usize = 4_096;
 pub const RUNTIME_INVOCATION_REQUEST_HASH_DOMAIN: &str = "MetaCog.RuntimeInvocationRequest";
 pub const RUNTIME_INVOCATION_RESPONSE_HASH_DOMAIN: &str = "MetaCog.RuntimeInvocationResponse";
+pub const MODEL_DISCLOSURE_HASH_DOMAIN: &str = "MetaCog.ModelDisclosureManifest";
+pub const MODEL_EGRESS_POLICY_HASH_DOMAIN: &str = "MetaCog.ModelEgressPolicy";
+pub const MODEL_INVOCATION_PROPOSAL_HASH_DOMAIN: &str = "MetaCog.ModelInvocationProposal";
+pub const MODEL_INVOCATION_PERMIT_HASH_DOMAIN: &str = "MetaCog.ModelInvocationPermit";
 pub const RUNTIME_WORKER_HELLO_MESSAGE_TYPE: &str = "metacog.runtime.hello.v1";
 pub const RUNTIME_WORKER_INVOKE_MESSAGE_TYPE: &str = "metacog.runtime.invoke.v1";
 pub const RUNTIME_WORKER_RESULT_MESSAGE_TYPE: &str = "metacog.runtime.result.v1";
@@ -77,6 +83,8 @@ stable_uuid!(ContextManifestId);
 stable_uuid!(InvocationId);
 stable_uuid!(CompletionCertificateId);
 stable_uuid!(ModelRunId);
+stable_uuid!(PermitId);
+stable_uuid!(SecretHandleId);
 stable_uuid!(RecordId);
 stable_uuid!(EvaluationSeedId);
 stable_uuid!(ExperimentSpecId);
@@ -547,6 +555,18 @@ pub struct PolicyBinding {
     pub content_hash: ContentHash,
 }
 
+impl PolicyBinding {
+    /// Validates the independently versioned payload and its recorded content hash shape.
+    /// Domain-specific callers remain responsible for recomputing the exact semantic hash.
+    ///
+    /// # Errors
+    /// Returns a contract error for malformed payload or hash evidence.
+    pub fn validate(&self) -> Result<(), ContractError> {
+        self.payload.validate()?;
+        self.content_hash.validate()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskContractStatus {
@@ -658,6 +678,21 @@ pub struct ArtifactRef {
     pub content_hash: ContentHash,
     pub media_type: String,
     pub byte_length: u64,
+}
+
+impl ArtifactRef {
+    /// Validates content-addressed artifact metadata without loading artifact bytes.
+    ///
+    /// # Errors
+    /// Returns a contract error for malformed hashes or media types.
+    pub fn validate(&self) -> Result<(), ContractError> {
+        self.content_hash.validate()?;
+        validate_text(
+            &self.media_type,
+            255,
+            "artifact media type is empty, oversized, or contains controls",
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1102,6 +1137,304 @@ pub enum InvocationRole {
     Verify,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelDataClassification {
+    Public,
+    Internal,
+    Confidential,
+    Restricted,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelDestinationClass {
+    LocalLoopback,
+    FirstPartyRemote,
+    ThirdPartyRemote,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelDisclosureManifest {
+    pub context_manifest: ContentHash,
+    pub disclosed_sources: Vec<SourceRef>,
+    pub approximate_input_tokens: u64,
+}
+
+impl ModelDisclosureManifest {
+    pub const SCHEMA_VERSION: u32 = 1;
+    pub const TYPE_ID: &'static str = "mcg.model_disclosure_manifest.v1";
+
+    /// Validates bounded, unique disclosure evidence.
+    ///
+    /// # Errors
+    /// Returns a contract error for malformed, duplicate, or unbounded evidence.
+    pub fn validate(&self) -> Result<(), ContractError> {
+        self.context_manifest.validate()?;
+        validate_item_count(
+            self.disclosed_sources.len(),
+            "model disclosure contains too many sources",
+        )?;
+        let mut unique = BTreeSet::new();
+        for source in &self.disclosed_sources {
+            source.validate()?;
+            if !unique.insert((
+                source.source_type.as_str(),
+                source.locator.as_str(),
+                source.content_hash.algorithm,
+                source.content_hash.domain.as_str(),
+                source.content_hash.digest_hex.as_str(),
+            )) {
+                return Err(ContractError::InvalidContract(
+                    "model disclosure contains a duplicate source",
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelBudget {
+    pub max_input_tokens: u64,
+    pub max_output_tokens: u64,
+    pub max_cost_microusd: u64,
+}
+
+impl ModelBudget {
+    /// Rejects an empty or nonsensical token envelope.
+    ///
+    /// # Errors
+    /// Returns a contract error when input or output token bounds are zero.
+    pub fn validate(self) -> Result<(), ContractError> {
+        if self.max_input_tokens == 0 || self.max_output_tokens == 0 {
+            return Err(ContractError::InvalidContract(
+                "model budget token limits must be nonzero",
+            ));
+        }
+        Ok(())
+    }
+
+    #[must_use]
+    pub const fn fits_within(self, maximum: Self) -> bool {
+        self.max_input_tokens <= maximum.max_input_tokens
+            && self.max_output_tokens <= maximum.max_output_tokens
+            && self.max_cost_microusd <= maximum.max_cost_microusd
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelEgressRoute {
+    pub provider_id: String,
+    pub model_id: String,
+    pub destination: String,
+    pub destination_class: ModelDestinationClass,
+}
+
+impl ModelEgressRoute {
+    pub const SCHEMA_VERSION: u32 = 1;
+    pub const TYPE_ID: &'static str = "mcg.model_egress_route.v1";
+
+    /// Validates bounded route identifiers and destination text.
+    ///
+    /// # Errors
+    /// Returns a contract error for empty, oversized, or control-bearing fields.
+    pub fn validate(&self) -> Result<(), ContractError> {
+        validate_text(
+            &self.provider_id,
+            128,
+            "model egress provider id is invalid",
+        )?;
+        validate_text(
+            &self.model_id,
+            MAX_MANIFEST_TEXT_BYTES,
+            "model egress model id is invalid",
+        )?;
+        validate_text(
+            &self.destination,
+            MAX_REFERENCE_LOCATOR_BYTES,
+            "model egress destination is invalid",
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelInvocationProposal {
+    pub invocation_id: InvocationId,
+    pub attempt_id: AttemptId,
+    pub role: InvocationRole,
+    pub task_contract: VersionedRef<TaskContractId>,
+    pub request_artifact: ArtifactRef,
+    pub request_hash: ContentHash,
+    pub route: ModelEgressRoute,
+    pub data_classification: ModelDataClassification,
+    pub disclosure: ModelDisclosureManifest,
+    pub requested_limits: ModelBudget,
+    pub deadline: DateTime<Utc>,
+}
+
+impl ModelInvocationProposal {
+    pub const SCHEMA_VERSION: u32 = 1;
+    pub const TYPE_ID: &'static str = "mcg.model_invocation_proposal.v1";
+
+    /// Validates immutable request, disclosure, route, budget, and deadline shape.
+    ///
+    /// # Errors
+    /// Returns a contract error for malformed or internally inconsistent evidence.
+    pub fn validate(&self) -> Result<(), ContractError> {
+        self.request_artifact.validate()?;
+        if self.request_artifact.byte_length == 0 {
+            return Err(ContractError::InvalidContract(
+                "model proposal request artifact is empty",
+            ));
+        }
+        if self.task_contract.version == 0 {
+            return Err(ContractError::InvalidContract(
+                "model proposal task-contract version must be nonzero",
+            ));
+        }
+        self.task_contract.content_hash.validate()?;
+        self.request_hash.validate()?;
+        if self.request_artifact.content_hash != self.request_hash {
+            return Err(ContractError::InvalidContract(
+                "model proposal request artifact and request hash differ",
+            ));
+        }
+        self.route.validate()?;
+        self.disclosure.validate()?;
+        self.requested_limits.validate()?;
+        if self.disclosure.approximate_input_tokens > self.requested_limits.max_input_tokens {
+            return Err(ContractError::InvalidContract(
+                "model disclosure exceeds the requested input-token limit",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelEgressPolicy {
+    pub allowed_routes: Vec<ModelEgressRoute>,
+    pub minimum_data_classification: ModelDataClassification,
+    pub maximum_data_classification: ModelDataClassification,
+    pub maximum_limits: ModelBudget,
+    pub maximum_permit_lifetime_seconds: u64,
+}
+
+impl ModelEgressPolicy {
+    pub const SCHEMA_VERSION: u32 = 1;
+    pub const TYPE_ID: &'static str = "mcg.model_egress_policy.v1";
+
+    /// Validates Root-owned route, classification, budget, and lifetime policy.
+    ///
+    /// # Errors
+    /// Returns a contract error for empty, duplicate, contradictory, or unbounded policy.
+    pub fn validate(&self) -> Result<(), ContractError> {
+        if self.allowed_routes.is_empty() || self.allowed_routes.len() > MAX_MODEL_EGRESS_ROUTES {
+            return Err(ContractError::InvalidContract(
+                "model egress policy route count is outside the supported range",
+            ));
+        }
+        if self.minimum_data_classification > self.maximum_data_classification {
+            return Err(ContractError::InvalidContract(
+                "model egress policy classification range is inverted",
+            ));
+        }
+        self.maximum_limits.validate()?;
+        if self.maximum_permit_lifetime_seconds == 0
+            || self.maximum_permit_lifetime_seconds > 24 * 60 * 60
+        {
+            return Err(ContractError::InvalidContract(
+                "model egress permit lifetime is outside the supported range",
+            ));
+        }
+        let mut unique = BTreeSet::new();
+        for route in &self.allowed_routes {
+            route.validate()?;
+            if !unique.insert((
+                route.provider_id.as_str(),
+                route.model_id.as_str(),
+                route.destination.as_str(),
+                route.destination_class,
+            )) {
+                return Err(ContractError::InvalidContract(
+                    "model egress policy contains a duplicate route",
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelInvocationPermit {
+    pub id: PermitId,
+    pub invocation_id: InvocationId,
+    pub attempt_id: AttemptId,
+    pub role: InvocationRole,
+    pub task_contract: VersionedRef<TaskContractId>,
+    pub proposal_hash: ContentHash,
+    pub request_hash: ContentHash,
+    pub resolved_provider: SourceRef,
+    pub resolved_model: SourceRef,
+    pub destination: SourceRef,
+    pub destination_class: ModelDestinationClass,
+    pub allowed_data_classification: ModelDataClassification,
+    pub disclosure_hash: ContentHash,
+    pub limits: ModelBudget,
+    pub policy: PolicyBinding,
+    pub expires_at: DateTime<Utc>,
+    pub secret_handles: Vec<SecretHandleId>,
+    pub issued_at: DateTime<Utc>,
+}
+
+impl ModelInvocationPermit {
+    pub const SCHEMA_VERSION: u32 = 1;
+    pub const TYPE_ID: &'static str = "mcg.model_invocation_permit.v1";
+
+    /// Validates a bounded, content-minimized Root permit.
+    ///
+    /// # Errors
+    /// Returns a contract error for malformed hashes, sources, policy, time, or handles.
+    pub fn validate(&self) -> Result<(), ContractError> {
+        self.proposal_hash.validate()?;
+        if self.task_contract.version == 0 {
+            return Err(ContractError::InvalidContract(
+                "model invocation permit task-contract version must be nonzero",
+            ));
+        }
+        self.task_contract.content_hash.validate()?;
+        self.request_hash.validate()?;
+        self.resolved_provider.validate()?;
+        self.resolved_model.validate()?;
+        self.destination.validate()?;
+        self.disclosure_hash.validate()?;
+        self.limits.validate()?;
+        self.policy.validate()?;
+        if self.expires_at <= self.issued_at {
+            return Err(ContractError::InvalidContract(
+                "model invocation permit expiry is not after issuance",
+            ));
+        }
+        if self.secret_handles.len() > MAX_MODEL_SECRET_HANDLES {
+            return Err(ContractError::InvalidContract(
+                "model invocation permit contains too many secret handles",
+            ));
+        }
+        let mut unique = BTreeSet::new();
+        if self
+            .secret_handles
+            .iter()
+            .any(|handle| !unique.insert(*handle))
+        {
+            return Err(ContractError::InvalidContract(
+                "model invocation permit contains a duplicate secret handle",
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContextSelection {
     pub source: SourceRef,
@@ -1442,7 +1775,7 @@ pub struct WorkflowInvocationActivity {
 }
 
 impl WorkflowInvocationActivity {
-    /// Verifies that every invocation belongs to the exact workflow attempt and TaskContract.
+    /// Verifies that every invocation belongs to the exact workflow attempt and `TaskContract`.
     ///
     /// # Errors
     /// Returns a contract error for substituted, duplicated, or unbounded invocation evidence.
@@ -2816,6 +3149,112 @@ mod tests {
         request.reason = "valid".into();
         request.idempotency_key = " ".into();
         assert!(request.validate().is_err());
+    }
+
+    fn fixture_model_egress_route() -> ModelEgressRoute {
+        ModelEgressRoute {
+            provider_id: "fixture-provider".into(),
+            model_id: "fixture-model".into(),
+            destination: "https://provider.example/v1".into(),
+            destination_class: ModelDestinationClass::ThirdPartyRemote,
+        }
+    }
+
+    fn fixture_model_proposal() -> ModelInvocationProposal {
+        let request_hash = fixture_hash("model-request");
+        ModelInvocationProposal {
+            invocation_id: InvocationId::new(),
+            attempt_id: AttemptId::new(),
+            role: InvocationRole::Work,
+            task_contract: VersionedRef {
+                id: TaskContractId::new(),
+                version: 1,
+                content_hash: fixture_hash("model-task-contract"),
+            },
+            request_artifact: ArtifactRef {
+                content_hash: request_hash.clone(),
+                media_type: "application/vnd.metacog.model-request+cbor".into(),
+                byte_length: 128,
+            },
+            request_hash,
+            route: fixture_model_egress_route(),
+            data_classification: ModelDataClassification::Confidential,
+            disclosure: ModelDisclosureManifest {
+                context_manifest: fixture_hash("model-context"),
+                disclosed_sources: vec![fixture_source("model-source")],
+                approximate_input_tokens: 64,
+            },
+            requested_limits: ModelBudget {
+                max_input_tokens: 128,
+                max_output_tokens: 64,
+                max_cost_microusd: 25_000,
+            },
+            deadline: fixture_time("2026-08-30T12:05:00Z"),
+        }
+    }
+
+    #[test]
+    fn model_egress_contracts_fail_closed_on_substitution_and_overscope() {
+        let proposal = fixture_model_proposal();
+        assert_eq!(proposal.validate(), Ok(()));
+
+        let mut substituted = proposal.clone();
+        substituted.request_artifact.content_hash = fixture_hash("other-request");
+        assert!(substituted.validate().is_err());
+
+        let mut overscope = proposal.clone();
+        overscope.disclosure.approximate_input_tokens = 129;
+        assert!(overscope.validate().is_err());
+
+        let route = fixture_model_egress_route();
+        let policy = ModelEgressPolicy {
+            allowed_routes: vec![route.clone()],
+            minimum_data_classification: ModelDataClassification::Internal,
+            maximum_data_classification: ModelDataClassification::Confidential,
+            maximum_limits: ModelBudget {
+                max_input_tokens: 256,
+                max_output_tokens: 128,
+                max_cost_microusd: 50_000,
+            },
+            maximum_permit_lifetime_seconds: 600,
+        };
+        assert_eq!(policy.validate(), Ok(()));
+        let mut duplicate = policy;
+        duplicate.allowed_routes.push(route);
+        assert!(duplicate.validate().is_err());
+    }
+
+    #[test]
+    fn model_invocation_permit_rejects_duplicate_handles_and_invalid_time() {
+        let proposal = fixture_model_proposal();
+        let policy = fixture_policy("model-egress");
+        let handle = SecretHandleId::new();
+        let mut permit = ModelInvocationPermit {
+            id: PermitId::new(),
+            invocation_id: proposal.invocation_id,
+            attempt_id: proposal.attempt_id,
+            role: proposal.role,
+            task_contract: proposal.task_contract.clone(),
+            proposal_hash: fixture_hash("model-proposal"),
+            request_hash: proposal.request_hash,
+            resolved_provider: fixture_source("resolved-provider"),
+            resolved_model: fixture_source("resolved-model"),
+            destination: fixture_source("resolved-destination"),
+            destination_class: proposal.route.destination_class,
+            allowed_data_classification: proposal.data_classification,
+            disclosure_hash: fixture_hash("model-disclosure"),
+            limits: proposal.requested_limits,
+            policy,
+            expires_at: proposal.deadline,
+            secret_handles: vec![handle],
+            issued_at: fixture_time("2026-08-30T12:00:00Z"),
+        };
+        assert_eq!(permit.validate(), Ok(()));
+        permit.secret_handles.push(handle);
+        assert!(permit.validate().is_err());
+        permit.secret_handles.pop();
+        permit.expires_at = permit.issued_at;
+        assert!(permit.validate().is_err());
     }
 
     proptest! {

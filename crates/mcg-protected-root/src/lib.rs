@@ -33,12 +33,14 @@ use mcg_config::AppConfig;
 use mcg_contracts::{
     ActionCompensationReceipt, ActionEnvelope, ActionExecution, ActionExecutionId,
     ActionExecutionState, ActionId, ActionOrigin, ActionReceipt, ActionReceiptId,
-    AuthenticatedRpcRequest, ContentHash, ContractError, CorrelationId, EffectClass, EffectOutcome,
-    HashAlgorithm, InvocationId, OwnerActionCompensationRequest, PROTOCOL_V1, PolicyBinding,
-    ReconciliationJob, ReconciliationJobId, ReconciliationObservation, RequestId, RootStatus,
-    RpcEnvelope, RuntimeActorId, RuntimeIdentity, RuntimeInstanceId, RuntimeInvocationRequest,
-    RuntimeInvocationResult, SourceRef, StableTypeId, VersionedPayload, WorkflowAttempt,
-    WorkflowCancelRequest, WorkflowId, WorkflowState, canonical_contract_hash,
+    AuthenticatedRpcRequest, ContentHash, ContextManifest, ContractError, CorrelationId,
+    EffectClass, EffectOutcome, HashAlgorithm, InvocationId, ModelDestinationClass,
+    ModelEgressPolicy, ModelInvocationPermit, ModelInvocationProposal,
+    OwnerActionCompensationRequest, PROTOCOL_V1, PermitId, PolicyBinding, ReconciliationJob,
+    ReconciliationJobId, ReconciliationObservation, RequestId, RootStatus, RpcEnvelope,
+    RuntimeActorId, RuntimeIdentity, RuntimeInstanceId, RuntimeInvocationRequest,
+    RuntimeInvocationResult, SecretHandleId, SourceRef, StableTypeId, VersionedPayload,
+    WorkflowAttempt, WorkflowCancelRequest, WorkflowId, WorkflowState, canonical_contract_hash,
     decode_canonical_cbor_v1,
 };
 use mcg_platform::{
@@ -54,10 +56,14 @@ use mcg_platform::{
     ROOT_WORKFLOW_SHOW_REQUEST_TYPE, ROOT_WORKFLOW_SHOW_RESPONSE_TYPE, RootIpcSession,
     create_root_ipc_session, read_canonical_frame, remove_root_ipc_session, write_canonical_frame,
 };
+use mcg_providers::{ProviderAuthMode, ProviderConnection, ProviderKind};
 use mcg_runtime::{AppRuntime, RuntimeError};
 use mcg_storage::{
+    ModelEgressAuthorizationReceipt, ModelSecretHandleBinding, ModelSecretSlot,
     ReconciliationResolutionReceipt, RootMigrationReceipt, STORAGE_SCHEMA_VERSION, StorageError,
     acquire_data_directory_lock, create_backup_bundle_from_snapshot, inspect_database_before_root,
+    model_descriptor_source_ref, model_destination_source_ref, model_disclosure_hash,
+    model_egress_policy_binding, model_proposal_hash, model_provider_source_ref,
     snapshot_database_before_root,
 };
 use sha2::{Digest, Sha256};
@@ -123,6 +129,9 @@ pub struct RuntimeInvocationCancellationReceipt {
     pub model_run: mcg_storage::ModelRunRecord,
     pub worker_generation: u64,
 }
+
+/// Root-owned, content-minimized authorization for one exact governed provider request.
+pub type RuntimeModelEgressAuthorizationReceipt = ModelEgressAuthorizationReceipt;
 
 #[derive(Debug, Clone)]
 pub enum RuntimeInvocationExecutionReceipt {
@@ -193,6 +202,185 @@ pub async fn replace_idle_runtime_worker_if_needed(
         replacement_generation,
         reason,
     }))
+}
+
+/// Validates an untrusted Runtime model proposal against exact persisted context/provider state
+/// and a Root-owned policy, then issues one immutable request-bound permit and opaque handles.
+/// No credential value crosses this boundary.
+///
+/// Exact proposal/policy replay returns the original authority. Any route, request, disclosure,
+/// budget, classification, expiry, or provider-state substitution fails closed.
+///
+/// # Errors
+/// Returns an error for malformed, stale, unsupported, substituted, or over-policy proposals.
+pub fn authorize_runtime_model_egress(
+    runtime: &AppRuntime,
+    context: &ContextManifest,
+    proposal: &ModelInvocationProposal,
+    policy: &ModelEgressPolicy,
+    now: chrono::DateTime<Utc>,
+) -> Result<RuntimeModelEgressAuthorizationReceipt, ProtectedRootError> {
+    proposal.validate()?;
+    policy.validate()?;
+    if context.attempt_id != proposal.attempt_id {
+        return Err(StorageError::Conflict(
+            "model proposal context belongs to a different workflow attempt".into(),
+        )
+        .into());
+    }
+    let context_hash = runtime.persist_model_egress_context(context, now)?;
+    if proposal.disclosure.context_manifest != context_hash {
+        return Err(StorageError::Conflict(
+            "model proposal substituted its persisted context manifest".into(),
+        )
+        .into());
+    }
+    let policy_binding = model_egress_policy_binding(policy)?;
+    if let Some(existing) = runtime.model_egress_authorization(proposal.invocation_id)? {
+        if existing.proposal != *proposal || existing.permit.policy != policy_binding {
+            return Err(StorageError::Conflict(
+                "model egress replay substituted proposal or Root policy".into(),
+            )
+            .into());
+        }
+        return Ok(existing);
+    }
+
+    let (connection, catalog) = runtime
+        .model_egress_route_state(&proposal.route.provider_id)?
+        .ok_or_else(|| StorageError::InvalidData("model egress route was not found".into()))?;
+    connection
+        .validate()
+        .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+    let destination_class = classify_model_destination(&connection)?;
+    if proposal.route.destination != connection.base_url
+        || proposal.route.destination_class != destination_class
+        || !policy.allowed_routes.contains(&proposal.route)
+    {
+        return Err(StorageError::Conflict(
+            "model proposal route is not the exact Root-allowed provider destination".into(),
+        )
+        .into());
+    }
+    let model = catalog
+        .models
+        .iter()
+        .find(|model| model.id == proposal.route.model_id)
+        .ok_or_else(|| StorageError::InvalidData("model egress model was not found".into()))?;
+    let allowed_data_classification = proposal
+        .data_classification
+        .max(policy.minimum_data_classification);
+    if allowed_data_classification > policy.maximum_data_classification
+        || !proposal.requested_limits.fits_within(policy.maximum_limits)
+    {
+        return Err(StorageError::Conflict(
+            "model proposal classification or budget exceeds Root policy".into(),
+        )
+        .into());
+    }
+
+    let permit_id = PermitId::new();
+    let secret_slots = model_secret_slots(connection.auth_mode);
+    let secret_handles = secret_slots
+        .iter()
+        .map(|_| SecretHandleId::new())
+        .collect::<Vec<_>>();
+    let permit = ModelInvocationPermit {
+        id: permit_id,
+        invocation_id: proposal.invocation_id,
+        attempt_id: proposal.attempt_id,
+        role: proposal.role,
+        task_contract: proposal.task_contract.clone(),
+        proposal_hash: model_proposal_hash(proposal)?,
+        request_hash: proposal.request_hash.clone(),
+        resolved_provider: model_provider_source_ref(&connection)?,
+        resolved_model: model_descriptor_source_ref(&connection.id, model)?,
+        destination: model_destination_source_ref(&connection.base_url)?,
+        destination_class,
+        allowed_data_classification,
+        disclosure_hash: model_disclosure_hash(&proposal.disclosure)?,
+        limits: proposal.requested_limits,
+        policy: policy_binding,
+        expires_at: proposal.deadline,
+        secret_handles: secret_handles.clone(),
+        issued_at: now,
+    };
+    let bindings = secret_handles
+        .into_iter()
+        .zip(secret_slots)
+        .map(|(handle_id, slot)| ModelSecretHandleBinding {
+            handle_id,
+            permit_id,
+            connection_id: connection.id.clone(),
+            slot,
+            expires_at: permit.expires_at,
+        })
+        .collect::<Vec<_>>();
+    Ok(runtime.authorize_model_egress(proposal, policy, &permit, &bindings, now)?)
+}
+
+fn classify_model_destination(
+    connection: &ProviderConnection,
+) -> Result<ModelDestinationClass, ProtectedRootError> {
+    let url = url::Url::parse(&connection.base_url)
+        .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+    if !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(StorageError::InvalidData(
+            "model provider destination contains credentials, query, or fragment".into(),
+        )
+        .into());
+    }
+    let host = url.host_str().ok_or_else(|| {
+        StorageError::InvalidData("model provider destination has no host".into())
+    })?;
+    let loopback = host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|address| address.is_loopback());
+    if loopback {
+        return Ok(ModelDestinationClass::LocalLoopback);
+    }
+    if url.scheme() != "https" {
+        return Err(StorageError::Conflict(
+            "remote model egress requires an HTTPS destination".into(),
+        )
+        .into());
+    }
+    let first_party_host = host.eq_ignore_ascii_case("openai.com")
+        || host
+            .to_ascii_lowercase()
+            .strip_suffix(".openai.com")
+            .is_some_and(|prefix| !prefix.is_empty())
+        || host.eq_ignore_ascii_case("chatgpt.com")
+        || host
+            .to_ascii_lowercase()
+            .strip_suffix(".chatgpt.com")
+            .is_some_and(|prefix| !prefix.is_empty());
+    Ok(
+        if connection.kind == ProviderKind::OpenAi && first_party_host {
+            ModelDestinationClass::FirstPartyRemote
+        } else {
+            ModelDestinationClass::ThirdPartyRemote
+        },
+    )
+}
+
+fn model_secret_slots(auth_mode: ProviderAuthMode) -> Vec<ModelSecretSlot> {
+    match auth_mode {
+        ProviderAuthMode::None => Vec::new(),
+        ProviderAuthMode::ApiKey | ProviderAuthMode::BearerToken => {
+            vec![ModelSecretSlot::Primary]
+        }
+        ProviderAuthMode::ChatGptBrowserOauth | ProviderAuthMode::ChatGptDeviceCode => vec![
+            ModelSecretSlot::Primary,
+            ModelSecretSlot::OAuthIdToken,
+            ModelSecretSlot::OAuthRefreshToken,
+        ],
+    }
 }
 
 /// Persists exact Runtime intent before dispatch, sends it only to the authenticated generation,
@@ -2035,17 +2223,22 @@ mod tests {
         governed_filesystem_authority_binding, governed_filesystem_operation_payload,
     };
     use mcg_contracts::{
-        ActionEnvelope, ActionExecutionState, ActionId, ActionValidation, AttemptId,
+        ActionEnvelope, ActionExecutionState, ActionId, ActionValidation, ArtifactRef, AttemptId,
         ConfigurationId, ContextManifest, ContextManifestId, ContextSelection, ContractClause,
-        CorrelationId, EffectClass, HashAlgorithm, InvocationManifest, InvocationRole, ModelRun,
-        ModelRunId, ModelRunState, PolicyBinding, RetryPolicy, RuntimeActorId, SessionId,
-        SourceRef, TaskContract, TaskContractId, TaskContractStatus, VersionedRef, WaitReason,
+        CorrelationId, EffectClass, HashAlgorithm, InvocationManifest, InvocationRole, ModelBudget,
+        ModelDataClassification, ModelDisclosureManifest, ModelEgressRoute, ModelRun, ModelRunId,
+        ModelRunState, PolicyBinding, RetryPolicy, RuntimeActorId, SessionId, SourceRef,
+        TaskContract, TaskContractId, TaskContractStatus, VersionedRef, WaitReason,
         WorkflowAttempt, WorkflowId, WorkflowState,
     };
     use mcg_platform::{
         cancel_root_workflow, exchange_root_rpc, query_root_action, query_root_actions,
         query_root_invocation, query_root_invocations, query_root_status, query_root_workflow,
         query_root_workflow_activity, query_root_workflows, root_ipc_session_path,
+    };
+    use mcg_providers::{
+        CONTRACT_VERSION, ModelCapabilities, ModelDescriptor, ProviderAuthMode, ProviderConnection,
+        ProviderKind, ProviderModelCatalog,
     };
     use mcg_storage::{SqliteEventStore, task_contract_content_hash, verify_backup_bundle};
 
@@ -2426,6 +2619,156 @@ mod tests {
                 .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "mcgb"))
                 .count(),
             1
+        );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn root_model_egress_permit_is_route_disclosure_budget_and_secret_handle_bound() {
+        let temporary = tempfile::tempdir().expect("temporary Root egress directory");
+        let config = AppConfig::default().with_data_directory(temporary.path());
+        let at = Utc::now();
+        let (contract, attempt) = expired_workflow_fixture(at);
+        let connection = ProviderConnection {
+            contract_version: CONTRACT_VERSION,
+            id: "root-egress-fixture".into(),
+            display_name: "Root Egress Fixture".into(),
+            kind: ProviderKind::OpenAiCompatible,
+            base_url: "https://provider.example/v1".into(),
+            auth_mode: ProviderAuthMode::ApiKey,
+            organization: None,
+            project: None,
+        };
+        let model = ModelDescriptor {
+            id: "fixture-model".into(),
+            display_name: "Fixture Model".into(),
+            owned_by: Some("fixture".into()),
+            context_window: Some(16_384),
+            capabilities: ModelCapabilities {
+                responses: Some(true),
+                ..ModelCapabilities::default()
+            },
+            price: None,
+            metadata: serde_json::Value::Null,
+        };
+        {
+            let mut store = SqliteEventStore::open(config.database_path()).expect("egress store");
+            store
+                .create_workflow(&contract, &attempt, CorrelationId::new(), at)
+                .expect("create egress workflow");
+            store
+                .record_provider_configuration(
+                    &connection,
+                    &ProviderModelCatalog {
+                        connection_id: connection.id.clone(),
+                        models: vec![model],
+                        discovered_at: at,
+                    },
+                    at,
+                )
+                .expect("record egress provider");
+        }
+        let runtime = open(config).expect("open Root egress runtime");
+        let context = ContextManifest {
+            id: ContextManifestId::new(),
+            attempt_id: attempt.attempt_id,
+            selected_sources: vec![ContextSelection {
+                source: root_invocation_source("private-project-context"),
+                perspective: None,
+                influence: root_invocation_payload("test.root_egress_influence.v1", "selected"),
+                transformations: Vec::new(),
+                placement: 0,
+                approximate_tokens: 7,
+            }],
+            selection_policy: root_invocation_payload("test.root_egress_selection.v1", "bounded"),
+            expansion_steps: Vec::new(),
+            approximate_tokens: 7,
+        };
+        let context_hash = canonical_contract_hash(
+            ContextManifest::TYPE_ID,
+            "MetaCog.ContextManifest",
+            &context,
+        )
+        .expect("context hash");
+        let route = ModelEgressRoute {
+            provider_id: connection.id.clone(),
+            model_id: "fixture-model".into(),
+            destination: connection.base_url.clone(),
+            destination_class: ModelDestinationClass::ThirdPartyRemote,
+        };
+        let request_hash = workflow_hash("governed-provider-request");
+        let proposal = ModelInvocationProposal {
+            invocation_id: InvocationId::new(),
+            attempt_id: attempt.attempt_id,
+            role: InvocationRole::Work,
+            task_contract: attempt.task_contract.clone(),
+            request_artifact: ArtifactRef {
+                content_hash: request_hash.clone(),
+                media_type: "application/vnd.metacog.model-request+cbor".into(),
+                byte_length: 256,
+            },
+            request_hash,
+            route: route.clone(),
+            data_classification: ModelDataClassification::Confidential,
+            disclosure: ModelDisclosureManifest {
+                context_manifest: context_hash,
+                disclosed_sources: vec![root_invocation_source("private-project-context")],
+                approximate_input_tokens: 7,
+            },
+            requested_limits: ModelBudget {
+                max_input_tokens: 128,
+                max_output_tokens: 64,
+                max_cost_microusd: 25_000,
+            },
+            deadline: at + chrono::Duration::minutes(5),
+        };
+        let policy = ModelEgressPolicy {
+            allowed_routes: vec![route],
+            minimum_data_classification: ModelDataClassification::Internal,
+            maximum_data_classification: ModelDataClassification::Confidential,
+            maximum_limits: ModelBudget {
+                max_input_tokens: 256,
+                max_output_tokens: 128,
+                max_cost_microusd: 50_000,
+            },
+            maximum_permit_lifetime_seconds: 600,
+        };
+        let receipt = authorize_runtime_model_egress(&runtime, &context, &proposal, &policy, at)
+            .expect("Root egress authorization");
+        assert_eq!(receipt.permit.invocation_id, proposal.invocation_id);
+        assert_eq!(receipt.permit.request_hash, proposal.request_hash);
+        assert_eq!(receipt.permit.secret_handles.len(), 1);
+        assert_eq!(receipt.secret_handles.len(), 1);
+        assert_eq!(
+            runtime
+                .resolve_model_secret_handle_binding(
+                    receipt.permit.id,
+                    receipt.permit.secret_handles[0],
+                    at,
+                )
+                .expect("resolve opaque binding"),
+            receipt.secret_handles[0]
+        );
+        assert_eq!(
+            authorize_runtime_model_egress(&runtime, &context, &proposal, &policy, at)
+                .expect("exact egress replay"),
+            receipt
+        );
+        let encoded = serde_json::to_string(&receipt).expect("serialize egress receipt");
+        assert!(!encoded.contains("secret-value"));
+
+        let mut substituted_route = proposal.clone();
+        substituted_route.route.destination = "https://other.example/v1".into();
+        assert!(
+            authorize_runtime_model_egress(&runtime, &context, &substituted_route, &policy, at,)
+                .is_err()
+        );
+        let mut under_disclosed = proposal;
+        under_disclosed.invocation_id = InvocationId::new();
+        under_disclosed.disclosure.disclosed_sources.clear();
+        assert!(
+            authorize_runtime_model_egress(&runtime, &context, &under_disclosed, &policy, at)
+                .is_err()
         );
     }
 

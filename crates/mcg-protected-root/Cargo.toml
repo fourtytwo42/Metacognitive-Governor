@@ -13,6 +13,7 @@ mcg-action-runner = { path = "../../apps/mcg-action-runner", default-features = 
 mcg-config = { path = "../mcg-config" }
 mcg-contracts = { path = "../mcg-contracts" }
 mcg-platform = { path = "../mcg-platform" }
+mcg-providers = { path = "../mcg-providers" }
 mcg-runtime = { path = "../mcg-runtime" }
 mcg-storage = { path = "../mcg-storage" }
 serde.workspace = true
@@ -22,6 +23,7 @@ thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 uuid.workspace = true
+url.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]

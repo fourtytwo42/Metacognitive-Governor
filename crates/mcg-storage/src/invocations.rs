@@ -299,6 +299,33 @@ impl SqliteEventStore {
                 "invocation context belongs to a different workflow attempt".into(),
             ));
         }
+        if let Some(permit_ref) = &manifest.egress_permit {
+            let authorization = self
+                .model_egress_authorization(manifest.id)?
+                .ok_or_else(|| {
+                    StorageError::Conflict(
+                        "invocation egress permit does not resolve to Root authority".into(),
+                    )
+                })?;
+            if authorization.permit_ref != *permit_ref
+                || authorization.permit.invocation_id != manifest.id
+                || authorization.permit.attempt_id != manifest.attempt_id
+                || authorization.permit.role != manifest.role
+                || authorization.permit.task_contract != manifest.task_contract
+                || authorization.permit.request_hash != manifest.request_hash
+                || authorization.proposal.disclosure.context_manifest != manifest.context_manifest
+                || authorization.permit.resolved_provider != manifest.resolved_provider
+                || authorization.permit.resolved_model != manifest.resolved_model
+                || crate::model_egress_route_payload(&authorization.proposal.route)?
+                    != manifest.model_route
+                || persisted_at < authorization.permit.issued_at
+                || persisted_at >= authorization.permit.expires_at
+            {
+                return Err(StorageError::Conflict(
+                    "invocation manifest does not bind the exact active Root egress permit".into(),
+                ));
+            }
+        }
         let hash = contract_hash(
             InvocationManifest::TYPE_ID,
             INVOCATION_MANIFEST_HASH_DOMAIN,

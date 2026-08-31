@@ -39,6 +39,7 @@ mod actions;
 mod agents;
 mod backup;
 mod backup_secrets;
+mod egress;
 mod experiments;
 mod invocations;
 mod mcp;
@@ -76,6 +77,12 @@ pub use agents::{
     AgentRecoveryReport, AgentTurnCommit, AgentTurnDisposition, ConsumerEvaluationCheckpoint,
     ConsumerEvaluationCheckpointState, InterfaceRunReceipt,
 };
+pub use egress::{
+    ModelEgressAuthorizationReceipt, ModelSecretHandleBinding, ModelSecretSlot,
+    model_descriptor_source_ref, model_destination_source_ref, model_disclosure_hash,
+    model_egress_policy_binding, model_egress_route_payload, model_permit_hash,
+    model_permit_source_ref, model_proposal_hash, model_provider_source_ref,
+};
 pub use experiments::{
     AutomaticExperimentDisposition, AutomaticExperimentOutcome, AutomaticSupervisionMutation,
     CandidateRevisionMutation, ExperimentMutation, GovernorProposalMutation,
@@ -87,7 +94,7 @@ pub use shadow_workspaces::ShadowWorkspaceMutation;
 pub use workflows::{TaskContractHead, WorkflowRecoveryReport, task_contract_content_hash};
 
 type EventRow = (i64, String, i64, String, Option<String>, String, String);
-pub const STORAGE_SCHEMA_VERSION: i64 = 58;
+pub const STORAGE_SCHEMA_VERSION: i64 = 59;
 
 const MIGRATION_1: &str = r"
 CREATE TABLE IF NOT EXISTS events (
@@ -2113,6 +2120,67 @@ BEFORE DELETE ON runtime_worker_generations BEGIN
 END;
 ";
 
+const MIGRATION_59: &str = r"
+CREATE TABLE IF NOT EXISTS model_invocation_proposals (
+    invocation_id TEXT PRIMARY KEY,
+    workflow_attempt_id TEXT NOT NULL,
+    request_hash_json TEXT NOT NULL,
+    disclosure_hash_json TEXT NOT NULL,
+    proposal_hash_json TEXT NOT NULL,
+    proposal_json TEXT NOT NULL,
+    proposed_at TEXT NOT NULL,
+    FOREIGN KEY(workflow_attempt_id) REFERENCES workflow_attempts(attempt_id)
+);
+CREATE TABLE IF NOT EXISTS model_invocation_permits (
+    permit_id TEXT PRIMARY KEY,
+    invocation_id TEXT NOT NULL UNIQUE,
+    proposal_hash_json TEXT NOT NULL,
+    permit_hash_json TEXT NOT NULL,
+    permit_json TEXT NOT NULL,
+    issued_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    FOREIGN KEY(invocation_id) REFERENCES model_invocation_proposals(invocation_id)
+);
+CREATE TABLE IF NOT EXISTS model_secret_handle_bindings (
+    secret_handle_id TEXT PRIMARY KEY,
+    permit_id TEXT NOT NULL,
+    connection_id TEXT NOT NULL,
+    slot TEXT NOT NULL CHECK(slot IN ('primary', 'oauth_id_token', 'oauth_refresh_token')),
+    expires_at TEXT NOT NULL,
+    UNIQUE(permit_id, slot),
+    FOREIGN KEY(permit_id) REFERENCES model_invocation_permits(permit_id),
+    FOREIGN KEY(connection_id) REFERENCES provider_connections(connection_id)
+);
+CREATE INDEX IF NOT EXISTS model_invocation_permits_expiry
+    ON model_invocation_permits(expires_at);
+CREATE INDEX IF NOT EXISTS model_secret_handle_bindings_permit
+    ON model_secret_handle_bindings(permit_id);
+CREATE TRIGGER IF NOT EXISTS model_invocation_proposals_no_update
+BEFORE UPDATE ON model_invocation_proposals BEGIN
+    SELECT RAISE(FAIL, 'model invocation proposals are immutable evidence');
+END;
+CREATE TRIGGER IF NOT EXISTS model_invocation_proposals_no_delete
+BEFORE DELETE ON model_invocation_proposals BEGIN
+    SELECT RAISE(FAIL, 'model invocation proposals are durable evidence');
+END;
+CREATE TRIGGER IF NOT EXISTS model_invocation_permits_no_update
+BEFORE UPDATE ON model_invocation_permits BEGIN
+    SELECT RAISE(FAIL, 'model invocation permits are immutable authority');
+END;
+CREATE TRIGGER IF NOT EXISTS model_invocation_permits_no_delete
+BEFORE DELETE ON model_invocation_permits BEGIN
+    SELECT RAISE(FAIL, 'model invocation permits are durable authority');
+END;
+CREATE TRIGGER IF NOT EXISTS model_secret_handle_bindings_no_update
+BEFORE UPDATE ON model_secret_handle_bindings BEGIN
+    SELECT RAISE(FAIL, 'model secret-handle bindings are immutable authority');
+END;
+CREATE TRIGGER IF NOT EXISTS model_secret_handle_bindings_no_delete
+BEFORE DELETE ON model_secret_handle_bindings BEGIN
+    SELECT RAISE(FAIL, 'model secret-handle bindings are durable authority');
+END;
+";
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RootOwnership {
     pub runtime_identity: RuntimeIdentity,
@@ -2387,6 +2455,7 @@ impl SqliteEventStore {
             (56_i64, MIGRATION_56),
             (57_i64, MIGRATION_57),
             (58_i64, MIGRATION_58),
+            (59_i64, MIGRATION_59),
         ] {
             let applied = self.connection.query_row(
                 "SELECT EXISTS(SELECT 1 FROM mcg_schema WHERE version = ?1)",
@@ -6285,7 +6354,7 @@ mod tests {
                      DROP TABLE task_contract_heads;
                      DROP TABLE task_contract_versions;
                      DROP TABLE root_ownership;
-                     DELETE FROM mcg_schema WHERE version IN (51, 52, 53, 54, 55, 56, 57, 58);",
+                     DELETE FROM mcg_schema WHERE version IN (51, 52, 53, 54, 55, 56, 57, 58, 59);",
                 )
                 .expect("downgrade fixture to schema 50");
         }

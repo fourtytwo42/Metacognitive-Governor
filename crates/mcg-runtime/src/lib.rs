@@ -60,12 +60,12 @@ use mcg_config::{
 use mcg_contracts::{
     ActionEnvelope, ActionExecution, ActionExecutionId, ActionId, ActionInspection, ActionReceipt,
     ActionSummary, ActionValidation, ArtifactRef, CompletionCertificate, CompletionVerdict,
-    ContentHash, CorrelationId, EffectOutcome, InvocationId, InvocationInspection,
-    InvocationSummary, ModelRun, ModelRunState, ReconciliationJob, ReconciliationJobId,
-    ReconciliationObservation, RuntimeActorId, RuntimeIdentity, RuntimeInvocationRequest,
-    RuntimeInvocationResult, SourceRef, StableTypeId, WorkflowAttempt, WorkflowCancelRequest,
-    WorkflowId, WorkflowInspection, WorkflowInvocationActivity, WorkflowState,
-    canonical_contract_hash,
+    ContentHash, ContextManifest, CorrelationId, EffectOutcome, InvocationId, InvocationInspection,
+    InvocationSummary, ModelEgressPolicy, ModelInvocationPermit, ModelInvocationProposal, ModelRun,
+    ModelRunState, PermitId, ReconciliationJob, ReconciliationJobId, ReconciliationObservation,
+    RuntimeActorId, RuntimeIdentity, RuntimeInvocationRequest, RuntimeInvocationResult,
+    SecretHandleId, SourceRef, StableTypeId, WorkflowAttempt, WorkflowCancelRequest, WorkflowId,
+    WorkflowInspection, WorkflowInvocationActivity, WorkflowState, canonical_contract_hash,
 };
 use mcg_domain::{
     AgentContextCheckpoint, AgentContextCheckpointCause, AgentContextCheckpointId,
@@ -149,11 +149,12 @@ use mcg_providers::{
 use mcg_storage::{
     ActionAuthorizationReceipt, ActionExecutionRecoveryReport, AgentRecoveryReport,
     AgentTurnDisposition, BackupMcpSecret, BackupProviderSecret, BackupSecretSnapshot,
-    DataDirectoryLock, ReconciliationClaimReceipt, ReconciliationRecoveryReport,
-    ReconciliationResolutionReceipt, RecoveryReport, RootMigrationReceipt, RootOwnership,
-    RuntimeResponseArtifact, STORAGE_SCHEMA_VERSION, SqliteEventStore, StorageError,
-    WorkflowRecoveryReport, acquire_data_directory_lock,
-    create_encrypted_backup_bundle_from_snapshot, decrypt_backup_bundle_secrets,
+    DataDirectoryLock, ModelEgressAuthorizationReceipt, ModelSecretHandleBinding,
+    ReconciliationClaimReceipt, ReconciliationRecoveryReport, ReconciliationResolutionReceipt,
+    RecoveryReport, RootMigrationReceipt, RootOwnership, RuntimeResponseArtifact,
+    STORAGE_SCHEMA_VERSION, SqliteEventStore, StorageError, WorkflowRecoveryReport,
+    acquire_data_directory_lock, create_encrypted_backup_bundle_from_snapshot,
+    decrypt_backup_bundle_secrets,
 };
 pub use mcg_storage::{
     AgentTurnCommit, AutomaticExperimentDisposition, AutomaticExperimentOutcome,
@@ -4006,6 +4007,82 @@ impl AppRuntime {
             .validate()
             .map_err(|error| StorageError::InvalidData(error.to_string()))?;
         Ok(Some(activity))
+    }
+
+    /// Persists the exact context disclosure candidate before Root authorizes model egress.
+    /// Exact replay is harmless; substitution fails closed.
+    ///
+    /// # Errors
+    /// Returns a runtime error for malformed, missing-lineage, or conflicting evidence.
+    pub fn persist_model_egress_context(
+        &self,
+        context: &ContextManifest,
+        now: DateTime<Utc>,
+    ) -> Result<ContentHash, RuntimeError> {
+        Ok(self.store()?.persist_context_manifest(context, now)?)
+    }
+
+    /// Loads the secret-free provider connection and catalog that Root must resolve exactly.
+    ///
+    /// # Errors
+    /// Returns a runtime error when authoritative provider state cannot be read.
+    pub fn model_egress_route_state(
+        &self,
+        provider_id: &str,
+    ) -> Result<Option<(ProviderConnection, ProviderModelCatalog)>, RuntimeError> {
+        let store = self.store()?;
+        let Some(connection) = store.provider_connection(provider_id)? else {
+            return Ok(None);
+        };
+        let Some(catalog) = store.provider_catalog(provider_id)? else {
+            return Ok(None);
+        };
+        Ok(Some((connection, catalog)))
+    }
+
+    /// Commits one Root-derived model egress proposal/permit/opaque-handle authorization.
+    /// This is a storage bridge only; policy and route derivation remain in Protected Root.
+    ///
+    /// # Errors
+    /// Returns a runtime error for malformed, stale, substituted, or conflicting authority.
+    pub fn authorize_model_egress(
+        &self,
+        proposal: &ModelInvocationProposal,
+        policy: &ModelEgressPolicy,
+        permit: &ModelInvocationPermit,
+        secret_handles: &[ModelSecretHandleBinding],
+        now: DateTime<Utc>,
+    ) -> Result<ModelEgressAuthorizationReceipt, RuntimeError> {
+        Ok(self
+            .store()?
+            .authorize_model_egress(proposal, policy, permit, secret_handles, now)?)
+    }
+
+    /// Loads one complete content-minimized Root egress authorization by invocation.
+    ///
+    /// # Errors
+    /// Returns a runtime error when authoritative evidence cannot be decoded.
+    pub fn model_egress_authorization(
+        &self,
+        invocation_id: InvocationId,
+    ) -> Result<Option<ModelEgressAuthorizationReceipt>, RuntimeError> {
+        Ok(self.store()?.model_egress_authorization(invocation_id)?)
+    }
+
+    /// Resolves only the metadata behind one exact unexpired opaque secret handle.
+    /// Raw credential resolution remains inside the authorized provider adapter.
+    ///
+    /// # Errors
+    /// Returns a runtime error for missing, mismatched, expired, or malformed authority.
+    pub fn resolve_model_secret_handle_binding(
+        &self,
+        permit_id: PermitId,
+        handle_id: SecretHandleId,
+        now: DateTime<Utc>,
+    ) -> Result<ModelSecretHandleBinding, RuntimeError> {
+        Ok(self
+            .store()?
+            .resolve_model_secret_handle_binding(permit_id, handle_id, now)?)
     }
 
     /// Persists complete reconstructable invocation intent and the initial planned model run
