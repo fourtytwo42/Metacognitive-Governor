@@ -1,6 +1,6 @@
 # MetaCog Cognitive Runtime Implementation Plan
 
-**Status:** Active staged delivery plan; Stages 0–4 have implementation checkpoints and Stage 5 is implemented through Root-owned real-process Work/Verify, authenticated Root/CLI/Desktop reconstruction, generation-safe service replacement, and active cancellation
+**Status:** Active staged delivery plan; Stages 0–4 have implementation checkpoints and Stage 5 is implemented through Root-owned real-process Work/Verify, authenticated Root/CLI/Desktop reconstruction, generation-safe service replacement, active cancellation, and a governed global agent browser
 **Scope:** Alignment with the Adaptive Cognitive Agent Runtime PRD v1.4.2, Cognitive Runtime Implementation Contract v0.1, and Cognitive Runtime Experimental Protocol Specification v0.2
 **Product:** MetaCog desktop and `mcg` CLI on Windows, macOS, and Linux
 
@@ -289,7 +289,7 @@ Separate writable cognition from Root authority and prove reconstructable Work a
 
 - Replace permanent-agent assumptions with workflow/invocation presentation.
 - Preserve friendly current labels where needed, while Developer shows exact Chat/Work/Verify roles.
-- Add the global workflow/invocation browser and remote inspection only after the canonical ownership model exists.
+- Add the global workflow/invocation browser and remote inspection only after the canonical ownership model exists. The bounded global agent inventory and exact local selection are implemented; combined workflow/invocation drill-down and direct remote-server inventory semantics remain.
 - CLI can reconstruct and print the conditions of any material invocation.
 
 ### Testing and exit gate
@@ -677,12 +677,12 @@ Do not claim consciousness, subjective identity, unrestricted self-improvement, 
 
 ## 10. Immediate Next Actions
 
-1. Finish the existing hook-trust release without mixing cognitive-runtime changes into its commit.
-2. Commit the three new PRDs and this plan as a documentation-only baseline after reviewing them together.
-3. Approve the source-precedence and interface decisions in Sections 2–3.
-4. Execute Stage 0 and produce the current-to-target architecture and requirements traceability matrices.
-5. Convert the Stage 1 contracts into an issue/task breakdown with file ownership and test ownership.
-6. Begin implementation only after the Stage 0 baseline and ADR gate passes.
+1. Populate immutable action origins from every compatibility/runtime producer and implement exact approval, invocation, command, agent, conversation, and evidence focus.
+2. Complete Stage 3 compatibility reattachment, child propagation, event streaming, wake triggers, and the remaining nonterminal crash/reassignment matrix.
+3. Finish Stage 5 combined workflow/invocation drill-down, direct remote-server inventory semantics where support is discoverable, and packaged cancellation/replacement qualification.
+4. Implement the Stage 6 Root-bound provider/tool/secret permit pipeline and prove one real end-to-end governed request.
+5. Build and pass the Stage 7 Protected Evaluator and Phase 0 integrity gate before beginning recursive improvement work.
+6. Continue through Stages 8–13 only behind the recorded scientific and production gates, with matched Windows/macOS/Linux package and native UAT evidence at every affected boundary.
 
 ## 11. Final Completion Definition
 

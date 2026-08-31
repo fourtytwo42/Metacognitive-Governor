@@ -1,6 +1,6 @@
 # Stage 5 — Runtime Worker and Reconstructable Deterministic Cognition
 
-**Status:** Contract/persistence foundation (`83b5629`), separate authenticated worker (`522ba92`), Root-owned real-process orchestration/recovery (`4a2a905`), authenticated Root/CLI reconstruction (`bde06f0`), progressive Desktop reconstruction (`1e94efb`), generation-safe idle service supervision (`dc54a88`), and active invocation cancellation (`65f7073`) implemented; global-browser and release qualification remain open
+**Status:** Contract/persistence foundation (`83b5629`), separate authenticated worker (`522ba92`), Root-owned real-process orchestration/recovery (`4a2a905`), authenticated Root/CLI reconstruction (`bde06f0`), progressive Desktop reconstruction (`1e94efb`), generation-safe idle service supervision (`dc54a88`), active invocation cancellation (`65f7073`), and the governed global agent browser (`44c6389`) implemented; combined workflow/invocation drill-down and release qualification remain open
 
 ## Delivered contract boundary
 
@@ -127,6 +127,29 @@ production sidecar allowlist. Its real-process test proves bounded active cancel
 kill/reap, `Planned → Dispatched → Cancelled` history, no response artifact, late-result rejection,
 and full Protected Root reopen settling the effect-free workflow to `Cancelled`.
 
+## Governed global agent browser checkpoint
+
+Checkpoint `44c6389` adds a versioned, bounded, newest-first cross-conversation agent-session
+projection. Summary rows include only stable conversation/session/role/organization identity,
+friendly labels, lifecycle state, optional project/model/Codex-thread locators, and timestamps.
+Prompts, messages, credentials, tool payloads, and private reasoning are excluded. The storage
+query validates every conversation/session binding, defaults to active conversations, and caps
+responses at 200 rows. An authenticated compatibility API exposes the projection to existing
+CLI/Desktop clients without direct database authority.
+
+`mcg agents` now uses one global query instead of scanning every conversation. Noninteractive
+output remains script-friendly; an interactive terminal opens a searchable picker, reloads the
+exact selected conversation, and refuses to focus a session absent from that scoped view.
+Subcommand-local `agents --remote` syntax matches Codex 0.150.1 and applies the existing secure
+endpoint/token validation, but MetaCog deliberately binds remote transport only after selecting
+the governed local session. Direct enumeration of an arbitrary remote app-server remains a
+separate compatibility requirement and is not claimed by this checkpoint.
+
+The Desktop projects the same list through Simple, Advanced, and Developer. Simple shows friendly
+agent/conversation/state identity; Advanced adds exact session/update/model context; Developer adds
+read-only conversation, role, organization revision, and Codex-thread locators. Search spans the
+bounded in-memory projection, and opening a row uses its exact conversation identity.
+
 ## Verification
 
 - `cargo test -p mcg-contracts` — 17/17 passed.
@@ -143,6 +166,7 @@ and full Protected Root reopen settling the effect-free workflow to `Cancelled`.
 - Root/CLI reconstruction checkpoint: contracts 17/17, platform 3/3, storage 110/110, Protected Root 12/12, CLI 69 unit plus 10 integration, whole-workspace all-target check, strict boundary Clippy, packaging/docs/format/diff gates — passed.
 - Desktop reconstruction checkpoint: TypeScript and production build passed; Desktop Vitest 124/124; serialized Playwright 31/31; Desktop Rust 20/20; whole-workspace all-target check; packaging/docs/format/diff gates — passed. Strict Desktop boundary Clippy passes with only its recorded legacy lint classes allowed; no finding names the invocation path.
 - Active cancellation/service supervision checkpoint: Runtime worker 13/13 and Protected Root 12/12; whole-workspace all-target check; strict worker Clippy and strict Root changed-boundary Clippy; packaging/docs/format/diff gates — passed.
+- Global agent browser checkpoint: storage 111/111; API 103/103; runtime 108 passed with two explicit Windows Sandbox qualifications ignored; CLI 70 unit plus 10 integration; Desktop Rust 20/20; Desktop Vitest 125/125; serialized Playwright 32/32 including progressive disclosure, search, and scoped Axe; TypeScript/build, whole-workspace all-target check, packaging/docs/format/diff gates — passed. Strict domain Clippy is clean; API/storage pass when only their exact recorded legacy lint classes are allowed, and the CLI audit reports only its existing 87/91 findings with no global-browser-path finding.
 
 Strict whole-storage Clippy still reaches the repository’s documented pre-existing storage lint backlog. Rerunning the storage library with only those established lint classes allowed passes, and strict contracts Clippy is clean.
 
@@ -150,7 +174,7 @@ Strict whole-storage Clippy still reaches the repository’s documented pre-exis
 
 Stage 5 is not complete until all of the following are implemented and qualified:
 
-1. Extend the canonical invocation list into the global workflow/agent browser and reconcile compatible `agents --remote` presentation.
+1. Combine the global agent inventory with canonical workflow/invocation drill-down and, where the governed transport can prove equivalent authority, implement direct remote-server inventory semantics rather than treating post-selection transport binding as remote enumeration.
 2. Connect real governed provider/model execution through Stage 6 permits without giving Runtime ambient network, storage, or secret authority.
 3. Run packaged active cancellation/service replacement, broader combined workflow/Runtime crash injection, native GUI UAT, migration, and matched Windows/Linux/macOS package gates.
 
