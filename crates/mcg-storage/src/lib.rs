@@ -4,8 +4,8 @@ use std::{collections::HashMap, path::Path, time::Duration};
 
 use chrono::{DateTime, Utc};
 use mcg_agents::{AgentInstance, AgentLease, AgentRun, WorkPlan};
-pub use mcg_contracts::RootMigrationReceipt;
 use mcg_contracts::RuntimeIdentity;
+pub use mcg_contracts::{InvocationInspection, ModelRunRecord, RootMigrationReceipt};
 use mcg_domain::{
     AgentContextCheckpoint, AgentCredentialAudit, AgentDelegation, AgentMessage, AgentWake,
     AgentWakeId, AgentWakeKind, AgentWakeState, AgentWakeTarget, ApprovalId, BlackboardEntry,
@@ -74,7 +74,7 @@ pub use experiments::{
     AutomaticExperimentDisposition, AutomaticExperimentOutcome, AutomaticSupervisionMutation,
     CandidateRevisionMutation, ExperimentMutation, GovernorProposalMutation,
 };
-pub use invocations::{InvocationInspection, ModelRunRecord, RuntimeResponseArtifact};
+pub use invocations::RuntimeResponseArtifact;
 pub use plugins::PluginRecoveryReport;
 pub use scheduler::{ScheduleClaim, ScheduleWakeMutation};
 pub use shadow_workspaces::ShadowWorkspaceMutation;

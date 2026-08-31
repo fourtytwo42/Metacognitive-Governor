@@ -12,10 +12,10 @@ use std::fmt::Write as _;
 use chrono::{DateTime, Duration, Utc};
 use mcg_contracts::{
     ActionId, ActionInspection, ActionSummary, AuthenticatedRpcRequest, ContentHash, ContractError,
-    CorrelationId, PROTOCOL_V1, RequestId, RootStatus, RpcEnvelope, RuntimeInstanceId,
-    RuntimeWorkerRole, SessionId, StableTypeId, VersionedPayload, WorkflowAttempt,
-    WorkflowCancelRequest, WorkflowId, WorkflowInspection, canonical_cbor_v1,
-    decode_canonical_cbor_v1,
+    CorrelationId, InvocationId, InvocationInspection, InvocationSummary, PROTOCOL_V1, RequestId,
+    RootStatus, RpcEnvelope, RuntimeInstanceId, RuntimeWorkerRole, SessionId, StableTypeId,
+    VersionedPayload, WorkflowAttempt, WorkflowCancelRequest, WorkflowId, WorkflowInspection,
+    canonical_cbor_v1, decode_canonical_cbor_v1,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
@@ -29,6 +29,8 @@ pub const MAX_ROOT_IPC_FRAME_BYTES: usize = 1024 * 1024;
 pub const ROOT_IPC_SESSION_SCHEMA_VERSION: u16 = 1;
 pub const RUNTIME_WORKER_SESSION_SCHEMA_VERSION: u16 = 1;
 pub const RUNTIME_WORKER_EXECUTABLE_HASH_DOMAIN: &str = "MetaCog.RuntimeWorkerExecutable";
+pub const MAX_ROOT_INVOCATION_SUMMARIES: usize = 200;
+pub const MAX_ROOT_INVOCATION_MODEL_RUNS: usize = 100;
 pub const ROOT_STATUS_REQUEST_TYPE: &str = "metacog.root.status.request.v1";
 pub const ROOT_STATUS_RESPONSE_TYPE: &str = "metacog.root.status.response.v1";
 pub const ROOT_WORKFLOW_LIST_REQUEST_TYPE: &str = "metacog.root.workflow_list.request.v1";
@@ -41,6 +43,10 @@ pub const ROOT_ACTION_LIST_REQUEST_TYPE: &str = "metacog.root.action_list.reques
 pub const ROOT_ACTION_LIST_RESPONSE_TYPE: &str = "metacog.root.action_list.response.v1";
 pub const ROOT_ACTION_SHOW_REQUEST_TYPE: &str = "metacog.root.action_show.request.v1";
 pub const ROOT_ACTION_SHOW_RESPONSE_TYPE: &str = "metacog.root.action_show.response.v1";
+pub const ROOT_INVOCATION_LIST_REQUEST_TYPE: &str = "metacog.root.invocation_list.request.v1";
+pub const ROOT_INVOCATION_LIST_RESPONSE_TYPE: &str = "metacog.root.invocation_list.response.v1";
+pub const ROOT_INVOCATION_SHOW_REQUEST_TYPE: &str = "metacog.root.invocation_show.request.v1";
+pub const ROOT_INVOCATION_SHOW_RESPONSE_TYPE: &str = "metacog.root.invocation_show.response.v1";
 const ROOT_SESSION_FILE: &str = "root-ipc-session.json";
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -252,6 +258,8 @@ pub enum PlatformError {
     EmptyFrame,
     #[error("local IPC session file is invalid")]
     InvalidSession,
+    #[error("local IPC inspection bound is invalid")]
+    InvalidInspectionBound,
 }
 
 /// Derives the per-profile local endpoint without including raw user-controlled paths.
@@ -588,6 +596,50 @@ pub async fn query_root_action(
         ROOT_ACTION_SHOW_REQUEST_TYPE,
         ROOT_ACTION_SHOW_RESPONSE_TYPE,
         &serde_json::json!({"action_id": action_id, "event_limit": event_limit}),
+    )
+    .await
+}
+
+/// Lists bounded newest-first reconstructable invocations over authenticated local IPC.
+///
+/// # Errors
+/// Returns an error for unavailable transport, invalid bounds, or correlated protocol failure.
+pub async fn query_root_invocations(
+    data_directory: &Path,
+    limit: usize,
+) -> Result<Vec<InvocationSummary>, PlatformError> {
+    if limit == 0 || limit > MAX_ROOT_INVOCATION_SUMMARIES {
+        return Err(PlatformError::InvalidInspectionBound);
+    }
+    query_root(
+        data_directory,
+        ROOT_INVOCATION_LIST_REQUEST_TYPE,
+        ROOT_INVOCATION_LIST_RESPONSE_TYPE,
+        &serde_json::json!({"limit": limit}),
+    )
+    .await
+}
+
+/// Loads one canonical bounded invocation reconstruction over authenticated local IPC.
+///
+/// # Errors
+/// Returns an error for unavailable transport, invalid bounds, or correlated protocol failure.
+pub async fn query_root_invocation(
+    data_directory: &Path,
+    invocation_id: InvocationId,
+    model_run_limit: usize,
+) -> Result<Option<InvocationInspection>, PlatformError> {
+    if model_run_limit == 0 || model_run_limit > MAX_ROOT_INVOCATION_MODEL_RUNS {
+        return Err(PlatformError::InvalidInspectionBound);
+    }
+    query_root(
+        data_directory,
+        ROOT_INVOCATION_SHOW_REQUEST_TYPE,
+        ROOT_INVOCATION_SHOW_RESPONSE_TYPE,
+        &serde_json::json!({
+            "invocation_id": invocation_id,
+            "model_run_limit": model_run_limit
+        }),
     )
     .await
 }

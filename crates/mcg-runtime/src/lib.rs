@@ -60,10 +60,10 @@ use mcg_config::{
 use mcg_contracts::{
     ActionEnvelope, ActionExecution, ActionExecutionId, ActionId, ActionInspection, ActionReceipt,
     ActionSummary, ArtifactRef, CompletionCertificate, CompletionVerdict, ContentHash,
-    CorrelationId, EffectOutcome, InvocationId, ModelRun, ModelRunState, ReconciliationJob,
-    ReconciliationJobId, ReconciliationObservation, RuntimeActorId, RuntimeIdentity,
-    RuntimeInvocationRequest, RuntimeInvocationResult, WorkflowAttempt, WorkflowCancelRequest,
-    WorkflowId, WorkflowInspection, WorkflowState,
+    CorrelationId, EffectOutcome, InvocationId, InvocationInspection, InvocationSummary, ModelRun,
+    ModelRunState, ReconciliationJob, ReconciliationJobId, ReconciliationObservation,
+    RuntimeActorId, RuntimeIdentity, RuntimeInvocationRequest, RuntimeInvocationResult,
+    WorkflowAttempt, WorkflowCancelRequest, WorkflowId, WorkflowInspection, WorkflowState,
 };
 use mcg_domain::{
     AgentContextCheckpoint, AgentContextCheckpointCause, AgentContextCheckpointId,
@@ -3974,10 +3974,21 @@ impl AppRuntime {
         &self,
         invocation_id: InvocationId,
         maximum_model_run_versions: usize,
-    ) -> Result<Option<mcg_storage::InvocationInspection>, RuntimeError> {
+    ) -> Result<Option<InvocationInspection>, RuntimeError> {
         Ok(self
             .store()?
             .invocation_inspection(invocation_id, maximum_model_run_versions)?)
+    }
+
+    /// Lists bounded newest-first reconstructable invocation summaries.
+    ///
+    /// # Errors
+    /// Returns a runtime error for invalid bounds or unreadable authoritative evidence.
+    pub fn canonical_invocations(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<InvocationSummary>, RuntimeError> {
+        Ok(self.store()?.invocation_summaries(limit)?)
     }
 
     /// Loads the exact immutable response payload retained for one model run.

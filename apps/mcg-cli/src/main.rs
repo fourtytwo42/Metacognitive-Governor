@@ -69,7 +69,7 @@ use mcg_codex_app_server::{
     CodexResumeCwd, CodexStableDiscovery,
 };
 use mcg_config::{AppConfig, AutonomyPreset, CliTuiPreferences, InterfaceComplexity, UserSettings};
-use mcg_contracts::{ActionId, WorkflowCancelRequest, WorkflowId, WorkflowState};
+use mcg_contracts::{ActionId, InvocationId, WorkflowCancelRequest, WorkflowId, WorkflowState};
 use mcg_domain::{
     AgentWakeState, ApprovalMode, CloudDiffApply, CodexConfigOverride, ComposerMentionInput,
     ComputerUseCapability, ComputerUseRegion, ComputerUseTarget, Conversation,
@@ -311,6 +311,11 @@ enum Command {
     Action {
         #[command(subcommand)]
         command: ActionCommand,
+    },
+    /// Inspect reconstructable Protected Root model invocations.
+    Invocation {
+        #[command(subcommand)]
+        command: InvocationCommand,
     },
     /// Inspect or change restart-safe owner settings.
     Settings {
@@ -1338,6 +1343,25 @@ enum ActionCommand {
         id: String,
         #[arg(long, default_value_t = 500)]
         event_limit: usize,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum InvocationCommand {
+    /// List a bounded newest-first projection of material model invocations.
+    List {
+        #[arg(long, default_value_t = 100)]
+        limit: usize,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show exact content-minimized reconstruction evidence and model-run history.
+    Show {
+        id: String,
+        #[arg(long, default_value_t = 100)]
+        model_run_limit: usize,
         #[arg(long)]
         json: bool,
     },
@@ -2871,6 +2895,10 @@ async fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
         run_root_action(&config.data_directory, command).await?;
         return Ok(());
     }
+    if let Some(Command::Invocation { command }) = &cli.command {
+        run_root_invocation(&config.data_directory, command).await?;
+        return Ok(());
+    }
     if let Some(Command::Backup { command }) = &cli.command {
         match command {
             BackupCommand::Verify { bundle, json } => {
@@ -2986,6 +3014,9 @@ async fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
         }
         Some(Command::Action { .. }) => {
             unreachable!("action commands handled before bearer-token loading")
+        }
+        Some(Command::Invocation { .. }) => {
+            unreachable!("invocation commands handled before bearer-token loading")
         }
         Some(Command::Settings { command }) => {
             run_settings(&client, host, token.trim(), command).await?;
@@ -11127,6 +11158,98 @@ async fn run_root_action(
     Ok(())
 }
 
+async fn run_root_invocation(
+    data_directory: &Path,
+    command: &InvocationCommand,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match command {
+        InvocationCommand::List { limit, json } => {
+            let invocations = mcg_platform::query_root_invocations(data_directory, *limit).await?;
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&invocations)?);
+            } else if invocations.is_empty() {
+                println!("No reconstructable invocations.");
+            } else {
+                for invocation in invocations {
+                    println!(
+                        "{}  {:?}  {}  revision {}  workflow {}",
+                        invocation.invocation_id,
+                        invocation.role,
+                        invocation
+                            .model_run_state
+                            .map_or_else(|| "unplanned".to_owned(), |state| format!("{state:?}")),
+                        invocation.model_run_revision.unwrap_or_default(),
+                        invocation.workflow_id
+                    );
+                }
+            }
+        }
+        InvocationCommand::Show {
+            id,
+            model_run_limit,
+            json,
+        } => {
+            let invocation_id = InvocationId(uuid::Uuid::parse_str(id)?);
+            let inspection = mcg_platform::query_root_invocation(
+                data_directory,
+                invocation_id,
+                *model_run_limit,
+            )
+            .await?
+            .ok_or_else(|| format!("invocation {invocation_id} was not found"))?;
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&inspection)?);
+            } else {
+                println!("Invocation {}", inspection.manifest.id);
+                println!("  role: {:?}", inspection.manifest.role);
+                println!("  attempt: {}", inspection.manifest.attempt_id);
+                println!(
+                    "  task contract: {} v{}",
+                    inspection.manifest.task_contract.id, inspection.manifest.task_contract.version
+                );
+                println!(
+                    "  runtime: {}",
+                    inspection.manifest.runtime_identity.instance_id
+                );
+                println!(
+                    "  provider: {} {}",
+                    inspection.manifest.resolved_provider.source_type.as_str(),
+                    inspection.manifest.resolved_provider.locator
+                );
+                println!(
+                    "  model: {} {}",
+                    inspection.manifest.resolved_model.source_type.as_str(),
+                    inspection.manifest.resolved_model.locator
+                );
+                println!(
+                    "  context: {} ({}:{})",
+                    inspection.context_manifest.id,
+                    inspection.context_manifest_hash.domain,
+                    inspection.context_manifest_hash.digest_hex
+                );
+                println!(
+                    "  request: {}:{}",
+                    inspection.manifest.request_hash.domain,
+                    inspection.manifest.request_hash.digest_hex
+                );
+                if let Some(response) = &inspection.manifest.response_hash {
+                    println!("  response: {}:{}", response.domain, response.digest_hex);
+                }
+                for run in &inspection.model_runs {
+                    println!(
+                        "  run {} revision {}: {:?} at {}",
+                        run.run.id, run.revision, run.run.state, run.recorded_at
+                    );
+                }
+                if inspection.model_runs_truncated {
+                    println!("  model-run history truncated at {model_run_limit} revisions");
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn canonical_action_origin_lines(origin: &mcg_contracts::ActionOrigin) -> Vec<String> {
     let named = [
         ("conversation", origin.conversation.as_ref()),
@@ -16105,6 +16228,35 @@ mod tests {
             Command::Action {
                 command: ActionCommand::Show {
                     event_limit: 75,
+                    json: false,
+                    ..
+                }
+            }
+        ));
+    }
+
+    #[test]
+    fn invocation_commands_expose_bounded_reconstruction_evidence() {
+        let id = "00000000-0000-4000-8000-000000000504";
+        let list = Cli::try_parse_from(["mcg", "invocation", "list", "--limit", "25", "--json"])
+            .expect("invocation list command");
+        assert!(matches!(
+            list.command.expect("command"),
+            Command::Invocation {
+                command: InvocationCommand::List {
+                    limit: 25,
+                    json: true
+                }
+            }
+        ));
+        let show =
+            Cli::try_parse_from(["mcg", "invocation", "show", id, "--model-run-limit", "75"])
+                .expect("invocation show command");
+        assert!(matches!(
+            show.command.expect("command"),
+            Command::Invocation {
+                command: InvocationCommand::Show {
+                    model_run_limit: 75,
                     json: false,
                     ..
                 }

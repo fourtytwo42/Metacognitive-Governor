@@ -1349,6 +1349,41 @@ impl ModelRun {
     }
 }
 
+/// One immutable revision in the authoritative model-run history.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelRunRecord {
+    pub revision: u64,
+    pub content_hash: ContentHash,
+    pub run: ModelRun,
+    pub recorded_at: DateTime<Utc>,
+}
+
+/// Bounded content-minimized projection for the global invocation browser.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InvocationSummary {
+    pub invocation_id: InvocationId,
+    pub workflow_id: WorkflowId,
+    pub attempt_id: AttemptId,
+    pub role: InvocationRole,
+    pub task_contract: VersionedRef<TaskContractId>,
+    pub model_run_id: Option<ModelRunId>,
+    pub model_run_state: Option<ModelRunState>,
+    pub model_run_revision: Option<u64>,
+    pub persisted_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Canonical bounded reconstruction view for one material invocation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InvocationInspection {
+    pub manifest: InvocationManifest,
+    pub manifest_hash: ContentHash,
+    pub context_manifest: ContextManifest,
+    pub context_manifest_hash: ContentHash,
+    pub model_runs: Vec<ModelRunRecord>,
+    pub model_runs_truncated: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeWorkerRole {

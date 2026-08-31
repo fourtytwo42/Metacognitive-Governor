@@ -1,8 +1,9 @@
 use chrono::{DateTime, Utc};
 use mcg_contracts::{
     AttemptId, CompletionCertificate, CompletionCertificateId, CompletionVerdict, ContentHash,
-    ContextManifest, InvocationId, InvocationManifest, InvocationRole, ModelRun, ModelRunId,
-    ModelRunState, RuntimeInvocationResult, StableTypeId, VersionedPayload, WorkflowAttempt,
+    ContextManifest, InvocationId, InvocationInspection, InvocationManifest, InvocationRole,
+    InvocationSummary, ModelRun, ModelRunId, ModelRunRecord, ModelRunState,
+    RuntimeInvocationResult, StableTypeId, VersionedPayload, WorkflowAttempt, WorkflowId,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::Serialize;
@@ -14,24 +15,6 @@ const INVOCATION_MANIFEST_HASH_DOMAIN: &str = "MetaCog.InvocationManifest";
 const MODEL_RUN_HASH_DOMAIN: &str = "MetaCog.ModelRun";
 const COMPLETION_CERTIFICATE_HASH_DOMAIN: &str = "MetaCog.CompletionCertificate";
 pub const MAX_INVOCATION_INSPECTION_ITEMS: usize = 1_000;
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct ModelRunRecord {
-    pub revision: u64,
-    pub content_hash: ContentHash,
-    pub run: ModelRun,
-    pub recorded_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct InvocationInspection {
-    pub manifest: InvocationManifest,
-    pub manifest_hash: ContentHash,
-    pub context_manifest: ContextManifest,
-    pub context_manifest_hash: ContentHash,
-    pub model_runs: Vec<ModelRunRecord>,
-    pub model_runs_truncated: bool,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RuntimeResponseArtifact {
@@ -557,6 +540,90 @@ impl SqliteEventStore {
                 |row| row.get::<_, String>(0),
             )?
             .map(|row| Ok(serde_json::from_str(&row?)?))
+            .collect()
+    }
+
+    /// Lists a bounded newest-first projection of all authoritative invocations.
+    ///
+    /// # Errors
+    /// Returns a storage error for an invalid limit, malformed history, or query failure.
+    pub fn invocation_summaries(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<InvocationSummary>, StorageError> {
+        validate_inspection_limit(limit)?;
+        let mut statement = self.connection.prepare(
+            "SELECT invocation.manifest_json, attempt.workflow_id,
+                    invocation.persisted_at, head.current_revision,
+                    version.run_json, version.recorded_at
+             FROM invocation_manifests AS invocation
+             JOIN workflow_attempts AS attempt
+               ON attempt.attempt_id = invocation.workflow_attempt_id
+             LEFT JOIN model_run_heads AS head
+               ON head.invocation_id = invocation.invocation_id
+             LEFT JOIN model_run_versions AS version
+               ON version.model_run_id = head.model_run_id
+              AND version.revision = head.current_revision
+             ORDER BY invocation.persisted_at DESC, invocation.invocation_id DESC
+             LIMIT ?1",
+        )?;
+        statement
+            .query_map([sql_usize(limit, "invocation summary limit")?], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<i64>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                ))
+            })?
+            .map(|row| {
+                let (manifest, workflow_id, persisted_at, revision, run, recorded_at) = row?;
+                let manifest: InvocationManifest = serde_json::from_str(&manifest)?;
+                let workflow_id =
+                    WorkflowId(uuid::Uuid::parse_str(&workflow_id).map_err(|_| {
+                        StorageError::InvalidData("invalid invocation workflow id".into())
+                    })?);
+                let persisted_at = DateTime::parse_from_rfc3339(&persisted_at)
+                    .map_err(|error| StorageError::InvalidData(error.to_string()))?
+                    .with_timezone(&Utc);
+                let revision = revision
+                    .map(|revision| {
+                        u64::try_from(revision).map_err(|_| {
+                            StorageError::InvalidData("negative model-run revision".into())
+                        })
+                    })
+                    .transpose()?;
+                let run = run
+                    .map(|run| serde_json::from_str::<ModelRun>(&run))
+                    .transpose()?;
+                let updated_at = recorded_at
+                    .map(|recorded_at| {
+                        DateTime::parse_from_rfc3339(&recorded_at)
+                            .map(|value| value.with_timezone(&Utc))
+                            .map_err(|error| StorageError::InvalidData(error.to_string()))
+                    })
+                    .transpose()?
+                    .unwrap_or(persisted_at);
+                if revision.is_some() != run.is_some() {
+                    return Err(StorageError::InvalidData(
+                        "invocation summary has incomplete model-run head evidence".into(),
+                    ));
+                }
+                Ok(InvocationSummary {
+                    invocation_id: manifest.id,
+                    workflow_id,
+                    attempt_id: manifest.attempt_id,
+                    role: manifest.role,
+                    task_contract: manifest.task_contract,
+                    model_run_id: run.as_ref().map(|run| run.id),
+                    model_run_state: run.as_ref().map(|run| run.state),
+                    model_run_revision: revision,
+                    persisted_at,
+                    updated_at,
+                })
+            })
             .collect()
     }
 
@@ -1266,6 +1333,19 @@ mod tests {
         assert_eq!(inspection.model_runs.len(), 3);
         assert_eq!(inspection.model_runs.last(), Some(&work_record));
         assert!(!inspection.model_runs_truncated);
+        let summaries = store.invocation_summaries(10).unwrap();
+        assert_eq!(summaries.len(), 2);
+        let work_summary = summaries
+            .iter()
+            .find(|summary| summary.invocation_id == work.id)
+            .expect("work invocation summary");
+        assert_eq!(work_summary.workflow_id, attempt.workflow_id);
+        assert_eq!(work_summary.attempt_id, attempt.attempt_id);
+        assert_eq!(work_summary.role, InvocationRole::Work);
+        assert_eq!(work_summary.model_run_id, Some(work_record.run.id));
+        assert_eq!(work_summary.model_run_state, Some(ModelRunState::Completed));
+        assert_eq!(work_summary.model_run_revision, Some(3));
+        assert_eq!(store.invocation_summaries(1).unwrap().len(), 1);
         assert_eq!(
             store
                 .invocation_manifests_for_attempt(attempt.attempt_id, 10)
@@ -1311,6 +1391,7 @@ mod tests {
             Err(StorageError::Conflict(_))
         ));
         assert!(store.invocation_inspection(invocation.id, 0).is_err());
+        assert!(store.invocation_summaries(0).is_err());
         assert!(
             store
                 .invocation_inspection(invocation.id, MAX_INVOCATION_INSPECTION_ITEMS + 1)

@@ -27,19 +27,21 @@ use mcg_config::AppConfig;
 use mcg_contracts::{
     ActionExecution, ActionExecutionId, ActionId, ActionReceipt, ActionReceiptId,
     AuthenticatedRpcRequest, ContentHash, ContractError, CorrelationId, EffectClass, EffectOutcome,
-    HashAlgorithm, PROTOCOL_V1, ReconciliationJob, ReconciliationJobId, ReconciliationObservation,
-    RequestId, RootStatus, RpcEnvelope, RuntimeActorId, RuntimeIdentity, RuntimeInstanceId,
-    RuntimeInvocationRequest, RuntimeInvocationResult, StableTypeId, VersionedPayload,
-    WorkflowCancelRequest, WorkflowId, decode_canonical_cbor_v1,
+    HashAlgorithm, InvocationId, PROTOCOL_V1, ReconciliationJob, ReconciliationJobId,
+    ReconciliationObservation, RequestId, RootStatus, RpcEnvelope, RuntimeActorId, RuntimeIdentity,
+    RuntimeInstanceId, RuntimeInvocationRequest, RuntimeInvocationResult, StableTypeId,
+    VersionedPayload, WorkflowCancelRequest, WorkflowId, decode_canonical_cbor_v1,
 };
 use mcg_platform::{
-    PlatformError, ROOT_ACTION_LIST_REQUEST_TYPE, ROOT_ACTION_LIST_RESPONSE_TYPE,
-    ROOT_ACTION_SHOW_REQUEST_TYPE, ROOT_ACTION_SHOW_RESPONSE_TYPE, ROOT_STATUS_REQUEST_TYPE,
-    ROOT_STATUS_RESPONSE_TYPE, ROOT_WORKFLOW_CANCEL_REQUEST_TYPE,
-    ROOT_WORKFLOW_CANCEL_RESPONSE_TYPE, ROOT_WORKFLOW_LIST_REQUEST_TYPE,
-    ROOT_WORKFLOW_LIST_RESPONSE_TYPE, ROOT_WORKFLOW_SHOW_REQUEST_TYPE,
-    ROOT_WORKFLOW_SHOW_RESPONSE_TYPE, RootIpcSession, create_root_ipc_session,
-    read_canonical_frame, remove_root_ipc_session, write_canonical_frame,
+    MAX_ROOT_INVOCATION_MODEL_RUNS, MAX_ROOT_INVOCATION_SUMMARIES, PlatformError,
+    ROOT_ACTION_LIST_REQUEST_TYPE, ROOT_ACTION_LIST_RESPONSE_TYPE, ROOT_ACTION_SHOW_REQUEST_TYPE,
+    ROOT_ACTION_SHOW_RESPONSE_TYPE, ROOT_INVOCATION_LIST_REQUEST_TYPE,
+    ROOT_INVOCATION_LIST_RESPONSE_TYPE, ROOT_INVOCATION_SHOW_REQUEST_TYPE,
+    ROOT_INVOCATION_SHOW_RESPONSE_TYPE, ROOT_STATUS_REQUEST_TYPE, ROOT_STATUS_RESPONSE_TYPE,
+    ROOT_WORKFLOW_CANCEL_REQUEST_TYPE, ROOT_WORKFLOW_CANCEL_RESPONSE_TYPE,
+    ROOT_WORKFLOW_LIST_REQUEST_TYPE, ROOT_WORKFLOW_LIST_RESPONSE_TYPE,
+    ROOT_WORKFLOW_SHOW_REQUEST_TYPE, ROOT_WORKFLOW_SHOW_RESPONSE_TYPE, RootIpcSession,
+    create_root_ipc_session, read_canonical_frame, remove_root_ipc_session, write_canonical_frame,
 };
 use mcg_runtime::{AppRuntime, RuntimeError};
 use mcg_storage::{
@@ -987,6 +989,17 @@ struct ActionShowRequest {
     event_limit: usize,
 }
 
+#[derive(serde::Deserialize)]
+struct InvocationListRequest {
+    limit: usize,
+}
+
+#[derive(serde::Deserialize)]
+struct InvocationShowRequest {
+    invocation_id: InvocationId,
+    model_run_limit: usize,
+}
+
 impl ReplayWindow {
     fn insert(&mut self, request_id: RequestId) -> bool {
         if !self.seen.insert(request_id) {
@@ -1112,6 +1125,8 @@ where
             | ROOT_WORKFLOW_CANCEL_REQUEST_TYPE
             | ROOT_ACTION_LIST_REQUEST_TYPE
             | ROOT_ACTION_SHOW_REQUEST_TYPE
+            | ROOT_INVOCATION_LIST_REQUEST_TYPE
+            | ROOT_INVOCATION_SHOW_REQUEST_TYPE
     );
     if !session.verifies(&request.session_capability)
         || request.envelope.session_id != session.session_id
@@ -1181,6 +1196,28 @@ where
             (
                 ROOT_ACTION_SHOW_RESPONSE_TYPE,
                 serde_json::to_value(runtime.canonical_action(show.action_id, show.event_limit)?)?,
+            )
+        }
+        ROOT_INVOCATION_LIST_REQUEST_TYPE => {
+            let list: InvocationListRequest = serde_json::from_value(request_value)?;
+            if list.limit == 0 || list.limit > MAX_ROOT_INVOCATION_SUMMARIES {
+                return Err(PlatformError::InvalidInspectionBound.into());
+            }
+            (
+                ROOT_INVOCATION_LIST_RESPONSE_TYPE,
+                serde_json::to_value(runtime.canonical_invocations(list.limit)?)?,
+            )
+        }
+        ROOT_INVOCATION_SHOW_REQUEST_TYPE => {
+            let show: InvocationShowRequest = serde_json::from_value(request_value)?;
+            if show.model_run_limit == 0 || show.model_run_limit > MAX_ROOT_INVOCATION_MODEL_RUNS {
+                return Err(PlatformError::InvalidInspectionBound.into());
+            }
+            (
+                ROOT_INVOCATION_SHOW_RESPONSE_TYPE,
+                serde_json::to_value(
+                    runtime.runtime_invocation(show.invocation_id, show.model_run_limit)?,
+                )?,
             )
         }
         _ => return Err(PlatformError::InvalidSession.into()),
@@ -1308,14 +1345,17 @@ mod tests {
         governed_filesystem_authority_binding, governed_filesystem_operation_payload,
     };
     use mcg_contracts::{
-        ActionEnvelope, ActionExecutionState, ActionId, AttemptId, ConfigurationId, ContractClause,
-        CorrelationId, EffectClass, HashAlgorithm, PolicyBinding, RetryPolicy, RuntimeActorId,
-        SessionId, SourceRef, TaskContract, TaskContractId, TaskContractStatus, VersionedRef,
-        WaitReason, WorkflowAttempt, WorkflowId, WorkflowState,
+        ActionEnvelope, ActionExecutionState, ActionId, AttemptId, ConfigurationId,
+        ContextManifest, ContextManifestId, ContextSelection, ContractClause, CorrelationId,
+        EffectClass, HashAlgorithm, InvocationManifest, InvocationRole, ModelRun, ModelRunId,
+        ModelRunState, PolicyBinding, RetryPolicy, RuntimeActorId, SessionId, SourceRef,
+        TaskContract, TaskContractId, TaskContractStatus, VersionedRef, WaitReason,
+        WorkflowAttempt, WorkflowId, WorkflowState,
     };
     use mcg_platform::{
         cancel_root_workflow, exchange_root_rpc, query_root_action, query_root_actions,
-        query_root_status, query_root_workflow, query_root_workflows, root_ipc_session_path,
+        query_root_invocation, query_root_invocations, query_root_status, query_root_workflow,
+        query_root_workflows, root_ipc_session_path,
     };
     use mcg_storage::{SqliteEventStore, task_contract_content_hash, verify_backup_bundle};
 
@@ -1342,6 +1382,98 @@ mod tests {
             payload,
             content_hash,
         }
+    }
+
+    fn root_invocation_payload(type_id: &str, label: &str) -> VersionedPayload {
+        VersionedPayload::canonical_v1(
+            StableTypeId::parse(type_id).expect("invocation payload type"),
+            &serde_json::json!({"label": label}),
+        )
+        .expect("invocation payload")
+    }
+
+    fn root_invocation_source(label: &str) -> SourceRef {
+        SourceRef {
+            source_type: StableTypeId::parse("test.root_invocation_source.v1")
+                .expect("invocation source type"),
+            locator: format!("test:{label}"),
+            content_hash: workflow_hash(label),
+        }
+    }
+
+    fn persist_root_invocation(
+        store: &mut SqliteEventStore,
+        attempt: &WorkflowAttempt,
+        at: chrono::DateTime<Utc>,
+    ) -> (InvocationManifest, ModelRun) {
+        let context = ContextManifest {
+            id: ContextManifestId::new(),
+            attempt_id: attempt.attempt_id,
+            selected_sources: vec![ContextSelection {
+                source: root_invocation_source("owner-context"),
+                perspective: None,
+                influence: root_invocation_payload("test.root_influence.v1", "trusted"),
+                transformations: Vec::new(),
+                placement: 0,
+                approximate_tokens: 7,
+            }],
+            selection_policy: root_invocation_payload("test.root_context_policy.v1", "bounded"),
+            expansion_steps: Vec::new(),
+            approximate_tokens: 7,
+        };
+        let context_hash = store
+            .persist_context_manifest(&context, at)
+            .expect("persist Root IPC context");
+        let runtime_build = workflow_hash("runtime-build");
+        let manifest = InvocationManifest {
+            id: InvocationId::new(),
+            role: InvocationRole::Work,
+            attempt_id: attempt.attempt_id,
+            task_contract: attempt.task_contract.clone(),
+            runtime_identity: RuntimeIdentity {
+                instance_id: RuntimeInstanceId::new(),
+                build_hash: runtime_build.clone(),
+                protocol_version: PROTOCOL_V1,
+                started_at: at,
+            },
+            cognitive_configuration: workflow_hash("cognitive-config"),
+            role_manifest: workflow_hash("work-role"),
+            prompt_bundle: workflow_hash("prompt-bundle"),
+            context_manifest: context_hash,
+            model_route: root_invocation_payload("test.root_model_route.v1", "deterministic"),
+            resolved_provider: root_invocation_source("deterministic-provider"),
+            resolved_model: root_invocation_source("deterministic-model"),
+            observed_model_fingerprint: Some("deterministic-v1".into()),
+            sampling: root_invocation_payload("test.root_sampling.v1", "zero"),
+            reasoning: None,
+            available_tool_manifests: Vec::new(),
+            selected_skill_manifests: Vec::new(),
+            authority_envelope: root_invocation_source("root-authority"),
+            egress_permit: None,
+            repository_revision: Some(workflow_hash("repository")),
+            environment: root_invocation_source("isolated-environment"),
+            runtime_build,
+            request_hash: workflow_hash("request"),
+            response_hash: None,
+        };
+        store
+            .persist_invocation_manifest(&manifest, at)
+            .expect("persist Root IPC invocation");
+        let run = ModelRun {
+            id: ModelRunId::new(),
+            invocation_id: manifest.id,
+            role: manifest.role,
+            state: ModelRunState::Planned,
+            provider_request_id: None,
+            response_artifact: None,
+            usage: None,
+            started_at: at,
+            finished_at: None,
+        };
+        store
+            .create_model_run(&run, at)
+            .expect("persist Root IPC model run");
+        (manifest, run)
     }
 
     #[derive(Clone, Copy)]
@@ -1889,6 +2021,52 @@ mod tests {
             .expect("workflow inspection after cancellation");
         assert_eq!(after.attempt, cancelling);
         assert_eq!(after.events.len(), 3);
+
+        server.abort();
+        remove_root_ipc_session(temporary.path(), session.session_id);
+    }
+
+    #[tokio::test]
+    async fn authenticated_local_ipc_lists_and_shows_bounded_invocation_evidence() {
+        let temporary = tempfile::tempdir().expect("temporary Root data directory");
+        let config = AppConfig::default().with_data_directory(temporary.path());
+        let seeded_at = Utc::now();
+        let (contract, attempt) = expired_workflow_fixture(seeded_at);
+        let (manifest, run) = {
+            let mut store =
+                SqliteEventStore::open(config.database_path()).expect("invocation store");
+            store
+                .create_workflow(&contract, &attempt, CorrelationId::new(), seeded_at)
+                .expect("create invocation workflow");
+            persist_root_invocation(&mut store, &attempt, seeded_at)
+        };
+        let runtime = open(config).expect("Protected Root open");
+        let session = create_root_ipc_session(temporary.path()).expect("IPC session");
+        let server = start_root_ipc(runtime, session.clone()).expect("IPC server");
+
+        let listed = query_root_invocations(temporary.path(), 10)
+            .await
+            .expect("invocation list");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].invocation_id, manifest.id);
+        assert_eq!(listed[0].workflow_id, attempt.workflow_id);
+        assert_eq!(listed[0].model_run_id, Some(run.id));
+        assert_eq!(listed[0].model_run_state, Some(ModelRunState::Planned));
+
+        let shown = query_root_invocation(temporary.path(), manifest.id, 10)
+            .await
+            .expect("invocation show")
+            .expect("invocation inspection");
+        assert_eq!(shown.manifest, manifest);
+        assert_eq!(shown.model_runs.len(), 1);
+        assert_eq!(shown.model_runs[0].run, run);
+        assert!(!shown.model_runs_truncated);
+        assert!(query_root_invocations(temporary.path(), 0).await.is_err());
+        assert!(
+            query_root_invocation(temporary.path(), manifest.id, 0)
+                .await
+                .is_err()
+        );
 
         server.abort();
         remove_root_ipc_session(temporary.path(), session.session_id);
