@@ -1,6 +1,6 @@
 # Stage 5 — Runtime Worker and Reconstructable Deterministic Cognition
 
-**Status:** Contract/persistence foundation (`83b5629`), separate authenticated worker (`522ba92`), Root-owned real-process orchestration/recovery (`4a2a905`), and authenticated Root/CLI reconstruction (`bde06f0`) implemented; Desktop/global-browser, active-service replacement, and release qualification remain open
+**Status:** Contract/persistence foundation (`83b5629`), separate authenticated worker (`522ba92`), Root-owned real-process orchestration/recovery (`4a2a905`), authenticated Root/CLI reconstruction (`bde06f0`), and progressive Desktop reconstruction (`1e94efb`) implemented; global-browser, active-service replacement, and release qualification remain open
 
 ## Delivered contract boundary
 
@@ -85,6 +85,20 @@ rejection. `mcg invocation list/show` consumes that boundary before bearer-token
 loading. Human output presents identities, provider/model locators, hashes, and run lifecycle;
 explicit `--json` returns the canonical reconstruction contract without granting storage access.
 
+## Progressive Desktop reconstruction checkpoint
+
+Checkpoint `1e94efb` adds authenticated Tauri and TypeScript invocation list/show clients and
+projects the same Root-owned summary and inspection state through every interface level. Simple
+shows only Work/Verification identity and plain-language lifecycle state. Advanced adds exact
+invocation/workflow identity, revision/time, governed provider/model locators, context counts,
+TaskContract version, bounded request/response hashes, immutable run count, and a source-workflow
+evidence control. Developer adds read-only canonical JSON while explicitly withholding prompt and
+response content, secrets, private reasoning, storage access, and Root mutation authority.
+
+Component and deterministic browser tests prove Simple → Advanced → Developer → Simple preserves
+one invocation state. The browser journey also runs a scoped Axe accessibility analysis over the
+invocation section.
+
 ## Verification
 
 - `cargo test -p mcg-contracts` — 17/17 passed.
@@ -99,6 +113,7 @@ explicit `--json` returns the canonical reconstruction contract without granting
 - `cargo check --workspace --all-targets` — passed.
 - Packaging and documentation validators, PowerShell parsing, copied debug-sidecar qualification, formatting, and `git diff --check` — passed.
 - Root/CLI reconstruction checkpoint: contracts 17/17, platform 3/3, storage 110/110, Protected Root 12/12, CLI 69 unit plus 10 integration, whole-workspace all-target check, strict boundary Clippy, packaging/docs/format/diff gates — passed.
+- Desktop reconstruction checkpoint: TypeScript and production build passed; Desktop Vitest 124/124; serialized Playwright 31/31; Desktop Rust 20/20; whole-workspace all-target check; packaging/docs/format/diff gates — passed. Strict Desktop boundary Clippy passes with only its recorded legacy lint classes allowed; no finding names the invocation path.
 
 Strict whole-storage Clippy still reaches the repository’s documented pre-existing storage lint backlog. Rerunning the storage library with only those established lint classes allowed passes, and strict contracts Clippy is clean.
 
@@ -107,9 +122,8 @@ Strict whole-storage Clippy still reaches the repository’s documented pre-exis
 Stage 5 is not complete until all of the following are implemented and qualified:
 
 1. Add active-service supervision that replaces an idle dead or expired worker with a newly allocated generation without accepting work from the old generation.
-2. Add Simple/Advanced/Developer Desktop invocation presentation over the same bounded Root evidence.
-3. Extend the canonical invocation list into the global workflow/agent browser and reconcile compatible `agents --remote` presentation.
-4. Connect real governed provider/model execution through Stage 6 permits without giving Runtime ambient network, storage, or secret authority.
-5. Run cancellation during active execution, active-service replacement, combined workflow/Runtime crash injection, deterministic Desktop/CLI E2E, native GUI UAT, migration, and matched Windows/Linux/macOS package gates.
+2. Extend the canonical invocation list into the global workflow/agent browser and reconcile compatible `agents --remote` presentation.
+3. Connect real governed provider/model execution through Stage 6 permits without giving Runtime ambient network, storage, or secret authority.
+4. Run cancellation during active execution, active-service replacement, combined workflow/Runtime crash injection, native GUI UAT, migration, and matched Windows/Linux/macOS package gates.
 
 No real provider is required for this stage’s correctness. Root-bound remote egress permits and secret handles begin in Stage 6.

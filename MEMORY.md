@@ -2,6 +2,15 @@
 
 Durable project context lives here. Update this file whenever information should survive chat context compression or future agent handoff.
 
+### 2026-08-30 - Progressive Desktop invocation reconstruction
+
+- Context: Authenticated Root and CLI list/show could reconstruct Runtime invocations, but the Desktop did not yet project that canonical evidence through the three interface complexities.
+- Decision: Consume the same bounded Root summary/inspection state in every mode. Simple exposes Work/Verification identity and plain state; Advanced adds exact identity, provider/model, context counts, TaskContract version, hashes, run history, and workflow evidence loading; Developer adds read-only canonical JSON without prompt/response content, secrets, private reasoning, database access, or Root mutation authority.
+- Files: `apps/desktop/src-tauri/src/lib.rs`; `apps/desktop/src/{desktop-client.ts,App.tsx,styles.css,App.test.tsx}`; `tests/e2e/desktop-smoke.spec.ts`; Stage 5, plan, traceability, status report, and `MEMORY.md`. The concurrent untracked Stage 3 document remains untouched.
+- Commands/tests: Desktop TypeScript/build; Vitest 124/124; serialized Playwright 31/31 including Simple→Advanced→Developer→Simple preservation and scoped Axe; Desktop Rust 20/20; whole-workspace all-target check; packaging/docs/format/diff. Strict Desktop boundary Clippy passes with only its exact recorded legacy lint classes allowed; no finding names the invocation path.
+- Result: Product checkpoint `1e94efb` is pushed with exact local/remote parity. Root, CLI, and Desktop now expose bounded reconstructable invocation evidence without adding database, legacy HTTP, or mutation authority.
+- Follow-up: Add active-service dead/expired worker replacement, active-execution cancellation/replacement and crash E2E, the combined global workflow/invocation/agent browser, governed real-provider execution, and matched native package UAT.
+
 ### 2026-08-30 - Authenticated Root and CLI invocation reconstruction
 
 - Context: Root could persist and reconstruct real Runtime work, but owners and product clients had no bounded authenticated way to discover or inspect those invocations.
