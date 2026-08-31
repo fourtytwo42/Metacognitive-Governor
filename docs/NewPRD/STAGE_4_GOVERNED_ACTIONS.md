@@ -1,6 +1,6 @@
 # Stage 4 — Governed Actions, Side Effects, and Reconciliation
 
-**Status:** Authoritative ledger, filesystem runner, Root dispatch, reconciliation, restart recovery, progressive Desktop inspection, and exact Codex approval-source navigation implemented; release qualification and remaining producer integration remain open
+**Status:** Authoritative ledger, filesystem runner, Root dispatch, reconciliation, restart recovery, progressive Desktop inspection, every current approval producer, and hash-verified invocation focus implemented; release qualification and owner-authorized compensation initiation remain open
 
 **Last verified:** 2026-08-30
 
@@ -69,7 +69,7 @@ only when that exact conversation is already present; Developer raw evidence inc
 complete binding. Compatibility producers and deeper invocation/command/approval focus were
 still required before approval-source navigation was complete.
 
-The current approval-source checkpoint completes the first real producer and owner journey.
+Checkpoint `aac29e6` completes the first real producer and owner journey.
 Codex conversation approval requests now persist a backward-compatible optional
 `ApprovalOrigin` with canonical, domain-separated hashes for the exact conversation, turn,
 command request, matching conversation agent session when available, and command parameters as
@@ -81,6 +81,16 @@ projection and resolves only matching agent-session and command-activity identit
 conversations, agents, or commands remain explicit and are never substituted with nearby state.
 Advanced and Developer action inspection can traverse the bound approval directly, and the same
 panel is available from a live conversation permission request.
+
+Checkpoint `f93c6d9` closes the remaining current producer and invocation-focus gap. The generic
+governed-tool broker now binds the complete typed `ToolRequest` as command intent and the exact
+`ToolRequestKind` as evidence. Guided objective-check batches bind their deterministic request,
+run, attempt, complete condition set, and completed independent Evaluator instance. Identical
+requests produce identical domain-separated source hashes; request or condition mutation changes
+the command/evidence bindings before persistence. The Desktop accepts direct invocation focus only
+for `mcg.invocation_manifest.v1`, reloads the exact invocation through Protected Root, verifies the
+returned ID and full manifest hash against the immutable source reference, then marks only that
+invocation as focused. Missing, mismatched, changed-hash, and unsupported-type sources fail closed.
 
 ## Authority boundary
 
@@ -111,9 +121,12 @@ deadline; this process boundary is defense in depth, not a filesystem or network
 - CLI tests: 68 unit and 10 integration passed, including bounded `action list/show` parsing
   and exact content-minimized human origin output.
 - Contracts and platform strict all-target Clippy: passed.
-- Runtime tests: 109 passed with two explicit native Windows Sandbox package gates ignored,
+- Runtime tests: 110 passed with two explicit native Windows Sandbox package gates ignored,
   including stable approval source hashes, exact locators, optional agent binding, and
-  command/evidence hash changes after parameter mutation.
+  command/evidence hash changes after Codex parameters, governed tool requests, or Guided
+  objective conditions mutate.
+- Tools tests: 59 passed with the existing owner-visible handoff UAT ignored, including exact,
+  stable, content-bound generic tool approval origins; strict all-target Clippy passed.
 - Protected Root migration-process test: passed.
 - Action runner tests: 18 passed (6 unit and 12 separate-process), including deterministic
   pre-effect exit, post-effect lost response, timeout-before-effect, timeout-after-effect,
@@ -124,9 +137,10 @@ deadline; this process boundary is defense in depth, not a filesystem or network
 - Strict client-only runner Clippy and dependency-shape checks: passed; `cap-fs-ext` and
   `cap-std` are absent from the Root-linked feature graph.
 - Desktop Rust tests: 20 passed.
-- Desktop component tests: 115/115 passed, including exact approval reload/navigation,
+- Desktop component tests: 125/125 passed, including exact approval reload/navigation,
   conversation/turn/agent/command/evidence presentation, fail-closed missing-conversation
-  behavior, canonical action evidence, and read-only accessibility semantics.
+  behavior, hash-verified invocation focus and changed-hash refusal, canonical action evidence,
+  and read-only accessibility semantics.
 - Serialized browser E2E: 32/32 passed, including Simple → Advanced → Developer → Simple
   action-state preservation, exact approval-source traversal, scoped approval/action Axe scans,
   and keyboard-only navigation after the additional conversation projection.
@@ -154,12 +168,11 @@ Stage 4 is not complete until all of the following pass:
 1. Extend the passing real-child plus Root-restart exit/lost-response/timeout/kill/reap matrix
    through packaged-process tests, including the existing changed-target ambiguity case,
    without blind redispatch.
-2. Extend the implemented Codex conversation approval producer and exact
-   conversation/turn/agent/command/evidence navigation to every remaining compatibility/runtime
-   producer, add direct invocation focus where an invocation binding exists, and expose
-   separately authorized owner-facing compensation initiation. Bounded bidirectional
-   compensation history and exact inspection are implemented. Add a Root HTTP/API projection
-   only if a non-local product consumer requires it.
+2. Expose separately authorized owner-facing compensation initiation. Every current production
+   approval producer now emits exact source bindings, and invocation bindings navigate only after
+   exact ID and full manifest-hash verification. Future producers must satisfy the same contract.
+   Bounded bidirectional compensation history and exact inspection are implemented. Add a Root
+   HTTP/API projection only if a non-local product consumer requires it.
 3. Resource budgets beyond bounded I/O/deadlines, network denial, case-collision/filesystem
    alias qualification, and platform sandbox capability reporting pass adversarial Windows,
    Linux, and macOS tests. Platform-stable lexical semantic-path policy and Windows Job
