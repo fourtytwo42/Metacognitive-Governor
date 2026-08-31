@@ -3871,7 +3871,7 @@ mod tests {
                  DROP TABLE context_manifests;
                  DROP INDEX action_envelopes_one_compensation;
                  ALTER TABLE action_envelopes DROP COLUMN compensates_action_id;
-                 DELETE FROM mcg_schema WHERE version IN (55, 56);",
+                 DELETE FROM mcg_schema WHERE version IN (55, 56, 57, 58);",
             )
             .unwrap();
 

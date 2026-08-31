@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use mcg_contracts::{
     AttemptId, CompletionCertificate, CompletionCertificateId, CompletionVerdict, ContentHash,
     ContextManifest, InvocationId, InvocationManifest, InvocationRole, ModelRun, ModelRunId,
-    ModelRunState, StableTypeId, VersionedPayload, WorkflowAttempt,
+    ModelRunState, RuntimeInvocationResult, StableTypeId, VersionedPayload, WorkflowAttempt,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::Serialize;
@@ -33,7 +33,193 @@ pub struct InvocationInspection {
     pub model_runs_truncated: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RuntimeResponseArtifact {
+    pub model_run_id: ModelRunId,
+    pub invocation_id: InvocationId,
+    pub response_hash: ContentHash,
+    pub response: VersionedPayload,
+    pub recorded_at: DateTime<Utc>,
+}
+
 impl SqliteEventStore {
+    /// Allocates the next durable cognition-worker generation under Root's single writer.
+    /// The value survives restart and can never be reset or skipped by ordinary storage APIs.
+    ///
+    /// # Errors
+    /// Returns a storage error for overflow, conflict, or transaction failure.
+    pub fn allocate_runtime_worker_generation(
+        &mut self,
+        now: DateTime<Utc>,
+    ) -> Result<u64, StorageError> {
+        let transaction = self.connection.transaction()?;
+        let current = transaction
+            .query_row(
+                "SELECT generation FROM runtime_worker_generations WHERE role = 'cognition'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?;
+        let generation = match current {
+            None => {
+                transaction.execute(
+                    "INSERT INTO runtime_worker_generations(role, generation, updated_at)
+                     VALUES ('cognition', 1, ?1)",
+                    [now.to_rfc3339()],
+                )?;
+                1
+            }
+            Some(current) => {
+                let current = u64::try_from(current).map_err(|_| {
+                    StorageError::InvalidData("negative Runtime worker generation".into())
+                })?;
+                let generation = current.checked_add(1).ok_or_else(|| {
+                    StorageError::InvalidData("Runtime worker generation overflow".into())
+                })?;
+                let changed = transaction.execute(
+                    "UPDATE runtime_worker_generations SET generation = ?1, updated_at = ?2
+                     WHERE role = 'cognition' AND generation = ?3",
+                    params![
+                        sql_u64(generation, "Runtime worker generation")?,
+                        now.to_rfc3339(),
+                        sql_u64(current, "current Runtime worker generation")?,
+                    ],
+                )?;
+                if changed != 1 {
+                    return Err(StorageError::Conflict(
+                        "Runtime worker generation changed before allocation".into(),
+                    ));
+                }
+                generation
+            }
+        };
+        transaction.commit()?;
+        Ok(generation)
+    }
+
+    /// Returns the last allocated cognition-worker generation.
+    ///
+    /// # Errors
+    /// Returns a storage error for query or invalid persisted data.
+    pub fn runtime_worker_generation(&self) -> Result<Option<u64>, StorageError> {
+        self.connection
+            .query_row(
+                "SELECT generation FROM runtime_worker_generations WHERE role = 'cognition'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+            .map(|generation| {
+                u64::try_from(generation).map_err(|_| {
+                    StorageError::InvalidData("negative Runtime worker generation".into())
+                })
+            })
+            .transpose()
+    }
+
+    /// Persists the exact immutable Runtime response behind a completed model-run artifact ref.
+    /// Exact replay is idempotent; identity or payload substitution fails closed.
+    ///
+    /// # Errors
+    /// Returns a storage error for malformed results, missing lineage, substitution, or I/O.
+    pub fn persist_runtime_response_artifact(
+        &mut self,
+        result: &RuntimeInvocationResult,
+        recorded_at: DateTime<Utc>,
+    ) -> Result<RuntimeResponseArtifact, StorageError> {
+        result
+            .validate()
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        let run = load_model_run_head(&self.connection, result.model_run_id)?.ok_or_else(|| {
+            StorageError::Conflict("runtime response model run does not exist".into())
+        })?;
+        if run.run.invocation_id != result.invocation_id || run.run.role != result.role {
+            return Err(StorageError::Conflict(
+                "runtime response does not bind the model-run invocation and role".into(),
+            ));
+        }
+        let manifest =
+            load_invocation(&self.connection, result.invocation_id)?.ok_or_else(|| {
+                StorageError::Conflict("runtime response invocation does not exist".into())
+            })?;
+        if manifest.request_hash != result.request_hash || manifest.role != result.role {
+            return Err(StorageError::Conflict(
+                "runtime response does not bind the exact invocation request".into(),
+            ));
+        }
+        let artifact = RuntimeResponseArtifact {
+            model_run_id: result.model_run_id,
+            invocation_id: result.invocation_id,
+            response_hash: result.response_hash.clone(),
+            response: result.response.clone(),
+            recorded_at,
+        };
+        if let Some(existing) = self.runtime_response_artifact(result.model_run_id)? {
+            if existing.model_run_id != artifact.model_run_id
+                || existing.invocation_id != artifact.invocation_id
+                || existing.response_hash != artifact.response_hash
+                || existing.response != artifact.response
+            {
+                return Err(StorageError::Conflict(
+                    "runtime response identity was replayed with different content".into(),
+                ));
+            }
+            return Ok(existing);
+        }
+        self.connection.execute(
+            "INSERT INTO runtime_response_artifacts(
+                model_run_id, invocation_id, response_hash_json, response_payload_json, recorded_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                result.model_run_id.to_string(),
+                result.invocation_id.to_string(),
+                serde_json::to_string(&result.response_hash)?,
+                serde_json::to_string(&result.response)?,
+                recorded_at.to_rfc3339(),
+            ],
+        )?;
+        Ok(artifact)
+    }
+
+    /// Loads the exact response retained for one model run.
+    ///
+    /// # Errors
+    /// Returns a storage error for query or stored-data failures.
+    pub fn runtime_response_artifact(
+        &self,
+        model_run_id: ModelRunId,
+    ) -> Result<Option<RuntimeResponseArtifact>, StorageError> {
+        self.connection
+            .query_row(
+                "SELECT invocation_id, response_hash_json, response_payload_json, recorded_at
+                 FROM runtime_response_artifacts WHERE model_run_id = ?1",
+                [model_run_id.to_string()],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
+            )
+            .optional()?
+            .map(|(invocation_id, response_hash, response, recorded_at)| {
+                Ok(RuntimeResponseArtifact {
+                    model_run_id,
+                    invocation_id: InvocationId(uuid::Uuid::parse_str(&invocation_id).map_err(
+                        |_| StorageError::InvalidData("invalid response invocation id".into()),
+                    )?),
+                    response_hash: serde_json::from_str(&response_hash)?,
+                    response: serde_json::from_str(&response)?,
+                    recorded_at: DateTime::parse_from_rfc3339(&recorded_at)
+                        .map_err(|error| StorageError::InvalidData(error.to_string()))?
+                        .with_timezone(&Utc),
+                })
+            })
+            .transpose()
+    }
+
     /// Persists one immutable, content-addressed record of exactly what reached a model.
     ///
     /// Exact replay returns the original hash. Reusing an identity with different content fails.
@@ -1129,6 +1315,123 @@ mod tests {
             store
                 .invocation_inspection(invocation.id, MAX_INVOCATION_INSPECTION_ITEMS + 1)
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn exact_runtime_response_artifact_survives_restart_and_rejects_substitution() {
+        let directory = tempdir().unwrap();
+        let database = directory.path().join("state.db");
+        let model_run_id;
+        let expected;
+        {
+            let mut store = SqliteEventStore::open(&database).unwrap();
+            let (contract, attempt) = workflow_fixture();
+            store
+                .create_workflow(&contract, &attempt, CorrelationId::new(), now())
+                .unwrap();
+            let context = context(attempt.attempt_id, "work");
+            let context_hash = store.persist_context_manifest(&context, now()).unwrap();
+            let invocation = invocation(&attempt, InvocationRole::Work, context_hash);
+            store
+                .persist_invocation_manifest(&invocation, now())
+                .unwrap();
+            let planned = run(&invocation);
+            model_run_id = planned.id;
+            store.create_model_run(&planned, now()).unwrap();
+            let mut dispatched = planned;
+            dispatched.state = ModelRunState::Dispatched;
+            dispatched.provider_request_id = Some("runtime-worker:1".into());
+            store.transition_model_run(&dispatched, 1, now()).unwrap();
+            let response = payload("test.runtime_response.v1", "exact-output");
+            let response_hash = response
+                .content_hash(mcg_contracts::RUNTIME_INVOCATION_RESPONSE_HASH_DOMAIN)
+                .unwrap();
+            let result = RuntimeInvocationResult {
+                worker_generation: 1,
+                invocation_id: invocation.id,
+                model_run_id,
+                role: InvocationRole::Work,
+                request_hash: invocation.request_hash,
+                response,
+                response_hash,
+                criterion_results: Vec::new(),
+                verdict: None,
+            };
+            expected = store
+                .persist_runtime_response_artifact(&result, now())
+                .unwrap();
+            assert_eq!(
+                store
+                    .persist_runtime_response_artifact(
+                        &result,
+                        now() + chrono::Duration::seconds(1),
+                    )
+                    .unwrap(),
+                expected
+            );
+            let mut substituted = result;
+            substituted.response = payload("test.runtime_response.v1", "substituted-output");
+            substituted.response_hash = substituted
+                .response
+                .content_hash(mcg_contracts::RUNTIME_INVOCATION_RESPONSE_HASH_DOMAIN)
+                .unwrap();
+            assert!(matches!(
+                store.persist_runtime_response_artifact(&substituted, now()),
+                Err(StorageError::Conflict(_))
+            ));
+            assert!(
+                store
+                    .connection
+                    .execute(
+                        "UPDATE runtime_response_artifacts SET recorded_at = recorded_at
+                         WHERE model_run_id = ?1",
+                        [model_run_id.to_string()],
+                    )
+                    .is_err()
+            );
+            assert!(
+                store
+                    .connection
+                    .execute(
+                        "DELETE FROM runtime_response_artifacts WHERE model_run_id = ?1",
+                        [model_run_id.to_string()],
+                    )
+                    .is_err()
+            );
+        }
+        let store = SqliteEventStore::open(&database).unwrap();
+        assert_eq!(
+            store.runtime_response_artifact(model_run_id).unwrap(),
+            Some(expected)
+        );
+    }
+
+    #[test]
+    fn runtime_worker_generation_advances_monotonically_across_restart() {
+        let directory = tempdir().unwrap();
+        let database = directory.path().join("state.db");
+        {
+            let mut store = SqliteEventStore::open(&database).unwrap();
+            assert_eq!(store.runtime_worker_generation().unwrap(), None);
+            assert_eq!(store.allocate_runtime_worker_generation(now()).unwrap(), 1);
+            assert_eq!(store.allocate_runtime_worker_generation(now()).unwrap(), 2);
+            assert!(
+                store
+                    .connection
+                    .execute(
+                        "UPDATE runtime_worker_generations SET generation = 4
+                         WHERE role = 'cognition'",
+                        [],
+                    )
+                    .is_err()
+            );
+        }
+        let mut reopened = SqliteEventStore::open(&database).unwrap();
+        assert_eq!(reopened.runtime_worker_generation().unwrap(), Some(2));
+        assert_eq!(
+            reopened.allocate_runtime_worker_generation(now()).unwrap(),
+            3
         );
     }
 

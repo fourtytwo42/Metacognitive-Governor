@@ -3,6 +3,10 @@
 //! Production executables enter the application through this crate so the
 //! existing compatibility API and every `SQLite` mutation share one Root owner.
 
+pub mod runtime_worker;
+
+pub use runtime_worker::{RuntimeWorkerClient, RuntimeWorkerClientError};
+
 use std::{
     collections::{BTreeSet, VecDeque},
     fs,
@@ -25,7 +29,8 @@ use mcg_contracts::{
     AuthenticatedRpcRequest, ContentHash, ContractError, CorrelationId, EffectClass, EffectOutcome,
     HashAlgorithm, PROTOCOL_V1, ReconciliationJob, ReconciliationJobId, ReconciliationObservation,
     RequestId, RootStatus, RpcEnvelope, RuntimeActorId, RuntimeIdentity, RuntimeInstanceId,
-    StableTypeId, VersionedPayload, WorkflowCancelRequest, WorkflowId, decode_canonical_cbor_v1,
+    RuntimeInvocationRequest, RuntimeInvocationResult, StableTypeId, VersionedPayload,
+    WorkflowCancelRequest, WorkflowId, decode_canonical_cbor_v1,
 };
 use mcg_platform::{
     PlatformError, ROOT_ACTION_LIST_REQUEST_TYPE, ROOT_ACTION_LIST_RESPONSE_TYPE,
@@ -69,6 +74,8 @@ pub enum ProtectedRootError {
     Serialization(#[from] serde_json::Error),
     #[error(transparent)]
     ActionProtocol(#[from] ActionRunnerProtocolError),
+    #[error(transparent)]
+    RuntimeWorker(#[from] RuntimeWorkerClientError),
     #[error("authorized action execution was not found")]
     ActionNotFound,
     #[error("configured Root API address is invalid: {0}")]
@@ -86,6 +93,74 @@ pub struct GovernedActionDispatchReceipt {
 pub struct GovernedActionReconciliationReceipt {
     pub resolution: ReconciliationResolutionReceipt,
     pub runner_response: Option<ActionRunnerResponse>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RuntimeInvocationDispatchReceipt {
+    pub result: RuntimeInvocationResult,
+    pub response_artifact: mcg_storage::RuntimeResponseArtifact,
+    pub completed_run: mcg_storage::ModelRunRecord,
+}
+
+/// Allocates a durable Root-owned generation and authenticates the fixed adjacent worker.
+///
+/// # Errors
+/// Returns an error when generation allocation, launch, or handshake fails.
+pub async fn launch_runtime_worker(
+    runtime: &AppRuntime,
+    root_executable: impl AsRef<Path>,
+    data_directory: impl AsRef<Path>,
+) -> Result<RuntimeWorkerClient, ProtectedRootError> {
+    let generation = runtime.allocate_runtime_worker_generation()?;
+    Ok(RuntimeWorkerClient::adjacent_to_root(root_executable, data_directory, generation).await?)
+}
+
+/// Persists exact Runtime intent before dispatch, sends it only to the authenticated generation,
+/// and accepts the returned proposal only while the workflow revision and lease remain current.
+/// Any post-dispatch transport or commit ambiguity is durably classified `OutcomeUnknown`.
+///
+/// # Errors
+/// Returns an error for stale authority, persistence failure, worker failure, or substituted data.
+pub async fn execute_runtime_invocation(
+    runtime: &AppRuntime,
+    client: &mut RuntimeWorkerClient,
+    request: &RuntimeInvocationRequest,
+    now: chrono::DateTime<Utc>,
+) -> Result<RuntimeInvocationDispatchReceipt, ProtectedRootError> {
+    if request.worker_generation != client.worker_generation()
+        || request.invocation_manifest.runtime_identity != client.hello().runtime_identity
+        || request.invocation_manifest.runtime_build != client.hello().executable_hash
+    {
+        return Err(RuntimeWorkerClientError::InvalidResponse.into());
+    }
+    runtime.plan_runtime_invocation(request, now)?;
+    runtime.dispatch_runtime_invocation(request, Utc::now())?;
+    let result = match client.invoke(request).await {
+        Ok(result) => result,
+        Err(error) => {
+            runtime.settle_runtime_invocation_without_result(
+                request,
+                mcg_contracts::ModelRunState::OutcomeUnknown,
+                Utc::now(),
+            )?;
+            return Err(error.into());
+        }
+    };
+    match runtime.complete_runtime_invocation(request, &result, Utc::now()) {
+        Ok((completed_run, response_artifact)) => Ok(RuntimeInvocationDispatchReceipt {
+            result,
+            response_artifact,
+            completed_run,
+        }),
+        Err(error) => {
+            let _ = runtime.settle_runtime_invocation_without_result(
+                request,
+                mcg_contracts::ModelRunState::OutcomeUnknown,
+                Utc::now(),
+            );
+            Err(error.into())
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -811,6 +886,34 @@ pub async fn serve(config: AppConfig) -> Result<(), Box<dyn std::error::Error>> 
     let address: SocketAddr = config.bind_address.parse()?;
     let data_directory = config.data_directory.clone();
     let runtime = open(config)?;
+    let root_executable = std::env::current_exe()?;
+    let runtime_worker_name = if cfg!(windows) {
+        "mcg-runtime-worker.exe"
+    } else {
+        "mcg-runtime-worker"
+    };
+    let runtime_worker_path = root_executable
+        .parent()
+        .map(|parent| parent.join(runtime_worker_name));
+    let runtime_worker = if runtime_worker_path
+        .as_ref()
+        .is_some_and(|path| path.is_file())
+    {
+        let worker = launch_runtime_worker(&runtime, &root_executable, &data_directory).await?;
+        info!(
+            process_id = worker.hello().process_id,
+            generation = worker.worker_generation(),
+            runtime_instance = %worker.hello().runtime_identity.instance_id,
+            "authenticated adjacent cognition Runtime worker"
+        );
+        Some(worker)
+    } else {
+        warn!(
+            path = ?runtime_worker_path,
+            "Runtime worker sidecar is absent; deterministic cognition dispatch is unavailable"
+        );
+        None
+    };
 
     // Internal role threads are recoverable implementation details, not user-owned tasks.
     match runtime.archive_owned_codex_threads_from_recents().await {
@@ -832,6 +935,11 @@ pub async fn serve(config: AppConfig) -> Result<(), Box<dyn std::error::Error>> 
         reconciliation.abort();
     }
     ipc.abort();
+    if let Some(worker) = runtime_worker
+        && let Err(error) = worker.shutdown().await
+    {
+        warn!(%error, "Runtime worker required forced cleanup during Root shutdown");
+    }
     drop(session_guard);
     api_result?;
     info!("MetaCog Protected Root stopped cleanly");

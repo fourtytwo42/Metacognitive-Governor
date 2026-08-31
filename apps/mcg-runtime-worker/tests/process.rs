@@ -1,22 +1,28 @@
 use std::process::Stdio;
 
 use chrono::{Duration, Utc};
+use mcg_config::AppConfig;
 use mcg_contracts::{
-    AuthenticatedRpcRequest, CompletionVerdict, ContentHash, ContextManifest, ContextManifestId,
-    ContextSelection, CorrelationId, DeterministicCriterionEvidence, DeterministicVerifyInput,
-    InvocationId, InvocationManifest, InvocationRole, ModelRunId, PROTOCOL_V1,
-    RUNTIME_INVOCATION_REQUEST_HASH_DOMAIN, RUNTIME_WORKER_ACK_MESSAGE_TYPE,
+    AuthenticatedRpcRequest, CompletionCertificate, CompletionCertificateId, CompletionVerdict,
+    ConfigurationId, ContentHash, ContextManifest, ContextManifestId, ContextSelection,
+    ContractClause, CorrelationId, DeterministicCriterionEvidence, DeterministicVerifyInput,
+    HashAlgorithm, InvocationId, InvocationManifest, InvocationRole, ModelRunId, PROTOCOL_V1,
+    PolicyBinding, RUNTIME_INVOCATION_REQUEST_HASH_DOMAIN, RUNTIME_WORKER_ACK_MESSAGE_TYPE,
     RUNTIME_WORKER_HELLO_MESSAGE_TYPE, RUNTIME_WORKER_INVOKE_MESSAGE_TYPE,
     RUNTIME_WORKER_RESULT_MESSAGE_TYPE, RUNTIME_WORKER_SHUTDOWN_MESSAGE_TYPE, RequestId,
-    RpcEnvelope, RuntimeInstanceId, RuntimeInvocationRequest, RuntimeInvocationResult,
-    RuntimeWorkerControl, RuntimeWorkerHello, SourceRef, StableTypeId, TaskContractId,
-    VersionedPayload, VersionedRef, canonical_contract_hash, decode_canonical_cbor_v1,
+    RetryPolicy, RpcEnvelope, RuntimeActorId, RuntimeInstanceId, RuntimeInvocationRequest,
+    RuntimeInvocationResult, RuntimeWorkerControl, RuntimeWorkerHello, SourceRef, StableTypeId,
+    TaskContract, TaskContractId, TaskContractStatus, VersionedPayload, VersionedRef,
+    WorkflowAttempt, WorkflowCancelRequest, WorkflowId, WorkflowState, canonical_contract_hash,
+    decode_canonical_cbor_v1,
 };
 use mcg_platform::{
     LocalIpcStream, RuntimeWorkerListener, RuntimeWorkerSession, create_runtime_worker_session,
-    read_canonical_frame, write_canonical_frame,
+    read_canonical_frame, runtime_worker_executable_hash, write_canonical_frame,
 };
-use mcg_runtime_worker::executable_hash;
+use mcg_protected_root::{RuntimeWorkerClient, execute_runtime_invocation, launch_runtime_worker};
+use mcg_runtime::AppRuntime;
+use mcg_storage::{SqliteEventStore, task_contract_content_hash};
 use tempfile::TempDir;
 use tokio::{process::Child, time::timeout};
 
@@ -35,7 +41,7 @@ async fn launch() -> Harness {
     let session = create_runtime_worker_session(
         directory.path(),
         1,
-        executable_hash(executable).unwrap(),
+        runtime_worker_executable_hash(executable).unwrap(),
         Utc::now() + Duration::seconds(30),
     )
     .unwrap();
@@ -104,6 +110,87 @@ fn source(label: &str) -> SourceRef {
     }
 }
 
+fn policy(label: &str) -> PolicyBinding {
+    let payload = VersionedPayload::canonical_v1(
+        StableTypeId::parse("test.runtime_policy.v1").unwrap(),
+        &serde_json::json!({"label": label}),
+    )
+    .unwrap();
+    PolicyBinding {
+        content_hash: payload.content_hash("TestRuntimePolicy").unwrap(),
+        payload,
+    }
+}
+
+fn workflow_fixture(now: chrono::DateTime<Utc>) -> (TaskContract, WorkflowAttempt) {
+    let task_id = TaskContractId::new();
+    let clause = ContractClause {
+        clause_id: "criterion-1".into(),
+        statement: "deterministic Runtime result is retained".into(),
+        source_refs: vec![source("criterion")],
+    };
+    let contract = TaskContract {
+        id: task_id,
+        version: 1,
+        previous_version: None,
+        user_intent_ref: source("intent"),
+        objective: "execute one Root-supervised deterministic invocation".into(),
+        non_goals: Vec::new(),
+        requirements: vec![clause.clone()],
+        constraints: Vec::new(),
+        assumptions: Vec::new(),
+        acceptance_criteria: vec![clause],
+        dependencies: Vec::new(),
+        permitted_side_effects: policy("none"),
+        authority: policy("root"),
+        environment: policy("isolated"),
+        risk: policy("low"),
+        budgets: policy("bounded"),
+        rollback: policy("none"),
+        status: TaskContractStatus::Active,
+        created_at: now,
+    };
+    let mut attempt = WorkflowAttempt {
+        workflow_id: WorkflowId::new(),
+        attempt_id: mcg_contracts::AttemptId::new(),
+        task_contract: VersionedRef {
+            id: task_id,
+            version: 1,
+            content_hash: ContentHash {
+                algorithm: HashAlgorithm::Blake3_256,
+                domain: "placeholder".into(),
+                digest_hex: "0".repeat(64),
+            },
+        },
+        parent_attempt_id: None,
+        attempt_number: 1,
+        state: WorkflowState::Ready,
+        revision: 1,
+        lease_owner: None,
+        lease_generation: 0,
+        lease_expires_at: None,
+        heartbeat_at: None,
+        checkpoint: None,
+        environment_snapshot: hash("environment"),
+        configuration: VersionedRef {
+            id: ConfigurationId::new(),
+            version: 1,
+            content_hash: hash("configuration"),
+        },
+        idempotency_key: "runtime-workflow-create".into(),
+        retry_policy: RetryPolicy {
+            max_attempts: 2,
+            initial_backoff_ms: 100,
+            maximum_backoff_ms: 1_000,
+        },
+        compensation_policy: policy("none"),
+        created_at: now,
+        updated_at: now,
+    };
+    attempt.task_contract.content_hash = task_contract_content_hash(&contract).unwrap();
+    (contract, attempt)
+}
+
 fn context(attempt_id: mcg_contracts::AttemptId, label: &str) -> ContextManifest {
     ContextManifest {
         id: ContextManifestId::new(),
@@ -131,11 +218,38 @@ fn context(attempt_id: mcg_contracts::AttemptId, label: &str) -> ContextManifest
 }
 
 fn invocation_request(
-    harness: &Harness,
+    hello: &RuntimeWorkerHello,
+    worker_generation: u64,
     role: InvocationRole,
     input: VersionedPayload,
 ) -> RuntimeInvocationRequest {
-    let attempt_id = mcg_contracts::AttemptId::new();
+    invocation_request_for(
+        hello,
+        worker_generation,
+        role,
+        input,
+        mcg_contracts::AttemptId::new(),
+        VersionedRef {
+            id: TaskContractId::new(),
+            version: 1,
+            content_hash: hash("task-contract"),
+        },
+        1,
+        0,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn invocation_request_for(
+    hello: &RuntimeWorkerHello,
+    worker_generation: u64,
+    role: InvocationRole,
+    input: VersionedPayload,
+    attempt_id: mcg_contracts::AttemptId,
+    task_contract: VersionedRef<TaskContractId>,
+    attempt_revision: u64,
+    lease_generation: u64,
+) -> RuntimeInvocationRequest {
     let context = context(
         attempt_id,
         match role {
@@ -156,12 +270,8 @@ fn invocation_request(
         id: InvocationId::new(),
         role,
         attempt_id,
-        task_contract: VersionedRef {
-            id: TaskContractId::new(),
-            version: 1,
-            content_hash: hash("task-contract"),
-        },
-        runtime_identity: harness.hello.runtime_identity.clone(),
+        task_contract,
+        runtime_identity: hello.runtime_identity.clone(),
         cognitive_configuration: hash("configuration"),
         role_manifest: hash(match role {
             InvocationRole::Work => "work-role",
@@ -189,14 +299,14 @@ fn invocation_request(
         egress_permit: None,
         repository_revision: Some(hash("revision")),
         environment: source("environment"),
-        runtime_build: harness.hello.runtime_identity.build_hash.clone(),
+        runtime_build: hello.runtime_identity.build_hash.clone(),
         request_hash,
         response_hash: None,
     };
     RuntimeInvocationRequest {
-        worker_generation: harness.session.worker_generation,
-        attempt_revision: 1,
-        lease_generation: 0,
+        worker_generation,
+        attempt_revision,
+        lease_generation,
         context_manifest: context,
         invocation_manifest: invocation,
         model_run_id: ModelRunId::new(),
@@ -270,7 +380,12 @@ async fn separate_worker_authenticates_and_runs_distinct_work_and_verify() {
         &serde_json::json!({"objective": "deterministic result"}),
     )
     .unwrap();
-    let work_request = invocation_request(&harness, InvocationRole::Work, work_input);
+    let work_request = invocation_request(
+        &harness.hello,
+        harness.session.worker_generation,
+        InvocationRole::Work,
+        work_input,
+    );
     let response = exchange(
         &mut harness,
         RUNTIME_WORKER_INVOKE_MESSAGE_TYPE,
@@ -296,7 +411,12 @@ async fn separate_worker_authenticates_and_runs_distinct_work_and_verify() {
         &serde_json::to_value(verify_input).unwrap(),
     )
     .unwrap();
-    let verify_request = invocation_request(&harness, InvocationRole::Verify, verify_payload);
+    let verify_request = invocation_request(
+        &harness.hello,
+        harness.session.worker_generation,
+        InvocationRole::Verify,
+        verify_payload,
+    );
     let response = exchange(
         &mut harness,
         RUNTIME_WORKER_INVOKE_MESSAGE_TYPE,
@@ -337,9 +457,45 @@ async fn wrong_capability_is_rejected_without_execution() {
         &serde_json::json!({"objective": "must not execute"}),
     )
     .unwrap();
-    let invocation = invocation_request(&harness, InvocationRole::Work, input);
+    let invocation = invocation_request(
+        &harness.hello,
+        harness.session.worker_generation,
+        InvocationRole::Work,
+        input,
+    );
     let mut request = root_request(&harness, RUNTIME_WORKER_INVOKE_MESSAGE_TYPE, &invocation);
     request.session_capability = "0".repeat(64);
+    write_canonical_frame(&mut harness.stream, &request)
+        .await
+        .unwrap();
+    assert!(
+        !timeout(std::time::Duration::from_secs(5), harness.child.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .success()
+    );
+}
+
+#[tokio::test]
+async fn duplicate_authenticated_request_is_rejected_as_replay() {
+    let mut harness = launch().await;
+    let input = VersionedPayload::canonical_v1(
+        StableTypeId::parse("test.work_input.v1").unwrap(),
+        &serde_json::json!({"objective": "execute only once"}),
+    )
+    .unwrap();
+    let invocation = invocation_request(
+        &harness.hello,
+        harness.session.worker_generation,
+        InvocationRole::Work,
+        input,
+    );
+    let request = root_request(&harness, RUNTIME_WORKER_INVOKE_MESSAGE_TYPE, &invocation);
+    write_canonical_frame(&mut harness.stream, &request)
+        .await
+        .unwrap();
+    let _: RpcEnvelope = read_canonical_frame(&mut harness.stream).await.unwrap();
     write_canonical_frame(&mut harness.stream, &request)
         .await
         .unwrap();
@@ -356,7 +512,7 @@ async fn wrong_capability_is_rejected_without_execution() {
 async fn executable_substitution_fails_before_connecting() {
     let directory = tempfile::tempdir().unwrap();
     let executable = env!("CARGO_BIN_EXE_mcg-runtime-worker");
-    let mut wrong_hash = executable_hash(executable).unwrap();
+    let mut wrong_hash = runtime_worker_executable_hash(executable).unwrap();
     wrong_hash.digest_hex = "0".repeat(64);
     let session = create_runtime_worker_session(
         directory.path(),
@@ -386,10 +542,441 @@ async fn executable_substitution_fails_before_connecting() {
     );
 }
 
+#[tokio::test]
+async fn production_root_client_authenticates_invokes_and_shuts_down_exact_child() {
+    let directory = tempfile::tempdir().unwrap();
+    let executable = env!("CARGO_BIN_EXE_mcg-runtime-worker");
+    let mut client = RuntimeWorkerClient::launch(
+        executable,
+        directory.path(),
+        17,
+        std::time::Duration::from_secs(5),
+        std::time::Duration::from_secs(5),
+        std::time::Duration::from_secs(30),
+    )
+    .await
+    .unwrap();
+    assert_eq!(client.hello().worker_generation, 17);
+    assert_eq!(
+        client.hello().executable_hash.domain,
+        "MetaCog.RuntimeWorkerExecutable"
+    );
+
+    let input = VersionedPayload::canonical_v1(
+        StableTypeId::parse("test.work_input.v1").unwrap(),
+        &serde_json::json!({"task": "root-supervised"}),
+    )
+    .unwrap();
+    let request = invocation_request(client.hello(), 17, InvocationRole::Work, input);
+    let mut stale = request.clone();
+    stale.worker_generation = 18;
+    assert!(client.invoke(&stale).await.is_err());
+
+    let result = client.invoke(&request).await.unwrap();
+    assert_eq!(result.worker_generation, 17);
+    assert_eq!(result.invocation_id, request.invocation_manifest.id);
+    assert_eq!(result.model_run_id, request.model_run_id);
+    assert_eq!(result.role, InvocationRole::Work);
+    assert!(result.verdict.is_none());
+    client.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn production_root_client_enforces_one_bounded_request_deadline() {
+    let directory = tempfile::tempdir().unwrap();
+    let executable = env!("CARGO_BIN_EXE_mcg-runtime-worker");
+    let mut client = RuntimeWorkerClient::launch(
+        executable,
+        directory.path(),
+        19,
+        std::time::Duration::from_secs(5),
+        std::time::Duration::from_nanos(1),
+        std::time::Duration::from_secs(30),
+    )
+    .await
+    .unwrap();
+    let input = VersionedPayload::canonical_v1(
+        StableTypeId::parse("test.work_input.v1").unwrap(),
+        &serde_json::json!({"task": "deadline"}),
+    )
+    .unwrap();
+    let request = invocation_request(client.hello(), 19, InvocationRole::Work, input);
+    assert!(client.invoke(&request).await.is_err());
+    assert!(matches!(
+        client.invoke(&request).await,
+        Err(mcg_protected_root::RuntimeWorkerClientError::Unavailable)
+    ));
+    client.terminate().await.unwrap();
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // One complete Work/Verify/certificate/restart proof.
+async fn protected_root_commits_real_work_verify_completion_certificate() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = AppConfig {
+        data_directory: directory.path().join("completion-profile"),
+        ..AppConfig::default()
+    };
+    let restart_config = config.clone();
+    std::fs::create_dir_all(&config.data_directory).unwrap();
+    let now = Utc::now();
+    let (contract, ready) = workflow_fixture(now);
+    let running = {
+        let mut store = SqliteEventStore::open(config.database_path()).unwrap();
+        store
+            .create_workflow(&contract, &ready, CorrelationId::new(), now)
+            .unwrap();
+        store
+            .claim_workflow_attempt(
+                ready.attempt_id,
+                ready.revision,
+                ready.lease_generation,
+                RuntimeActorId::new(),
+                now + Duration::minutes(5),
+                CorrelationId::new(),
+                "completion-workflow-claim",
+                now,
+            )
+            .unwrap()
+    };
+    let runtime = AppRuntime::open(config).unwrap();
+    let executable = env!("CARGO_BIN_EXE_mcg-runtime-worker");
+    let mut client = launch_runtime_worker(&runtime, executable, directory.path())
+        .await
+        .unwrap();
+    assert_eq!(client.worker_generation(), 1);
+
+    let work_input = VersionedPayload::canonical_v1(
+        StableTypeId::parse("test.work_input.v1").unwrap(),
+        &serde_json::json!({"task": "work-then-independent-verify"}),
+    )
+    .unwrap();
+    let work_request = invocation_request_for(
+        client.hello(),
+        client.worker_generation(),
+        InvocationRole::Work,
+        work_input,
+        running.attempt_id,
+        running.task_contract.clone(),
+        running.revision,
+        running.lease_generation,
+    );
+    let work = execute_runtime_invocation(&runtime, &mut client, &work_request, Utc::now())
+        .await
+        .unwrap();
+    let verifying = runtime
+        .begin_runtime_verification(
+            running.attempt_id,
+            running.revision,
+            running.lease_generation,
+            "begin-independent-verification",
+            Utc::now(),
+        )
+        .unwrap();
+    let verify_input = DeterministicVerifyInput {
+        work_response_hash: work.result.response_hash.clone(),
+        criteria: vec![DeterministicCriterionEvidence {
+            clause_id: "criterion-1".into(),
+            passed: true,
+            evidence_refs: vec![source("work-output-evidence")],
+        }],
+    };
+    let verify_payload = VersionedPayload::canonical_v1(
+        StableTypeId::parse(DeterministicVerifyInput::TYPE_ID).unwrap(),
+        &serde_json::to_value(&verify_input).unwrap(),
+    )
+    .unwrap();
+    let verify_request = invocation_request_for(
+        client.hello(),
+        client.worker_generation(),
+        InvocationRole::Verify,
+        verify_payload,
+        verifying.attempt_id,
+        verifying.task_contract.clone(),
+        verifying.revision,
+        verifying.lease_generation,
+    );
+    let verify = execute_runtime_invocation(&runtime, &mut client, &verify_request, Utc::now())
+        .await
+        .unwrap();
+    assert_eq!(verify.result.verdict, Some(CompletionVerdict::Satisfied));
+    let certificate = CompletionCertificate {
+        id: CompletionCertificateId::new(),
+        workflow_id: verifying.workflow_id,
+        attempt_id: verifying.attempt_id,
+        task_contract: verifying.task_contract.clone(),
+        work_invocations: vec![work_request.invocation_manifest.id],
+        verify_invocations: vec![verify_request.invocation_manifest.id],
+        criterion_results: verify.result.criterion_results.clone(),
+        evidence_refs: vec![source("completion-evidence")],
+        tests_run: vec![source("deterministic-runtime-e2e")],
+        artifacts: vec![
+            work.completed_run.run.response_artifact.clone().unwrap(),
+            verify.completed_run.run.response_artifact.clone().unwrap(),
+        ],
+        known_untested_paths: Vec::new(),
+        unresolved_assumptions: Vec::new(),
+        remaining_risks: Vec::new(),
+        verdict: verify.result.verdict.unwrap(),
+        issued_at: Utc::now(),
+    };
+    let (_, settled) = runtime
+        .commit_runtime_completion(
+            &certificate,
+            verifying.revision,
+            verifying.lease_generation,
+            Utc::now(),
+        )
+        .unwrap();
+    assert_eq!(settled.state, WorkflowState::Succeeded);
+    client.shutdown().await.unwrap();
+    drop(runtime);
+
+    let restarted = AppRuntime::open(restart_config).unwrap();
+    assert_eq!(
+        restarted
+            .canonical_workflow(settled.workflow_id)
+            .unwrap()
+            .unwrap()
+            .attempt
+            .state,
+        WorkflowState::Succeeded
+    );
+    assert_eq!(
+        restarted
+            .runtime_invocation(verify_request.invocation_manifest.id, 10)
+            .unwrap()
+            .unwrap()
+            .model_runs
+            .last()
+            .unwrap()
+            .run
+            .state,
+        mcg_contracts::ModelRunState::Completed
+    );
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // One ordered process/restart scenario retains causal evidence.
+async fn protected_root_persists_real_worker_plan_dispatch_result_and_response() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = AppConfig {
+        data_directory: directory.path().join("profile"),
+        ..AppConfig::default()
+    };
+    let restart_config = config.clone();
+    std::fs::create_dir_all(&config.data_directory).unwrap();
+    let now = Utc::now();
+    let (contract, ready) = workflow_fixture(now);
+    let running = {
+        let mut store = SqliteEventStore::open(config.database_path()).unwrap();
+        store
+            .create_workflow(&contract, &ready, CorrelationId::new(), now)
+            .unwrap();
+        store
+            .claim_workflow_attempt(
+                ready.attempt_id,
+                ready.revision,
+                ready.lease_generation,
+                RuntimeActorId::new(),
+                now + Duration::minutes(5),
+                CorrelationId::new(),
+                "runtime-workflow-claim",
+                now,
+            )
+            .unwrap()
+    };
+    let runtime = AppRuntime::open(config).unwrap();
+    let executable = env!("CARGO_BIN_EXE_mcg-runtime-worker");
+    let mut client = RuntimeWorkerClient::launch(
+        executable,
+        directory.path(),
+        23,
+        std::time::Duration::from_secs(5),
+        std::time::Duration::from_secs(5),
+        std::time::Duration::from_secs(30),
+    )
+    .await
+    .unwrap();
+    let input = VersionedPayload::canonical_v1(
+        StableTypeId::parse("test.work_input.v1").unwrap(),
+        &serde_json::json!({"task": "persist-every-boundary"}),
+    )
+    .unwrap();
+    let request = invocation_request_for(
+        client.hello(),
+        client.worker_generation(),
+        InvocationRole::Work,
+        input,
+        running.attempt_id,
+        running.task_contract.clone(),
+        running.revision,
+        running.lease_generation,
+    );
+    let receipt = execute_runtime_invocation(&runtime, &mut client, &request, Utc::now())
+        .await
+        .unwrap();
+    assert_eq!(
+        receipt.completed_run.run.state,
+        mcg_contracts::ModelRunState::Completed
+    );
+    assert_eq!(
+        receipt.response_artifact.response_hash,
+        receipt.result.response_hash
+    );
+    let inspection = runtime
+        .runtime_invocation(request.invocation_manifest.id, 10)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        inspection
+            .model_runs
+            .iter()
+            .map(|record| record.run.state)
+            .collect::<Vec<_>>(),
+        [
+            mcg_contracts::ModelRunState::Planned,
+            mcg_contracts::ModelRunState::Dispatched,
+            mcg_contracts::ModelRunState::Completed,
+        ]
+    );
+    assert_eq!(
+        runtime.runtime_response(request.model_run_id).unwrap(),
+        Some(receipt.response_artifact.clone())
+    );
+
+    let death_input = VersionedPayload::canonical_v1(
+        StableTypeId::parse("test.work_input.v1").unwrap(),
+        &serde_json::json!({"task": "worker-dies-before-dispatch-channel"}),
+    )
+    .unwrap();
+    let death_request = invocation_request_for(
+        client.hello(),
+        client.worker_generation(),
+        InvocationRole::Work,
+        death_input,
+        running.attempt_id,
+        running.task_contract.clone(),
+        running.revision,
+        running.lease_generation,
+    );
+    client.terminate().await.unwrap();
+    assert!(
+        execute_runtime_invocation(&runtime, &mut client, &death_request, Utc::now())
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        runtime
+            .runtime_invocation(death_request.invocation_manifest.id, 10)
+            .unwrap()
+            .unwrap()
+            .model_runs
+            .last()
+            .unwrap()
+            .run
+            .state,
+        mcg_contracts::ModelRunState::OutcomeUnknown
+    );
+
+    let mut late_client = RuntimeWorkerClient::launch(
+        executable,
+        directory.path(),
+        24,
+        std::time::Duration::from_secs(5),
+        std::time::Duration::from_secs(5),
+        std::time::Duration::from_secs(30),
+    )
+    .await
+    .unwrap();
+
+    let late_input = VersionedPayload::canonical_v1(
+        StableTypeId::parse("test.work_input.v1").unwrap(),
+        &serde_json::json!({"task": "must-not-commit-after-cancel"}),
+    )
+    .unwrap();
+    let late_request = invocation_request_for(
+        late_client.hello(),
+        late_client.worker_generation(),
+        InvocationRole::Work,
+        late_input,
+        running.attempt_id,
+        running.task_contract,
+        running.revision,
+        running.lease_generation,
+    );
+    runtime
+        .plan_runtime_invocation(&late_request, Utc::now())
+        .unwrap();
+    runtime
+        .dispatch_runtime_invocation(&late_request, Utc::now())
+        .unwrap();
+    runtime
+        .cancel_canonical_workflow(&WorkflowCancelRequest {
+            attempt_id: running.attempt_id,
+            expected_revision: running.revision,
+            expected_generation: running.lease_generation,
+            idempotency_key: "cancel-before-late-runtime-result".into(),
+        })
+        .unwrap();
+    let late_result = late_client.invoke(&late_request).await.unwrap();
+    assert!(
+        runtime
+            .complete_runtime_invocation(&late_request, &late_result, Utc::now())
+            .is_err()
+    );
+    runtime
+        .settle_runtime_invocation_without_result(
+            &late_request,
+            mcg_contracts::ModelRunState::OutcomeUnknown,
+            Utc::now(),
+        )
+        .unwrap();
+    assert_eq!(
+        runtime
+            .runtime_invocation(late_request.invocation_manifest.id, 10)
+            .unwrap()
+            .unwrap()
+            .model_runs
+            .last()
+            .unwrap()
+            .run
+            .state,
+        mcg_contracts::ModelRunState::OutcomeUnknown
+    );
+    late_client.shutdown().await.unwrap();
+    drop(runtime);
+    let restarted = AppRuntime::open(restart_config).unwrap();
+    assert_eq!(
+        restarted
+            .runtime_invocation(death_request.invocation_manifest.id, 10)
+            .unwrap()
+            .unwrap()
+            .model_runs
+            .last()
+            .unwrap()
+            .run
+            .state,
+        mcg_contracts::ModelRunState::OutcomeUnknown
+    );
+    assert_eq!(
+        restarted.runtime_response(request.model_run_id).unwrap(),
+        Some(receipt.response_artifact)
+    );
+}
+
 #[test]
 fn runtime_worker_dependency_tree_excludes_protected_implementations() {
     let metadata = std::process::Command::new(env!("CARGO"))
-        .args(["tree", "-p", "mcg-runtime-worker", "--prefix", "none"])
+        .args([
+            "tree",
+            "-p",
+            "mcg-runtime-worker",
+            "--edges",
+            "normal",
+            "--prefix",
+            "none",
+        ])
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .output()
         .unwrap();

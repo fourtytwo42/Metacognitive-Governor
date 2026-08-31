@@ -17,6 +17,10 @@ tokio.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+mcg-config = { path = "../../crates/mcg-config" }
+mcg-protected-root = { path = "../../crates/mcg-protected-root" }
+mcg-runtime = { path = "../../crates/mcg-runtime" }
+mcg-storage = { path = "../../crates/mcg-storage" }
 tempfile.workspace = true
 
 [lints]

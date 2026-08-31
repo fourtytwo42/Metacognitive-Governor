@@ -4400,8 +4400,12 @@ name = "mcg-runtime-worker"
 version = "0.4.67"
 dependencies = [
  "chrono",
+ "mcg-config",
  "mcg-contracts",
  "mcg-platform",
+ "mcg-protected-root",
+ "mcg-runtime",
+ "mcg-storage",
  "serde",
  "serde_json",
  "sha2 0.10.9",

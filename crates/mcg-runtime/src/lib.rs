@@ -59,9 +59,11 @@ use mcg_config::{
 };
 use mcg_contracts::{
     ActionEnvelope, ActionExecution, ActionExecutionId, ActionId, ActionInspection, ActionReceipt,
-    ActionSummary, CorrelationId, EffectOutcome, ReconciliationJob, ReconciliationJobId,
-    ReconciliationObservation, RuntimeActorId, RuntimeIdentity, WorkflowAttempt,
-    WorkflowCancelRequest, WorkflowId, WorkflowInspection, WorkflowState,
+    ActionSummary, ArtifactRef, CompletionCertificate, CompletionVerdict, ContentHash,
+    CorrelationId, EffectOutcome, InvocationId, ModelRun, ModelRunState, ReconciliationJob,
+    ReconciliationJobId, ReconciliationObservation, RuntimeActorId, RuntimeIdentity,
+    RuntimeInvocationRequest, RuntimeInvocationResult, WorkflowAttempt, WorkflowCancelRequest,
+    WorkflowId, WorkflowInspection, WorkflowState,
 };
 use mcg_domain::{
     AgentContextCheckpoint, AgentContextCheckpointCause, AgentContextCheckpointId,
@@ -147,9 +149,9 @@ use mcg_storage::{
     AgentTurnDisposition, BackupMcpSecret, BackupProviderSecret, BackupSecretSnapshot,
     DataDirectoryLock, ReconciliationClaimReceipt, ReconciliationRecoveryReport,
     ReconciliationResolutionReceipt, RecoveryReport, RootMigrationReceipt, RootOwnership,
-    STORAGE_SCHEMA_VERSION, SqliteEventStore, StorageError, WorkflowRecoveryReport,
-    acquire_data_directory_lock, create_encrypted_backup_bundle_from_snapshot,
-    decrypt_backup_bundle_secrets,
+    RuntimeResponseArtifact, STORAGE_SCHEMA_VERSION, SqliteEventStore, StorageError,
+    WorkflowRecoveryReport, acquire_data_directory_lock,
+    create_encrypted_backup_bundle_from_snapshot, decrypt_backup_bundle_secrets,
 };
 pub use mcg_storage::{
     AgentTurnCommit, AutomaticExperimentDisposition, AutomaticExperimentOutcome,
@@ -3304,6 +3306,62 @@ impl std::fmt::Debug for AppRuntime {
     }
 }
 
+fn validate_runtime_invocation_attempt(
+    attempt: &WorkflowAttempt,
+    request: &RuntimeInvocationRequest,
+) -> Result<(), StorageError> {
+    let role_matches_state = matches!(
+        (request.invocation_manifest.role, attempt.state),
+        (mcg_contracts::InvocationRole::Work, WorkflowState::Running)
+            | (
+                mcg_contracts::InvocationRole::Verify,
+                WorkflowState::Verifying
+            )
+    );
+    if attempt.revision != request.attempt_revision
+        || !attempt.accepts_worker_result(
+            request.invocation_manifest.attempt_id,
+            request.lease_generation,
+        )
+        || !role_matches_state
+    {
+        return Err(StorageError::Conflict(
+            "runtime invocation does not belong to the current workflow revision, lease, or role state"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
+fn current_runtime_model_run(
+    store: &SqliteEventStore,
+    request: &RuntimeInvocationRequest,
+) -> Result<mcg_storage::ModelRunRecord, StorageError> {
+    let inspection = store
+        .invocation_inspection(request.invocation_manifest.id, 1_000)?
+        .ok_or_else(|| {
+            StorageError::Conflict("runtime invocation evidence does not exist".into())
+        })?;
+    if inspection.manifest != request.invocation_manifest
+        || inspection.context_manifest != request.context_manifest
+    {
+        return Err(StorageError::Conflict(
+            "runtime invocation evidence differs from the dispatched request".into(),
+        ));
+    }
+    let current = inspection
+        .model_runs
+        .last()
+        .cloned()
+        .ok_or_else(|| StorageError::Conflict("runtime model run does not exist".into()))?;
+    if current.run.id != request.model_run_id {
+        return Err(StorageError::Conflict(
+            "runtime request model-run identity was substituted".into(),
+        ));
+    }
+    Ok(current)
+}
+
 impl AppRuntime {
     /// Opens the durable runtime, migrates storage, and rebuilds projections.
     ///
@@ -3412,6 +3470,16 @@ impl AppRuntime {
         Ok(self
             .store()?
             .initialize_root_ownership(&identity, &migration_receipt, Utc::now())?)
+    }
+
+    /// Allocates the next durable Root-owned cognition-worker generation.
+    ///
+    /// # Errors
+    /// Returns a runtime error if authoritative storage cannot advance the generation.
+    pub fn allocate_runtime_worker_generation(&self) -> Result<u64, RuntimeError> {
+        Ok(self
+            .store()?
+            .allocate_runtime_worker_generation(Utc::now())?)
     }
 
     /// Returns immutable Root ownership and migration evidence.
@@ -3722,6 +3790,280 @@ impl AppRuntime {
             task_contract,
             events,
         }))
+    }
+
+    /// Persists complete reconstructable invocation intent and the initial planned model run
+    /// after checking the exact authoritative workflow revision and lease generation.
+    ///
+    /// # Errors
+    /// Returns a runtime error for stale workflow ownership, role/state mismatch, substitution,
+    /// malformed reconstruction evidence, or persistence failure.
+    pub fn plan_runtime_invocation(
+        &self,
+        request: &RuntimeInvocationRequest,
+        now: DateTime<Utc>,
+    ) -> Result<mcg_storage::ModelRunRecord, RuntimeError> {
+        request
+            .validate()
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        let mut store = self.store()?;
+        let attempt = store
+            .workflow_attempt(request.invocation_manifest.attempt_id)?
+            .ok_or(StorageError::WorkflowAttemptNotFound(
+                request.invocation_manifest.attempt_id,
+            ))?;
+        validate_runtime_invocation_attempt(&attempt, request)?;
+        store.persist_context_manifest(&request.context_manifest, now)?;
+        store.persist_invocation_manifest(&request.invocation_manifest, now)?;
+        if let Some(inspection) =
+            store.invocation_inspection(request.invocation_manifest.id, 1_000)?
+            && let Some(existing) = inspection.model_runs.last()
+        {
+            if inspection.manifest != request.invocation_manifest
+                || inspection.context_manifest != request.context_manifest
+                || existing.run.id != request.model_run_id
+            {
+                return Err(StorageError::Conflict(
+                    "runtime invocation planning replay substituted immutable evidence".into(),
+                )
+                .into());
+            }
+            return Ok(existing.clone());
+        }
+        store
+            .create_model_run(
+                &ModelRun {
+                    id: request.model_run_id,
+                    invocation_id: request.invocation_manifest.id,
+                    role: request.invocation_manifest.role,
+                    state: ModelRunState::Planned,
+                    provider_request_id: None,
+                    response_artifact: None,
+                    usage: None,
+                    started_at: now,
+                    finished_at: None,
+                },
+                now,
+            )
+            .map_err(RuntimeError::from)
+    }
+
+    /// Marks an exactly fenced planned invocation dispatched before any bytes reach Runtime.
+    ///
+    /// # Errors
+    /// Returns a runtime error for stale workflow/model-run revisions or persistence failure.
+    pub fn dispatch_runtime_invocation(
+        &self,
+        request: &RuntimeInvocationRequest,
+        now: DateTime<Utc>,
+    ) -> Result<mcg_storage::ModelRunRecord, RuntimeError> {
+        let mut store = self.store()?;
+        let attempt = store
+            .workflow_attempt(request.invocation_manifest.attempt_id)?
+            .ok_or(StorageError::WorkflowAttemptNotFound(
+                request.invocation_manifest.attempt_id,
+            ))?;
+        validate_runtime_invocation_attempt(&attempt, request)?;
+        let current = current_runtime_model_run(&store, request)?;
+        let mut next = current.run;
+        next.state = ModelRunState::Dispatched;
+        next.provider_request_id = Some(format!(
+            "runtime-worker:{}:{}",
+            request.worker_generation, request.model_run_id
+        ));
+        store
+            .transition_model_run(&next, current.revision, now)
+            .map_err(RuntimeError::from)
+    }
+
+    /// Accepts one authenticated Runtime proposal only while its exact attempt revision and lease
+    /// generation are still authoritative, persists the response payload, and completes the run.
+    ///
+    /// # Errors
+    /// Returns a runtime error for late/stale/substituted results or persistence failure.
+    pub fn complete_runtime_invocation(
+        &self,
+        request: &RuntimeInvocationRequest,
+        result: &RuntimeInvocationResult,
+        now: DateTime<Utc>,
+    ) -> Result<(mcg_storage::ModelRunRecord, RuntimeResponseArtifact), RuntimeError> {
+        result
+            .validate()
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        if result.worker_generation != request.worker_generation
+            || result.invocation_id != request.invocation_manifest.id
+            || result.model_run_id != request.model_run_id
+            || result.role != request.invocation_manifest.role
+            || result.request_hash != request.invocation_manifest.request_hash
+        {
+            return Err(StorageError::Conflict(
+                "runtime result does not bind the exact dispatched invocation".into(),
+            )
+            .into());
+        }
+        let mut store = self.store()?;
+        let attempt = store
+            .workflow_attempt(request.invocation_manifest.attempt_id)?
+            .ok_or(StorageError::WorkflowAttemptNotFound(
+                request.invocation_manifest.attempt_id,
+            ))?;
+        validate_runtime_invocation_attempt(&attempt, request)?;
+        let current = current_runtime_model_run(&store, request)?;
+        if current.run.state != ModelRunState::Dispatched {
+            return Err(StorageError::Conflict(
+                "runtime result arrived for a model run that is not dispatched".into(),
+            )
+            .into());
+        }
+        let artifact = store.persist_runtime_response_artifact(result, now)?;
+        let mut next = current.run;
+        next.state = ModelRunState::Completed;
+        next.response_artifact = Some(ArtifactRef {
+            content_hash: result.response_hash.clone(),
+            media_type: "application/vnd.metacog.runtime-response+cbor".into(),
+            byte_length: u64::try_from(result.response.bytes.len()).map_err(|_| {
+                StorageError::InvalidData("runtime response length does not fit u64".into())
+            })?,
+        });
+        next.finished_at = Some(now);
+        let completed = store.transition_model_run(&next, current.revision, now)?;
+        Ok((completed, artifact))
+    }
+
+    /// Records a dispatched invocation's conservative terminal outcome without accepting a model
+    /// proposal. This remains legal after the workflow lease changes because no result commits.
+    ///
+    /// # Errors
+    /// Returns a runtime error for an unsupported terminal state or stale model-run revision.
+    pub fn settle_runtime_invocation_without_result(
+        &self,
+        request: &RuntimeInvocationRequest,
+        state: ModelRunState,
+        now: DateTime<Utc>,
+    ) -> Result<mcg_storage::ModelRunRecord, RuntimeError> {
+        if !matches!(
+            state,
+            ModelRunState::Failed | ModelRunState::Cancelled | ModelRunState::OutcomeUnknown
+        ) {
+            return Err(StorageError::InvalidData(
+                "runtime invocation failure settlement must be terminal".into(),
+            )
+            .into());
+        }
+        let mut store = self.store()?;
+        let current = current_runtime_model_run(&store, request)?;
+        if current.run.state != ModelRunState::Dispatched {
+            return Err(StorageError::Conflict(
+                "only a dispatched runtime invocation can settle without a result".into(),
+            )
+            .into());
+        }
+        let mut next = current.run;
+        next.state = state;
+        next.finished_at = Some(now);
+        store
+            .transition_model_run(&next, current.revision, now)
+            .map_err(RuntimeError::from)
+    }
+
+    /// Loads bounded authoritative reconstruction evidence for one invocation.
+    ///
+    /// # Errors
+    /// Returns a runtime error for invalid bounds or unreadable authoritative evidence.
+    pub fn runtime_invocation(
+        &self,
+        invocation_id: InvocationId,
+        maximum_model_run_versions: usize,
+    ) -> Result<Option<mcg_storage::InvocationInspection>, RuntimeError> {
+        Ok(self
+            .store()?
+            .invocation_inspection(invocation_id, maximum_model_run_versions)?)
+    }
+
+    /// Loads the exact immutable response payload retained for one model run.
+    ///
+    /// # Errors
+    /// Returns a runtime error for unreadable or malformed authoritative evidence.
+    pub fn runtime_response(
+        &self,
+        model_run_id: mcg_contracts::ModelRunId,
+    ) -> Result<Option<RuntimeResponseArtifact>, RuntimeError> {
+        Ok(self.store()?.runtime_response_artifact(model_run_id)?)
+    }
+
+    /// Moves the exact leased Work attempt into independent Verify execution.
+    ///
+    /// # Errors
+    /// Returns a runtime error for stale ownership, illegal state, or persistence failure.
+    pub fn begin_runtime_verification(
+        &self,
+        attempt_id: mcg_contracts::AttemptId,
+        expected_revision: u64,
+        expected_generation: u64,
+        idempotency_key: &str,
+        now: DateTime<Utc>,
+    ) -> Result<WorkflowAttempt, RuntimeError> {
+        Ok(self.store()?.transition_workflow_attempt(
+            attempt_id,
+            expected_revision,
+            expected_generation,
+            WorkflowState::Verifying,
+            CorrelationId::new(),
+            idempotency_key,
+            now,
+        )?)
+    }
+
+    /// Persists the immutable Work/Verify completion certificate and settles the exact workflow.
+    /// Only Root performs this commit; Runtime's verdict remains a proposal.
+    ///
+    /// # Errors
+    /// Returns a runtime error for stale lineage, incomplete runs, invalid verdict, or storage.
+    pub fn commit_runtime_completion(
+        &self,
+        certificate: &CompletionCertificate,
+        expected_revision: u64,
+        expected_generation: u64,
+        now: DateTime<Utc>,
+    ) -> Result<(ContentHash, WorkflowAttempt), RuntimeError> {
+        let mut store = self.store()?;
+        let attempt = store.workflow_attempt(certificate.attempt_id)?.ok_or(
+            StorageError::WorkflowAttemptNotFound(certificate.attempt_id),
+        )?;
+        if attempt.revision != expected_revision
+            || attempt.lease_generation != expected_generation
+            || attempt.state != WorkflowState::Verifying
+            || attempt.workflow_id != certificate.workflow_id
+            || attempt.task_contract != certificate.task_contract
+        {
+            return Err(StorageError::Conflict(
+                "completion certificate does not bind the current verifying workflow".into(),
+            )
+            .into());
+        }
+        let next = match certificate.verdict {
+            CompletionVerdict::Satisfied => WorkflowState::Succeeded,
+            CompletionVerdict::NotSatisfied | CompletionVerdict::Inconclusive => {
+                WorkflowState::Failed
+            }
+            CompletionVerdict::Cancelled => {
+                return Err(StorageError::Conflict(
+                    "a cancelled certificate cannot bypass cancellation settlement".into(),
+                )
+                .into());
+            }
+        };
+        let hash = store.persist_completion_certificate(certificate, now)?;
+        let settled = store.transition_workflow_attempt(
+            certificate.attempt_id,
+            expected_revision,
+            expected_generation,
+            next,
+            CorrelationId::new(),
+            &format!("runtime-completion:{}", certificate.id),
+            now,
+        )?;
+        Ok((hash, settled))
     }
 
     /// Durably requests cancellation under exact attempt revision/generation fencing.

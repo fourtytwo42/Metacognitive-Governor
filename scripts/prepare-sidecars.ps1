@@ -13,7 +13,7 @@ if (-not $targetTriple) {
 }
 
 if (-not $SkipBuild) {
-    $cargoArguments = @("build", "-p", "mcg-cli", "-p", "mcg-agent-mcp", "-p", "mcg-action-runner", "-p", "mcg-plugin-runner", "-p", "mcg-updater")
+    $cargoArguments = @("build", "-p", "mcg-cli", "-p", "mcg-agent-mcp", "-p", "mcg-action-runner", "-p", "mcg-runtime-worker", "-p", "mcg-plugin-runner", "-p", "mcg-updater")
     $existingDebugRoot = Join-Path $repositoryRoot "target/debug/mcg-protected-rootd.exe"
     if ($Profile -eq "release" -or -not (Test-Path -LiteralPath $existingDebugRoot -PathType Leaf)) {
         $cargoArguments += @("-p", "mcg-protected-rootd")
@@ -59,6 +59,7 @@ $sidecars = @{
     "mcg" = "mcg"
     "mcg-agent-mcp" = "mcg-agent-mcp"
     "mcg-action-runner" = "mcg-action-runner"
+    "mcg-runtime-worker" = "mcg-runtime-worker"
     "mcg-protected-rootd" = "mcg-service"
     "mcg-plugin-runner" = "mcg-plugin-runner"
     "mcg-shadow-runner" = "mcg-shadow-runner"

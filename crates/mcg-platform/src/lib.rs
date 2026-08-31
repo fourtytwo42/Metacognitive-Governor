@@ -2,7 +2,7 @@
 
 use std::{
     fmt, fs,
-    io::{ErrorKind, Write as _},
+    io::{ErrorKind, Read as _, Write as _},
     path::{Path, PathBuf},
 };
 
@@ -18,7 +18,6 @@ use mcg_contracts::{
     decode_canonical_cbor_v1,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
-#[cfg(windows)]
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use thiserror::Error;
@@ -29,6 +28,7 @@ use zeroize::{Zeroize, Zeroizing};
 pub const MAX_ROOT_IPC_FRAME_BYTES: usize = 1024 * 1024;
 pub const ROOT_IPC_SESSION_SCHEMA_VERSION: u16 = 1;
 pub const RUNTIME_WORKER_SESSION_SCHEMA_VERSION: u16 = 1;
+pub const RUNTIME_WORKER_EXECUTABLE_HASH_DOMAIN: &str = "MetaCog.RuntimeWorkerExecutable";
 pub const ROOT_STATUS_REQUEST_TYPE: &str = "metacog.root.status.request.v1";
 pub const ROOT_STATUS_RESPONSE_TYPE: &str = "metacog.root.status.response.v1";
 pub const ROOT_WORKFLOW_LIST_REQUEST_TYPE: &str = "metacog.root.workflow_list.request.v1";
@@ -330,6 +330,30 @@ pub fn create_runtime_worker_session(
     };
     session.validate(Utc::now())?;
     Ok(session)
+}
+
+/// Computes the exact executable identity bound into a Runtime worker launch session.
+///
+/// # Errors
+/// Returns an error when the executable cannot be opened or read.
+pub fn runtime_worker_executable_hash(
+    path: impl AsRef<Path>,
+) -> Result<ContentHash, PlatformError> {
+    let mut file = fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0_u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(ContentHash {
+        algorithm: mcg_contracts::HashAlgorithm::Sha256,
+        domain: RUNTIME_WORKER_EXECUTABLE_HASH_DOMAIN.to_owned(),
+        digest_hex: format!("{:x}", hasher.finalize()),
+    })
 }
 
 /// Connects a worker to the Root-bound endpoint before the launch deadline.

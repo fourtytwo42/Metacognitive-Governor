@@ -74,14 +74,14 @@ pub use experiments::{
     AutomaticExperimentDisposition, AutomaticExperimentOutcome, AutomaticSupervisionMutation,
     CandidateRevisionMutation, ExperimentMutation, GovernorProposalMutation,
 };
-pub use invocations::{InvocationInspection, ModelRunRecord};
+pub use invocations::{InvocationInspection, ModelRunRecord, RuntimeResponseArtifact};
 pub use plugins::PluginRecoveryReport;
 pub use scheduler::{ScheduleClaim, ScheduleWakeMutation};
 pub use shadow_workspaces::ShadowWorkspaceMutation;
 pub use workflows::{TaskContractHead, WorkflowRecoveryReport, task_contract_content_hash};
 
 type EventRow = (i64, String, i64, String, Option<String>, String, String);
-pub const STORAGE_SCHEMA_VERSION: i64 = 56;
+pub const STORAGE_SCHEMA_VERSION: i64 = 58;
 
 const MIGRATION_1: &str = r"
 CREATE TABLE IF NOT EXISTS events (
@@ -2067,6 +2067,46 @@ BEFORE DELETE ON completion_certificate_invocations BEGIN
 END;
 ";
 
+const MIGRATION_57: &str = r"
+CREATE TABLE IF NOT EXISTS runtime_response_artifacts (
+    model_run_id TEXT PRIMARY KEY,
+    invocation_id TEXT NOT NULL UNIQUE,
+    response_hash_json TEXT NOT NULL,
+    response_payload_json TEXT NOT NULL,
+    recorded_at TEXT NOT NULL,
+    FOREIGN KEY(model_run_id) REFERENCES model_run_heads(model_run_id),
+    FOREIGN KEY(invocation_id) REFERENCES invocation_manifests(invocation_id)
+);
+CREATE INDEX IF NOT EXISTS runtime_response_artifacts_hash
+    ON runtime_response_artifacts(response_hash_json);
+CREATE TRIGGER IF NOT EXISTS runtime_response_artifacts_no_update
+BEFORE UPDATE ON runtime_response_artifacts BEGIN
+    SELECT RAISE(FAIL, 'runtime response artifacts are immutable reconstruction evidence');
+END;
+CREATE TRIGGER IF NOT EXISTS runtime_response_artifacts_no_delete
+BEFORE DELETE ON runtime_response_artifacts BEGIN
+    SELECT RAISE(FAIL, 'runtime response artifacts are durable reconstruction evidence');
+END;
+";
+
+const MIGRATION_58: &str = r"
+CREATE TABLE IF NOT EXISTS runtime_worker_generations (
+    role TEXT PRIMARY KEY CHECK(role IN ('cognition')),
+    generation INTEGER NOT NULL CHECK(generation > 0),
+    updated_at TEXT NOT NULL
+);
+CREATE TRIGGER IF NOT EXISTS runtime_worker_generation_monotonic
+BEFORE UPDATE ON runtime_worker_generations
+WHEN NEW.role <> OLD.role OR NEW.generation <> OLD.generation + 1
+BEGIN
+    SELECT RAISE(FAIL, 'runtime worker generation must advance exactly once');
+END;
+CREATE TRIGGER IF NOT EXISTS runtime_worker_generation_no_delete
+BEFORE DELETE ON runtime_worker_generations BEGIN
+    SELECT RAISE(FAIL, 'runtime worker generation history cannot be reset');
+END;
+";
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RootOwnership {
     pub runtime_identity: RuntimeIdentity,
@@ -2339,6 +2379,8 @@ impl SqliteEventStore {
             (54_i64, MIGRATION_54),
             (55_i64, MIGRATION_55),
             (56_i64, MIGRATION_56),
+            (57_i64, MIGRATION_57),
+            (58_i64, MIGRATION_58),
         ] {
             let applied = self.connection.query_row(
                 "SELECT EXISTS(SELECT 1 FROM mcg_schema WHERE version = ?1)",
@@ -6127,7 +6169,7 @@ mod tests {
                      DROP TABLE task_contract_heads;
                      DROP TABLE task_contract_versions;
                      DROP TABLE root_ownership;
-                     DELETE FROM mcg_schema WHERE version IN (51, 52, 53, 54, 55, 56);",
+                     DELETE FROM mcg_schema WHERE version IN (51, 52, 53, 54, 55, 56, 57, 58);",
                 )
                 .expect("downgrade fixture to schema 50");
         }

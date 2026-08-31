@@ -128,7 +128,7 @@ verify_signature() {
 
 verify_payload() {
   local app="$1"
-  for file in mcg-desktop mcg-service mcg mcg-action-runner mcg-plugin-runner mcg-shadow-runner mcg-updater; do
+  for file in mcg-desktop mcg-service mcg mcg-action-runner mcg-runtime-worker mcg-plugin-runner mcg-shadow-runner mcg-updater; do
     [[ -x "$app/Contents/MacOS/$file" ]] || { echo "App bundle is missing executable $file." >&2; exit 1; }
   done
   [[ "$(plutil -extract CFBundleIdentifier raw "$app/Contents/Info.plist")" == "dev.mcg.desktop" ]] || {
@@ -219,6 +219,23 @@ NODE
   }
 }
 
+test_runtime_worker() {
+  local executable="$1"
+  local report="$2"
+  "$executable" --qualify-runtime-worker >"$report"
+  python3 - "$report" <<'PY'
+import json
+import pathlib
+import sys
+
+report = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+assert report["protocol_version"] == 1
+assert report["role"] == "cognition"
+assert report["storage_linked"] is False
+assert report["executable_hash"]["domain"] == "MetaCog.RuntimeWorkerExecutable"
+PY
+}
+
 hdiutil verify "$dmg" >"$uat_root/dmg-verify.txt"
 hdiutil attach -readonly -nobrowse -mountpoint "$mount_point" "$dmg" >"$uat_root/dmg-attach.txt"
 mounted=true
@@ -237,6 +254,7 @@ installed_signature="$(verify_signature "$installed_app" installed)"
 verify_payload "$installed_app"
 test_plugin_runner "$installed_app/Contents/MacOS/mcg-plugin-runner" "$uat_root/plugin-runner.json"
 test_action_runner "$installed_app/Contents/MacOS/mcg-action-runner" "$uat_root/action-runner.json"
+test_runtime_worker "$installed_app/Contents/MacOS/mcg-runtime-worker" "$uat_root/runtime-worker.json"
 
 sentinel="$service_data/macos-package-uat-retained.txt"
 printf '%s' retain-on-uninstall >"$sentinel"

@@ -1,34 +1,26 @@
 //! Dependency-isolated cognition worker for Root-governed Runtime execution.
 
-use std::{
-    collections::{BTreeSet, VecDeque},
-    fs::File,
-    io::Read as _,
-    path::Path,
-};
+use std::collections::{BTreeSet, VecDeque};
 
 use chrono::Utc;
 use mcg_contracts::{
-    AuthenticatedRpcRequest, CompletionVerdict, ContentHash, ContractError, CriterionResult,
-    DeterministicVerifyInput, HashAlgorithm, InvocationRole, PROTOCOL_V1,
-    RUNTIME_INVOCATION_RESPONSE_HASH_DOMAIN, RUNTIME_WORKER_ACK_MESSAGE_TYPE,
-    RUNTIME_WORKER_CANCEL_MESSAGE_TYPE, RUNTIME_WORKER_HELLO_MESSAGE_TYPE,
-    RUNTIME_WORKER_INVOKE_MESSAGE_TYPE, RUNTIME_WORKER_RESULT_MESSAGE_TYPE,
-    RUNTIME_WORKER_SHUTDOWN_MESSAGE_TYPE, RequestId, RpcEnvelope, RuntimeInstanceId,
-    RuntimeInvocationRequest, RuntimeInvocationResult, RuntimeWorkerControl, RuntimeWorkerHello,
-    RuntimeWorkerRole, StableTypeId, VersionedPayload, canonical_contract_hash,
-    decode_canonical_cbor_v1,
+    AuthenticatedRpcRequest, CompletionVerdict, ContractError, CriterionResult,
+    DeterministicVerifyInput, InvocationRole, PROTOCOL_V1, RUNTIME_INVOCATION_RESPONSE_HASH_DOMAIN,
+    RUNTIME_WORKER_ACK_MESSAGE_TYPE, RUNTIME_WORKER_CANCEL_MESSAGE_TYPE,
+    RUNTIME_WORKER_HELLO_MESSAGE_TYPE, RUNTIME_WORKER_INVOKE_MESSAGE_TYPE,
+    RUNTIME_WORKER_RESULT_MESSAGE_TYPE, RUNTIME_WORKER_SHUTDOWN_MESSAGE_TYPE, RequestId,
+    RpcEnvelope, RuntimeInstanceId, RuntimeInvocationRequest, RuntimeInvocationResult,
+    RuntimeWorkerControl, RuntimeWorkerHello, RuntimeWorkerRole, StableTypeId, VersionedPayload,
+    canonical_contract_hash, decode_canonical_cbor_v1,
 };
 use mcg_platform::{
     PlatformError, RuntimeWorkerSession, connect_runtime_worker, read_canonical_frame,
-    write_canonical_frame,
+    runtime_worker_executable_hash, write_canonical_frame,
 };
-use sha2::{Digest, Sha256};
 use thiserror::Error;
 use zeroize::Zeroize;
 
 const REPLAY_WINDOW: usize = 1_024;
-const EXECUTABLE_HASH_DOMAIN: &str = "MetaCog.RuntimeWorkerExecutable";
 const CRITERION_HASH_DOMAIN: &str = "MetaCog.DeterministicCriterionEvidence";
 const WORK_RESPONSE_TYPE_ID: &str = "mcg.deterministic_work_response.v1";
 const VERIFY_RESPONSE_TYPE_ID: &str = "mcg.deterministic_verify_response.v1";
@@ -87,7 +79,7 @@ pub async fn run_from_stdin() -> Result<(), WorkerError> {
 /// replay, malformed invocation, or transport failure.
 pub async fn run(mut session: RuntimeWorkerSession) -> Result<(), WorkerError> {
     session.validate(Utc::now())?;
-    let executable_hash = executable_hash(std::env::current_exe()?)?;
+    let executable_hash = runtime_worker_executable_hash(std::env::current_exe()?)?;
     if executable_hash != session.expected_executable_hash {
         return Err(WorkerError::InvalidSession);
     }
@@ -174,28 +166,6 @@ pub async fn run(mut session: RuntimeWorkerSession) -> Result<(), WorkerError> {
             return Ok(());
         }
     }
-}
-
-/// Computes the exact executable hash Root binds into one launch session.
-///
-/// # Errors
-/// Returns an error if the executable cannot be read.
-pub fn executable_hash(path: impl AsRef<Path>) -> Result<ContentHash, WorkerError> {
-    let mut file = File::open(path)?;
-    let mut hasher = Sha256::new();
-    let mut buffer = vec![0_u8; 64 * 1024];
-    loop {
-        let read = file.read(&mut buffer)?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    Ok(ContentHash {
-        algorithm: HashAlgorithm::Sha256,
-        domain: EXECUTABLE_HASH_DOMAIN.to_owned(),
-        digest_hex: format!("{:x}", hasher.finalize()),
-    })
 }
 
 fn authenticated_request<T: serde::Serialize>(
@@ -362,10 +332,15 @@ fn response_envelope<T: serde::Serialize>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mcg_contracts::HashAlgorithm;
+    use mcg_platform::RUNTIME_WORKER_EXECUTABLE_HASH_DOMAIN;
 
     #[test]
     fn worker_manifest_has_no_protected_dependencies() {
         let manifest = include_str!("../Cargo.toml");
+        let production_manifest = manifest
+            .split_once("[dev-dependencies]")
+            .map_or(manifest, |(production, _)| production);
         for forbidden in [
             "mcg-storage",
             "mcg-protected-root",
@@ -376,7 +351,7 @@ mod tests {
             "reqwest",
         ] {
             assert!(
-                !manifest
+                !production_manifest
                     .lines()
                     .any(|line| line.trim_start().starts_with(&format!("{forbidden} "))),
                 "forbidden dependency: {forbidden}"
@@ -386,9 +361,9 @@ mod tests {
 
     #[test]
     fn executable_hash_is_exact_and_domain_separated() {
-        let hash = executable_hash(std::env::current_exe().unwrap()).unwrap();
+        let hash = runtime_worker_executable_hash(std::env::current_exe().unwrap()).unwrap();
         hash.validate().unwrap();
         assert_eq!(hash.algorithm, HashAlgorithm::Sha256);
-        assert_eq!(hash.domain, EXECUTABLE_HASH_DOMAIN);
+        assert_eq!(hash.domain, RUNTIME_WORKER_EXECUTABLE_HASH_DOMAIN);
     }
 }
