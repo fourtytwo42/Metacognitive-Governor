@@ -1,6 +1,6 @@
 # Stage 5 — Runtime Worker and Reconstructable Deterministic Cognition
 
-**Status:** Contract/persistence foundation (`83b5629`), separate authenticated worker (`522ba92`), Root-owned real-process orchestration/recovery (`4a2a905`), authenticated Root/CLI reconstruction (`bde06f0`), progressive Desktop reconstruction (`1e94efb`), generation-safe idle service supervision (`dc54a88`), active invocation cancellation (`65f7073`), governed global agent browser (`44c6389`), and canonical workflow/current-attempt invocation drill-down (`3d55d05`) implemented; direct governed remote inventory and release qualification remain open
+**Status:** Contract/persistence foundation (`83b5629`), separate authenticated worker (`522ba92`), Root-owned real-process orchestration/recovery (`4a2a905`), authenticated Root/CLI reconstruction (`bde06f0`), progressive Desktop reconstruction (`1e94efb`), generation-safe idle service supervision (`dc54a88`), active invocation cancellation (`65f7073`), governed global agent browser (`44c6389`), canonical workflow/current-attempt invocation drill-down (`3d55d05`), and direct content-minimized remote Codex sub-agent inventory (`fb03f89`) implemented; release qualification remains open
 
 ## Delivered contract boundary
 
@@ -141,9 +141,8 @@ CLI/Desktop clients without direct database authority.
 output remains script-friendly; an interactive terminal opens a searchable picker, reloads the
 exact selected conversation, and refuses to focus a session absent from that scoped view.
 Subcommand-local `agents --remote` syntax matches Codex 0.150.1 and applies the existing secure
-endpoint/token validation, but MetaCog deliberately binds remote transport only after selecting
-the governed local session. Direct enumeration of an arbitrary remote app-server remains a
-separate compatibility requirement and is not claimed by this checkpoint.
+endpoint/token validation. Checkpoint `44c6389` did not yet enumerate a remote app-server; that
+separate capability is implemented by `fb03f89` below.
 
 The Desktop projects the same list through Simple, Advanced, and Developer. Simple shows friendly
 agent/conversation/state identity; Advanced adds exact session/update/model context; Developer adds
@@ -165,6 +164,22 @@ Work/Verification lifecycle records and then into invocation reconstruction; Dev
 combined read-only canonical JSON. Compatibility sessions remain searchable and conversation-
 linked, but are explicitly labeled until Stage 3 provides a persisted canonical attachment.
 
+## Direct remote Codex sub-agent inventory checkpoint
+
+Checkpoint `fb03f89` uses capability discovery from the repository-pinned Codex 0.150.1
+app-server schema to call `thread/list` directly over the invocation-scoped remote transport. The
+request is newest-first, capped at 200 rows, excludes archived threads, and requests only Codex
+sub-agent source kinds. The response decoder requires exact thread, session, parent-thread,
+status, and timestamp fields, rejects malformed or oversized identities, and copies only nickname,
+role, lifecycle, direct-input capability, and stable locators. Prompt previews, working directories,
+turns, credentials, and message content are not retained or printed.
+
+`mcg agents --remote` no longer requires a running local MetaCog daemon. Noninteractive use prints
+a bounded inventory; interactive use opens the existing searchable picker and inspects the exact
+selected remote thread, parent, session, status, and direct-input capability. It does not enter or
+mutate the remote thread, and it does not infer a MetaCog conversation, workflow, or invocation
+binding that the remote server did not persist.
+
 ## Verification
 
 - `cargo test -p mcg-contracts` — 17/17 passed.
@@ -182,6 +197,7 @@ linked, but are explicitly labeled until Stage 3 provides a persisted canonical 
 - Desktop reconstruction checkpoint: TypeScript and production build passed; Desktop Vitest 124/124; serialized Playwright 31/31; Desktop Rust 20/20; whole-workspace all-target check; packaging/docs/format/diff gates — passed. Strict Desktop boundary Clippy passes with only its recorded legacy lint classes allowed; no finding names the invocation path.
 - Active cancellation/service supervision checkpoint: Runtime worker 13/13 and Protected Root 12/12; whole-workspace all-target check; strict worker Clippy and strict Root changed-boundary Clippy; packaging/docs/format/diff gates — passed.
 - Global agent browser checkpoint: storage 111/111; API 103/103; runtime 108 passed with two explicit Windows Sandbox qualifications ignored; CLI 70 unit plus 10 integration; Desktop Rust 20/20; Desktop Vitest 125/125; serialized Playwright 32/32 including progressive disclosure, search, and scoped Axe; TypeScript/build, whole-workspace all-target check, packaging/docs/format/diff gates — passed. Strict domain Clippy is clean; API/storage pass when only their exact recorded legacy lint classes are allowed, and the CLI audit reports only its existing 87/91 findings with no global-browser-path finding.
+- Direct remote inventory checkpoint: app-server 30/30 active tests with six explicit packaged qualifications ignored; focused remote tests 5/5 including a real loopback WebSocket initialize/account/inventory exchange and bearer secrecy; CLI 70 unit plus 10 integration; whole-workspace all-target check; normal app-server Clippy; packaging/format/diff gates — passed. Strict all-warning app-server Clippy still stops in its recorded 97-finding legacy backlog; no normal-Clippy finding names the new inventory path.
 
 Strict whole-storage Clippy still reaches the repository’s documented pre-existing storage lint backlog. Rerunning the storage library with only those established lint classes allowed passes, and strict contracts Clippy is clean.
 
@@ -189,8 +205,7 @@ Strict whole-storage Clippy still reaches the repository’s documented pre-exis
 
 Stage 5 is not complete until all of the following are implemented and qualified:
 
-1. Where the governed transport can prove equivalent authority, implement direct remote-server inventory semantics rather than treating post-selection transport binding as remote enumeration.
-2. Connect real governed provider/model execution through Stage 6 permits without giving Runtime ambient network, storage, or secret authority.
-3. Run packaged active cancellation/service replacement, broader combined workflow/Runtime crash injection, native GUI UAT, migration, and matched Windows/Linux/macOS package gates.
+1. Connect real governed provider/model execution through Stage 6 permits without giving Runtime ambient network, storage, or secret authority.
+2. Run packaged active cancellation/service replacement, direct remote-inventory transport qualification, broader combined workflow/Runtime crash injection, native GUI UAT, migration, and matched Windows/Linux/macOS package gates.
 
 No real provider is required for this stage’s correctness. Root-bound remote egress permits and secret handles begin in Stage 6.
