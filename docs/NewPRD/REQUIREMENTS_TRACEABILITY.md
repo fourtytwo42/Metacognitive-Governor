@@ -1,6 +1,6 @@
 # Cognitive Runtime Requirements Traceability
 
-**Status:** Active implementation matrix; Stages 1–2 implementation complete with owner-bound package lanes open, Stages 3–4 substantially implemented, and Stage 5 complete through Root-owned real-process orchestration/recovery
+**Status:** Active implementation matrix; Stages 1–2 implementation complete with owner-bound package lanes open, Stages 3–4 substantially implemented, and Stage 5 complete through Root-owned real-process orchestration/recovery plus authenticated Root/CLI reconstruction
 **Purpose:** Map normative requirements to implementation stages, automated evidence, E2E/UAT evidence, and release artifacts
 
 This matrix is updated as implementation lands. `Implemented / cumulative UAT pending` means local implementation and its stage-level automated evidence pass, while final native/cross-platform evidence remains open.
@@ -76,8 +76,8 @@ This matrix is updated as implementation lands. `Implemented / cumulative UAT pe
 
 | Requirement | Stage | Automated evidence | E2E/UAT evidence | Status |
 |---|---:|---|---|---|
-| Every material call has a reconstructable `InvocationManifest` | 5 | Manifest completeness tests | CLI reconstruction | Complete bounded DTO, canonical hash fixture, schema-56–58 immutable persistence, exact replay/substitution, restart reconstruction, model-run lineage, separate deterministic Runtime process, and Root-owned plan-before-dispatch/result-fenced orchestration implemented / Root inspection IPC, CLI, Desktop, and product E2E pending |
-| Exact context refs are captured in `ContextManifest` | 5, 8 | Context tests | Developer inspector | Exact source/perspective/influence/transformation/order/token/selection/expansion contract, content-addressed schema-56 storage, Root-bound real-process dispatch, and restart reconstruction implemented / live product capture, Developer inspection, and Stage 8 retrieval integration pending |
+| Every material call has a reconstructable `InvocationManifest` | 5 | Manifest completeness tests | CLI reconstruction | Complete bounded DTO, canonical hash fixture, schema-56–58 immutable persistence, exact replay/substitution, restart reconstruction, model-run lineage, separate deterministic Runtime process, Root-owned plan-before-dispatch/result-fenced orchestration, authenticated bounded Root list/show, and human/JSON `mcg invocation list/show` implemented / Desktop and product E2E pending |
+| Exact context refs are captured in `ContextManifest` | 5, 8 | Context tests | Developer inspector | Exact source/perspective/influence/transformation/order/token/selection/expansion contract, content-addressed schema-56 storage, Root-bound real-process dispatch, restart reconstruction, and explicit CLI JSON inspection implemented / live product capture, Desktop Developer inspection, and Stage 8 retrieval integration pending |
 | Remote model calls require Root-bound egress permit | 6 | Permit/policy tests | Unauthorized destination/context attack | Planned |
 | Runtime receives no ambient provider secrets | 6 | Secret scanning/process tests | Compromised Runtime probe | Deterministic runtime-worker launches with a cleared environment, receives only its short-lived IPC bootstrap over inherited stdin, and has no provider/network/secret dependency / Stage 6 governed real-provider secret-handle path pending |
 | Secret handles resolve only for exact authorized execution | 6 | Gateway tests | Wrong provider/action handle | Planned |

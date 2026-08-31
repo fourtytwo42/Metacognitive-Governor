@@ -1,6 +1,6 @@
 # Stage 5 — Runtime Worker and Reconstructable Deterministic Cognition
 
-**Status:** Contract/persistence foundation (`83b5629`), separate authenticated worker (`522ba92`), and Root-owned real-process orchestration/recovery (`4a2a905`) implemented; product inspection, active-service replacement, and release qualification remain open
+**Status:** Contract/persistence foundation (`83b5629`), separate authenticated worker (`522ba92`), Root-owned real-process orchestration/recovery (`4a2a905`), and authenticated Root/CLI reconstruction (`bde06f0`) implemented; Desktop/global-browser, active-service replacement, and release qualification remain open
 
 ## Delivered contract boundary
 
@@ -71,6 +71,20 @@ macOS package contracts. Each package harness requires it and runs `--qualify-ru
 which reports its exact domain-separated executable hash, protocol, cognition role, and absence
 of storage linkage.
 
+## Root and CLI reconstruction checkpoint
+
+Checkpoint `bde06f0` moves `ModelRunRecord`, `InvocationSummary`, and `InvocationInspection` into
+the stable contracts boundary and adds a Root-owned newest-first global invocation query. Summary
+rows contain workflow/attempt/role/TaskContract identity and only current run state/revision/time;
+they do not materialize prompts, responses, secrets, or private reasoning. Show returns the exact
+content-minimized InvocationManifest, ContextManifest refs/hashes, and bounded immutable model-run
+history. IPC-specific list and history ceilings keep responses below the canonical frame boundary.
+
+Authenticated correlated Root IPC now exposes invocation list/show, including invalid-bound
+rejection. `mcg invocation list/show` consumes that boundary before bearer-token compatibility
+loading. Human output presents identities, provider/model locators, hashes, and run lifecycle;
+explicit `--json` returns the canonical reconstruction contract without granting storage access.
+
 ## Verification
 
 - `cargo test -p mcg-contracts` — 17/17 passed.
@@ -84,6 +98,7 @@ of storage linkage.
 - Strict no-dependency Protected Root Clippy passed with only its documented pre-existing `needless-pass-by-value` and `too-many-lines` classes allowed.
 - `cargo check --workspace --all-targets` — passed.
 - Packaging and documentation validators, PowerShell parsing, copied debug-sidecar qualification, formatting, and `git diff --check` — passed.
+- Root/CLI reconstruction checkpoint: contracts 17/17, platform 3/3, storage 110/110, Protected Root 12/12, CLI 69 unit plus 10 integration, whole-workspace all-target check, strict boundary Clippy, packaging/docs/format/diff gates — passed.
 
 Strict whole-storage Clippy still reaches the repository’s documented pre-existing storage lint backlog. Rerunning the storage library with only those established lint classes allowed passes, and strict contracts Clippy is clean.
 
@@ -92,8 +107,8 @@ Strict whole-storage Clippy still reaches the repository’s documented pre-exis
 Stage 5 is not complete until all of the following are implemented and qualified:
 
 1. Add active-service supervision that replaces an idle dead or expired worker with a newly allocated generation without accepting work from the old generation.
-2. Add authenticated Root IPC, CLI reconstruction, and Simple/Advanced/Developer invocation presentation over the same bounded evidence.
-3. Add the canonical global workflow/invocation browser and reconcile compatible `agents --remote` presentation.
+2. Add Simple/Advanced/Developer Desktop invocation presentation over the same bounded Root evidence.
+3. Extend the canonical invocation list into the global workflow/agent browser and reconcile compatible `agents --remote` presentation.
 4. Connect real governed provider/model execution through Stage 6 permits without giving Runtime ambient network, storage, or secret authority.
 5. Run cancellation during active execution, active-service replacement, combined workflow/Runtime crash injection, deterministic Desktop/CLI E2E, native GUI UAT, migration, and matched Windows/Linux/macOS package gates.
 
