@@ -1,6 +1,6 @@
 # Stage 5 — Runtime Worker and Reconstructable Deterministic Cognition
 
-**Status:** Contract/persistence foundation (`83b5629`), separate authenticated worker (`522ba92`), Root-owned real-process orchestration/recovery (`4a2a905`), authenticated Root/CLI reconstruction (`bde06f0`), and progressive Desktop reconstruction (`1e94efb`) implemented; global-browser, active-service replacement, and release qualification remain open
+**Status:** Contract/persistence foundation (`83b5629`), separate authenticated worker (`522ba92`), Root-owned real-process orchestration/recovery (`4a2a905`), authenticated Root/CLI reconstruction (`bde06f0`), progressive Desktop reconstruction (`1e94efb`), and generation-safe idle service supervision (`dc54a88`) implemented; global-browser and release qualification remain open
 
 ## Delivered contract boundary
 
@@ -99,6 +99,19 @@ Component and deterministic browser tests prove Simple → Advanced → Develope
 one invocation state. The browser journey also runs a scoped Axe accessibility analysis over the
 invocation section.
 
+## Generation-safe active-service supervision checkpoint
+
+Checkpoint `dc54a88` gives the long-running Root service exclusive ownership of an idle Runtime
+client and checks its process, poison state, and fixed session expiry every five seconds. Root
+reaps the exact old child before allocating and authenticating a new durable generation. Health
+inspection or replacement failure leaves the slot empty, and the supervisor retries with a fresh
+generation rather than allowing the suspect process to receive work. Shutdown now attempts the
+authenticated protocol but forcefully terminates and reaps on control, wait, or deadline failure.
+
+The real-process test proves a healthy generation does not churn, a dead/unusable generation 1 is
+reaped before generation 2 starts, a generation-1 request is rejected before invocation intent is
+persisted, and expired generation 3 is reaped before generation 4 authenticates.
+
 ## Verification
 
 - `cargo test -p mcg-contracts` — 17/17 passed.
@@ -114,6 +127,7 @@ invocation section.
 - Packaging and documentation validators, PowerShell parsing, copied debug-sidecar qualification, formatting, and `git diff --check` — passed.
 - Root/CLI reconstruction checkpoint: contracts 17/17, platform 3/3, storage 110/110, Protected Root 12/12, CLI 69 unit plus 10 integration, whole-workspace all-target check, strict boundary Clippy, packaging/docs/format/diff gates — passed.
 - Desktop reconstruction checkpoint: TypeScript and production build passed; Desktop Vitest 124/124; serialized Playwright 31/31; Desktop Rust 20/20; whole-workspace all-target check; packaging/docs/format/diff gates — passed. Strict Desktop boundary Clippy passes with only its recorded legacy lint classes allowed; no finding names the invocation path.
+- Active-service supervision checkpoint: Runtime worker 12/12 and Protected Root 12/12; whole-workspace all-target check; strict worker Clippy and strict Root changed-boundary Clippy; packaging/docs/format/diff gates — passed.
 
 Strict whole-storage Clippy still reaches the repository’s documented pre-existing storage lint backlog. Rerunning the storage library with only those established lint classes allowed passes, and strict contracts Clippy is clean.
 
@@ -121,9 +135,8 @@ Strict whole-storage Clippy still reaches the repository’s documented pre-exis
 
 Stage 5 is not complete until all of the following are implemented and qualified:
 
-1. Add active-service supervision that replaces an idle dead or expired worker with a newly allocated generation without accepting work from the old generation.
-2. Extend the canonical invocation list into the global workflow/agent browser and reconcile compatible `agents --remote` presentation.
-3. Connect real governed provider/model execution through Stage 6 permits without giving Runtime ambient network, storage, or secret authority.
-4. Run cancellation during active execution, active-service replacement, combined workflow/Runtime crash injection, native GUI UAT, migration, and matched Windows/Linux/macOS package gates.
+1. Extend the canonical invocation list into the global workflow/agent browser and reconcile compatible `agents --remote` presentation.
+2. Connect real governed provider/model execution through Stage 6 permits without giving Runtime ambient network, storage, or secret authority.
+3. Run cancellation during active execution, packaged active-service replacement, combined workflow/Runtime crash injection, native GUI UAT, migration, and matched Windows/Linux/macOS package gates.
 
 No real provider is required for this stage’s correctness. Root-bound remote egress permits and secret handles begin in Stage 6.
