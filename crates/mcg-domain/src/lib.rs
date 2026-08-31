@@ -1157,6 +1157,7 @@ pub struct PluginInvocationRecord {
 
 pub const CONVERSATION_SCHEMA_VERSION: u16 = 2;
 pub const CONVERSATION_TEAM_SCHEMA_VERSION: u16 = 8;
+pub const GLOBAL_AGENT_SESSION_SUMMARY_SCHEMA_VERSION: u16 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1194,6 +1195,35 @@ pub struct ConversationAgentSession {
     pub codex_thread_id: Option<String>,
     pub model: Option<String>,
     pub prompt_revision: u64,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Content-minimized cross-conversation projection for the global agent browser.
+///
+/// This deliberately excludes prompts, messages, credentials, tool payloads, and private
+/// reasoning. Clients use the stable conversation and session identities to request an
+/// explicitly scoped view only after the owner selects a row.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GlobalAgentSessionSummary {
+    pub schema_version: u16,
+    pub session_id: ConversationAgentSessionId,
+    pub conversation_id: ConversationId,
+    pub conversation_title: String,
+    pub conversation_state: ConversationState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<ProjectId>,
+    pub role_id: RoleId,
+    pub organization_revision_id: OrganizationRevisionId,
+    pub kind: ConversationAgentKind,
+    pub display_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_session_id: Option<ConversationAgentSessionId>,
+    pub state: ConversationAgentSessionState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_thread_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

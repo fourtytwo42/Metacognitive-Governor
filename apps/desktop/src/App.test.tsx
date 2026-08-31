@@ -130,6 +130,7 @@ const client = vi.hoisted(() => ({
   applyCloudDiff: vi.fn(),
   discardCloudDiffApply: vi.fn(),
   listAgentRuns: vi.fn(),
+  listGlobalAgentSessions: vi.fn(),
   setGlobalOrganizationAssignment: vi.fn(),
   setProjectOrganizationAssignment: vi.fn(),
   previewOrganizationRevision: vi.fn(),
@@ -341,6 +342,7 @@ vi.mock("./desktop-client", () => ({
   applyCloudDiff: client.applyCloudDiff,
   discardCloudDiffApply: client.discardCloudDiffApply,
   listAgentRuns: client.listAgentRuns,
+  listGlobalAgentSessions: client.listGlobalAgentSessions,
   setGlobalOrganizationAssignment: client.setGlobalOrganizationAssignment,
   setProjectOrganizationAssignment: client.setProjectOrganizationAssignment,
   previewOrganizationRevision: client.previewOrganizationRevision,
@@ -574,6 +576,7 @@ beforeEach(() => {
   client.applyCloudDiff.mockReset();
   client.discardCloudDiffApply.mockReset();
   client.listAgentRuns.mockReset();
+  client.listGlobalAgentSessions.mockReset();
   client.setGlobalOrganizationAssignment.mockReset();
   client.setProjectOrganizationAssignment.mockReset();
   client.previewOrganizationRevision.mockReset();
@@ -863,6 +866,7 @@ beforeEach(() => {
   }));
   client.discardCloudDiffApply.mockResolvedValue({ state: "removed" });
   client.listAgentRuns.mockResolvedValue({ runs: [] });
+  client.listGlobalAgentSessions.mockResolvedValue({ sessions: [] });
   client.listOrganizationPublishers.mockResolvedValue([]);
   client.listOrganizationShareReviews.mockResolvedValue([]);
   client.listApprovals.mockResolvedValue({ approvals: [] });
@@ -1339,6 +1343,56 @@ test("Runtime invocations preserve one Root truth across Simple Advanced and Dev
   expect(within(invocations).queryByRole("button", { name: "Inspect" })).not.toBeInTheDocument();
   expect(within(invocations).queryByRole("button", { name: "Canonical invocation evidence" })).not.toBeInTheDocument();
   expect(client.protectedRootInvocation).toHaveBeenCalledWith(invocationId);
+});
+
+test("Developer searches the global cross-conversation agent inventory without changing its truth", async () => {
+  const updatedAt = "2026-08-30T15:00:00Z";
+  const sessions = [
+    {
+      schema_version: 1,
+      session_id: "00000000-0000-4000-8000-000000000571",
+      conversation_id: "00000000-0000-4000-8000-000000000572",
+      conversation_title: "Release qualification",
+      conversation_state: "active",
+      role_id: "00000000-0000-4000-8000-000000000573",
+      organization_revision_id: "00000000-0000-4000-8000-000000000574",
+      kind: "coder",
+      display_name: "Coding Agent Atlas",
+      state: "working",
+      codex_thread_id: "thread-atlas",
+      model: "gpt-5.6-sol",
+      created_at: updatedAt,
+      updated_at: updatedAt
+    },
+    {
+      schema_version: 1,
+      session_id: "00000000-0000-4000-8000-000000000575",
+      conversation_id: "00000000-0000-4000-8000-000000000576",
+      conversation_title: "Security verification",
+      conversation_state: "active",
+      role_id: "00000000-0000-4000-8000-000000000577",
+      organization_revision_id: "00000000-0000-4000-8000-000000000578",
+      kind: "tester",
+      display_name: "Tester",
+      state: "ready",
+      created_at: updatedAt,
+      updated_at: updatedAt
+    }
+  ];
+  client.getSettings.mockResolvedValue({ schema_version: 1, revision: 1, interface_complexity: "developer", autonomy: "autonomous", shadow_experiments: true, updated_at: updatedAt });
+  client.listGlobalAgentSessions.mockResolvedValue({ sessions });
+
+  render(<App />);
+  fireEvent.click(await screen.findByRole("link", { name: /Agents/ }));
+  const browser = await screen.findByRole("article", { name: "Global agent sessions" });
+  expect(within(browser).getByText("Coding Agent Atlas")).toBeInTheDocument();
+  expect(within(browser).getByText("Tester")).toBeInTheDocument();
+  expect(within(browser).getByText(/Codex thread thread-atlas/)).toBeInTheDocument();
+  expect(within(browser).getAllByRole("button", { name: "Open conversation" })).toHaveLength(2);
+
+  fireEvent.change(within(browser).getByRole("searchbox", { name: "Search global agent sessions" }), { target: { value: "security" } });
+  expect(within(browser).queryByText("Coding Agent Atlas")).not.toBeInTheDocument();
+  expect(within(browser).getByText("Tester")).toBeInTheDocument();
 });
 
 test("Codex-style sidebar groups project chats, searches them, and persists pins", async () => {

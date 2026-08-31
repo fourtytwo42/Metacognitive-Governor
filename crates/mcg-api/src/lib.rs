@@ -43,8 +43,8 @@ use mcg_domain::{
     ConversationGoalStatus, ConversationId, ConversationInteractionKind, ConversationMessage,
     ConversationMode, ConversationPreview, ConversationPreviewId, ConversationTeamState,
     ConversationTurnId, ConversationTurnState, ConversationView, ExecutionPreferences,
-    ExperimentId, GovernorProposalId, ManagedWorktree, MemoryClaimId, MemoryTransferId,
-    MentionCandidate, NotificationSeverity, OrganizationId, OrganizationImportId,
+    ExperimentId, GlobalAgentSessionSummary, GovernorProposalId, ManagedWorktree, MemoryClaimId,
+    MemoryTransferId, MentionCandidate, NotificationSeverity, OrganizationId, OrganizationImportId,
     OrganizationRevisionId, OrganizationShareReviewId, PlatformCapabilitySnapshot, PlatformSession,
     PlatformSessionEvent, PlatformSessionId, PlatformSessionKind, PluginCapabilityGrant,
     PluginInstallation, PluginInvocationId, PluginInvocationRecord, PluginRevision, ProjectId,
@@ -248,6 +248,11 @@ pub struct ConversationListResponse {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GlobalAgentSessionListResponse {
+    pub sessions: Vec<GlobalAgentSessionSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ForkConversationRequest {
     #[serde(default)]
     pub origin_turn_id: Option<ConversationTurnId>,
@@ -295,6 +300,18 @@ pub struct ConversationStreamEvent {
 pub struct ConversationListQuery {
     #[serde(default)]
     pub include_archived: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+pub struct GlobalAgentSessionListQuery {
+    #[serde(default = "default_global_agent_session_limit")]
+    pub limit: usize,
+    #[serde(default)]
+    pub include_archived: bool,
+}
+
+const fn default_global_agent_session_limit() -> usize {
+    100
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -1762,6 +1779,7 @@ fn router_with_shutdown(runtime: Arc<AppRuntime>, shutdown: Option<watch::Sender
             "/api/v1/conversations",
             get(list_conversations).post(create_conversation),
         )
+        .route("/api/v1/agent-sessions", get(list_global_agent_sessions))
         .route(
             "/api/v1/conversations/{conversation_id}",
             get(get_conversation)
@@ -4579,6 +4597,18 @@ async fn get_conversation_team(
             .conversation_team(conversation_id)
             .map_err(map_runtime_error)?,
     ))
+}
+
+async fn list_global_agent_sessions(
+    State(state): State<ApiState>,
+    Query(query): Query<GlobalAgentSessionListQuery>,
+) -> Result<Json<GlobalAgentSessionListResponse>, ApiError> {
+    Ok(Json(GlobalAgentSessionListResponse {
+        sessions: state
+            .runtime
+            .global_agent_sessions(query.limit, query.include_archived)
+            .map_err(map_runtime_error)?,
+    }))
 }
 
 async fn message_agent_session(
@@ -8398,6 +8428,46 @@ mod tests {
         assert_eq!(consumer.context_token_budget, 16_384);
         assert_eq!(consumer.estimated_output_tokens, 8_192);
         assert_eq!(consumer.max_model_calls, 16);
+    }
+
+    #[tokio::test]
+    async fn global_agent_session_route_is_authenticated_bounded_and_content_minimized() {
+        let runtime = test_runtime();
+        let unauthorized = router(runtime.clone())
+            .oneshot(
+                Request::get("/api/v1/agent-sessions")
+                    .body(Body::empty())
+                    .expect("unauthorized request"),
+            )
+            .await
+            .expect("unauthorized response");
+        assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+        let response = router(runtime.clone())
+            .oneshot(
+                authorized(Request::get("/api/v1/agent-sessions?limit=100"))
+                    .body(Body::empty())
+                    .expect("agent session request"),
+            )
+            .await
+            .expect("agent session response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await;
+        assert_eq!(body, serde_json::json!({"sessions": []}));
+
+        for invalid_limit in [0, 201] {
+            let response = router(runtime.clone())
+                .oneshot(
+                    authorized(Request::get(format!(
+                        "/api/v1/agent-sessions?limit={invalid_limit}"
+                    )))
+                    .body(Body::empty())
+                    .expect("invalid bound request"),
+                )
+                .await
+                .expect("invalid bound response");
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        }
     }
 
     #[tokio::test]

@@ -177,6 +177,10 @@ test.beforeEach(async ({ page }) => {
       events: [{ id: "00000000-0000-4000-8000-00000000060b", type_id: "mcg.action_classified.v1", schema_version: 1, sequence: 4, action_id: canonicalActionId, execution_id: canonicalExecutionId, correlation_id: "00000000-0000-4000-8000-00000000060c", causation_id: null, idempotency_key: "action-classify-1", occurred_at: now, payload: actionPayload }]
     };
     const canonicalInvocationId = "00000000-0000-4000-8000-000000000612";
+    const globalAgentSessions = [
+      { schema_version: 1, session_id: "00000000-0000-4000-8000-000000000620", conversation_id: "00000000-0000-4000-8000-000000000621", conversation_title: "Release qualification", conversation_state: "active", role_id: "00000000-0000-4000-8000-000000000622", organization_revision_id: baseOrganization.revision_id, kind: "coder", display_name: "Coding Agent Atlas", state: "working", codex_thread_id: "thread-atlas", model: "gpt-5.6-sol", created_at: now, updated_at: now },
+      { schema_version: 1, session_id: "00000000-0000-4000-8000-000000000623", conversation_id: "00000000-0000-4000-8000-000000000624", conversation_title: "Security verification", conversation_state: "active", role_id: "00000000-0000-4000-8000-000000000625", organization_revision_id: baseOrganization.revision_id, kind: "tester", display_name: "Tester", state: "ready", created_at: now, updated_at: now }
+    ];
     const invocationHash = (domain: string, digit: string) => ({ algorithm: "blake3-256", domain, digest_hex: digit.repeat(64) });
     const canonicalInvocation = {
       invocation_id: canonicalInvocationId,
@@ -254,6 +258,8 @@ test.beforeEach(async ({ page }) => {
           if (command === "protected_root_action") return args.actionId === canonicalActionId ? canonicalActionInspection : null;
           if (command === "protected_root_invocations") return [canonicalInvocation];
           if (command === "protected_root_invocation") return args.invocationId === canonicalInvocationId ? canonicalInvocationInspection : null;
+          if (command === "list_global_agent_sessions") return { sessions: globalAgentSessions };
+          if (command === "list_agent_runs") return { runs: [] };
           if (command === "cancel_protected_root_workflow") {
             if (args.request.attempt_id !== canonicalAttemptId || args.request.expected_revision !== 7 || args.request.expected_generation !== 3) {
               throw new Error("stale workflow cancellation fence");
@@ -702,6 +708,37 @@ test("Runtime invocations keep one Root truth across Simple Advanced and Develop
   await expect(invocations.getByText("Completed", { exact: true })).toBeVisible();
   await expect(invocations.getByRole("button", { name: "Inspect" })).toHaveCount(0);
   await expect(invocations.getByRole("button", { name: "Canonical invocation evidence" })).toHaveCount(0);
+});
+
+test("global agent browser searches every active conversation with progressive detail", async ({ page }) => {
+  test.setTimeout(90_000);
+  await page.goto("/");
+  await page.getByRole("link", { name: "Agents", exact: true }).click();
+
+  let browser = page.getByRole("article", { name: "Global agent sessions" });
+  await expect(browser.getByText("Coding Agent Atlas", { exact: true })).toBeVisible();
+  await expect(browser.getByText("Tester", { exact: true })).toBeVisible();
+  await expect(browser.getByText(/00000000-0000-4000-8000-000000000620/)).toHaveCount(0);
+  await browser.getByRole("searchbox", { name: "Search global agent sessions" }).fill("security");
+  await expect(browser.getByText("Coding Agent Atlas", { exact: true })).toHaveCount(0);
+  await expect(browser.getByText("Tester", { exact: true })).toBeVisible();
+
+  await enableAdvancedMode(page);
+  await page.getByRole("link", { name: "Agents", exact: true }).click();
+  browser = page.getByRole("article", { name: "Global agent sessions" });
+  await browser.getByRole("searchbox", { name: "Search global agent sessions" }).fill("atlas");
+  await expect(browser.getByText(/Session 00000000-0000-4000-8000-000000000620/)).toBeVisible();
+
+  await openOwnerSurface(page, "Settings");
+  await page.getByRole("button", { name: "General", exact: true }).click();
+  await page.getByRole("radio", { name: /Developer/ }).click();
+  await page.getByRole("button", { name: "Back to app" }).click();
+  await page.getByRole("link", { name: "Agents", exact: true }).click();
+  browser = page.getByRole("article", { name: "Global agent sessions" });
+  await expect(browser.getByText(/Codex thread thread-atlas/)).toBeVisible();
+  await expect(browser.getByText(/organization revision/)).toBeVisible();
+  const accessibility = await new AxeBuilder({ page }).include(".global-agent-session-section").analyze();
+  expect(accessibility.violations, "Global-agent-browser accessibility violations").toEqual([]);
 });
 
 test("consumer shell starts simple and can reveal advanced status", async ({ page }) => {

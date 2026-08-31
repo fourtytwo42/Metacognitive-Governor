@@ -39,12 +39,13 @@ use mcg_api::{
     CreateTaskRequest, DecideSharedOrganizationRequest, DelegationMutationRequest,
     DelegationRetryRequest, DeploySiteRequest, DiscoverProjectRequest, EvaluationMutationResponse,
     ExecuteAgentWorkRequest, ExperimentBenchmarkListResponse, ExperimentDecisionListResponse,
-    ExperimentListResponse, ForkConversationRequest, ImportOrganizationRequest,
-    ImportSharedOrganizationRequest, InheritOrganizationRequest, InstallLocalPluginRequest,
-    InstallRegistryPluginRequest, InvokePluginRequest, LaunchTaskRequest, LaunchTaskResponse,
-    ManagedMemoryResponse, McpListResponse, MemoryClaimHistoryResponse, MemoryClaimListResponse,
-    MentionCandidateListResponse, NavigateBrowserSessionRequest, OrganizationHistoryResponse,
-    OrganizationListResponse, OrganizationMutationResponse, OrganizationPublisherListResponse,
+    ExperimentListResponse, ForkConversationRequest, GlobalAgentSessionListResponse,
+    ImportOrganizationRequest, ImportSharedOrganizationRequest, InheritOrganizationRequest,
+    InstallLocalPluginRequest, InstallRegistryPluginRequest, InvokePluginRequest,
+    LaunchTaskRequest, LaunchTaskResponse, ManagedMemoryResponse, McpListResponse,
+    MemoryClaimHistoryResponse, MemoryClaimListResponse, MentionCandidateListResponse,
+    NavigateBrowserSessionRequest, OrganizationHistoryResponse, OrganizationListResponse,
+    OrganizationMutationResponse, OrganizationPublisherListResponse,
     OrganizationShareReviewListResponse, PlanAgentRunRequest, PlanWorkRequest,
     PlatformSessionHistoryResponse, PlatformSessionListResponse, PluginInvocationHistoryResponse,
     PluginListResponse, PrepareCloudDiffApplyRequest, ProjectHistoryResponse, ProjectListResponse,
@@ -73,15 +74,16 @@ use mcg_contracts::{ActionId, InvocationId, WorkflowCancelRequest, WorkflowId, W
 use mcg_domain::{
     AgentWakeState, ApprovalMode, CloudDiffApply, CodexConfigOverride, ComposerMentionInput,
     ComputerUseCapability, ComputerUseRegion, ComputerUseTarget, Conversation,
-    ConversationGoalStatus, ConversationId, ConversationInteractionKind, ConversationMode,
-    ConversationRole, ConversationState, ConversationTurnId, ConversationTurnState,
-    ConversationView, CoordinationBatchState, ExecutionApprovalPolicy, ExecutionPreferences,
-    ExecutionSandboxMode, MemoryClaimId, MemoryTransferId, MentionCandidate, MentionKind,
-    NotificationSeverity, OrganizationId, OrganizationImportId, OrganizationRevisionId,
-    OrganizationShareReviewId, PlatformCapabilitySnapshot, PlatformSession, PlatformSessionId,
-    PlatformSessionKind, PluginCapabilityGrant, PluginInstallSource, PluginInstallation,
-    PluginInvocationId, PluginRevision, PluginRevisionId, PluginSignature, PluginSignatureState,
-    ProjectId, ReviewedTopologyPlanId, RunId, ScheduleId, ScheduleState, ScheduleTrigger,
+    ConversationAgentSessionId, ConversationGoalStatus, ConversationId,
+    ConversationInteractionKind, ConversationMode, ConversationRole, ConversationState,
+    ConversationTurnId, ConversationTurnState, ConversationView, CoordinationBatchState,
+    ExecutionApprovalPolicy, ExecutionPreferences, ExecutionSandboxMode, MemoryClaimId,
+    MemoryTransferId, MentionCandidate, MentionKind, NotificationSeverity, OrganizationId,
+    OrganizationImportId, OrganizationRevisionId, OrganizationShareReviewId,
+    PlatformCapabilitySnapshot, PlatformSession, PlatformSessionId, PlatformSessionKind,
+    PluginCapabilityGrant, PluginInstallSource, PluginInstallation, PluginInvocationId,
+    PluginRevision, PluginRevisionId, PluginSignature, PluginSignatureState, ProjectId,
+    ReviewedTopologyPlanId, RunId, ScheduleId, ScheduleState, ScheduleTrigger,
     SchedulerNotification, SchedulerNotificationId, Site, SiteDeploymentCommand, SiteDeploymentId,
     SiteEnvironment, SiteHealthCheckId, SiteId, SiteMonitor, SiteState, SshHost, SshHostId,
     SshWorkflow, SshWorkflowId, TaskEnvelope, TaskId, TaskState, WorkItemId,
@@ -126,8 +128,8 @@ use commands::{CommandContext, QueuePolicy, SLASH_COMMANDS, command_named};
 use exec_jsonl::{ExecJsonlEvent, ExecJsonlProjector};
 use interactive::{
     PaletteCandidate, PaletteKind, PaletteRequest, SessionPickerCandidate, SlashCandidate,
-    SubmittedLine, TuiAction, TuiModel, TuiTerminal, prompt_for_question, select_local_provider,
-    select_resume_cwd, select_session,
+    SubmittedLine, TuiAction, TuiModel, TuiTerminal, prompt_for_question, select_agent_session,
+    select_local_provider, select_resume_cwd, select_session,
 };
 
 #[derive(Serialize)]
@@ -485,7 +487,7 @@ struct CodexCompatCli {
 #[derive(Debug, Subcommand)]
 enum CodexCompatCommand {
     /// Browse all governed agent sessions on the shared MetaCog daemon.
-    Agents,
+    Agents(Box<AgentsArgs>),
     /// Hand a workspace path to the MetaCog desktop app.
     App(Box<AppArgs>),
     /// Run MetaCog non-interactively through the governed agent workflow.
@@ -738,6 +740,12 @@ struct ExecArgs {
     output_schema: Option<PathBuf>,
     #[arg(value_name = "PROMPT", num_args = 0..)]
     prompt: Vec<String>,
+}
+
+#[derive(Debug, Args)]
+struct AgentsArgs {
+    #[command(flatten)]
+    remote: InteractiveRemoteArgs,
 }
 
 #[derive(Debug, Args)]
@@ -3188,6 +3196,7 @@ async fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
                 Some(preferences),
                 mentions,
                 no_alt_screen,
+                None,
                 invocation_remote.as_ref(),
                 dangerously_bypass_hook_trust,
             )
@@ -3791,7 +3800,8 @@ async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
     }
     let remote_supported = matches!(
         &cli.command,
-        CodexCompatCommand::Resume(_)
+        CodexCompatCommand::Agents(_)
+            | CodexCompatCommand::Resume(_)
             | CodexCompatCommand::Queue(_)
             | CodexCompatCommand::Fork(_)
             | CodexCompatCommand::Archive(_)
@@ -3929,8 +3939,17 @@ async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
         CodexCompatCommand::Sandbox(_) => {
             unreachable!("sandbox handled before daemon authentication")
         }
-        CodexCompatCommand::Agents => {
-            run_codex_agents(&client, host, token).await?;
+        CodexCompatCommand::Agents(args) => {
+            let invocation_remote = resolve_invocation_remote(root_remote, args.remote)?;
+            run_codex_agents(
+                &client,
+                host,
+                token,
+                &project,
+                no_alt_screen,
+                invocation_remote.as_ref(),
+            )
+            .await?;
         }
         CodexCompatCommand::Apply(args) => {
             if model.is_some()
@@ -4068,6 +4087,7 @@ async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
                 preferences,
                 mentions,
                 no_alt_screen,
+                None,
                 invocation_remote.as_ref(),
                 dangerously_bypass_hook_trust,
             ))
@@ -4269,6 +4289,7 @@ async fn run_codex_compat_cli() -> Result<(), Box<dyn std::error::Error>> {
                 preferences,
                 mentions,
                 no_alt_screen,
+                None,
                 invocation_remote.as_ref(),
                 dangerously_bypass_hook_trust,
             ))
@@ -4861,25 +4882,73 @@ async fn run_codex_agents(
     client: &reqwest::Client,
     host: &str,
     token: &str,
+    project: &std::path::Path,
+    no_alt_screen: bool,
+    remote: Option<&InvocationRemote>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut conversations = list_cli_sessions(client, host, token).await?;
-    conversations.retain(|conversation| conversation.state == ConversationState::Active);
-    conversations.sort_by_key(|conversation| std::cmp::Reverse(conversation.updated_at));
-    let mut count = 0_usize;
-    for conversation in conversations {
-        let view = fetch_conversation(client, host, token, &conversation.id.to_string()).await?;
-        for session in &view.team.sessions {
-            count = count.saturating_add(1);
+    let response: GlobalAgentSessionListResponse =
+        get_authenticated(client, host, token, "/api/v1/agent-sessions?limit=200").await?;
+    if !std::io::stdin().is_terminal() {
+        if remote.is_some() {
+            return Err("`mcg agents --remote` requires an interactive terminal".into());
+        }
+        for session in &response.sessions {
             println!(
                 "{} · {} · {:?} · {:?} · {}",
-                conversation.title, session.display_name, session.kind, session.state, session.id
+                session.conversation_title,
+                session.display_name,
+                session.kind,
+                session.state,
+                session.session_id
             );
         }
+        if response.sessions.is_empty() {
+            println!("No governed agent sessions found.");
+        }
+        return Ok(());
     }
-    if count == 0 {
+    if response.sessions.is_empty() {
         println!("No governed agent sessions found.");
+        return Ok(());
     }
-    Ok(())
+    let candidates = response
+        .sessions
+        .iter()
+        .map(|session| SessionPickerCandidate {
+            id: session.session_id.to_string(),
+            title: format!("{} · {}", session.display_name, session.conversation_title),
+            detail: format!(
+                "{:?} · {:?} · {}",
+                session.kind, session.state, session.session_id
+            ),
+        })
+        .collect::<Vec<_>>();
+    let selected = select_agent_session(&candidates, no_alt_screen)?
+        .ok_or("agent session selection was cancelled")?;
+    let selected = selected.parse::<ConversationAgentSessionId>()?;
+    let summary = response
+        .sessions
+        .iter()
+        .find(|session| session.session_id == selected)
+        .ok_or("selected agent session is no longer available")?;
+    let conversation =
+        fetch_conversation(client, host, token, &summary.conversation_id.to_string())
+            .await?
+            .conversation;
+    Box::pin(run_interactive(
+        client,
+        host,
+        token,
+        project,
+        Some(conversation),
+        None,
+        Vec::new(),
+        no_alt_screen,
+        Some(selected),
+        remote,
+        false,
+    ))
+    .await
 }
 
 async fn set_codex_feature_cli(
@@ -5497,6 +5566,7 @@ async fn run_interactive(
     initial_preferences: Option<ExecutionPreferences>,
     initial_mentions: Vec<String>,
     no_alt_screen: bool,
+    initial_agent_session_id: Option<ConversationAgentSessionId>,
     remote: Option<&InvocationRemote>,
     bypass_hook_trust: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -5569,6 +5639,11 @@ async fn run_interactive(
             fetch_conversation(client, host, token, &conversation.id.to_string()).await?;
         let branch = git_branch(project_root.as_deref()).unwrap_or_else(|| "no branch".into());
         let mut model = TuiModel::new(initial_view, root.clone(), branch);
+        if let Some(session_id) = initial_agent_session_id
+            && !model.focus_agent_session(session_id)
+        {
+            return Err("selected agent session is absent from its conversation".into());
+        }
         if let Ok(tui_preferences) = interactive_tui_preferences(client, host, token).await {
             model.set_cli_preferences(tui_preferences);
         }
@@ -16825,7 +16900,27 @@ mod tests {
 
         let agents = CodexCompatCli::try_parse_from(["mcg", "agents"])
             .expect("Codex-compatible agents command");
-        assert!(matches!(agents.command, CodexCompatCommand::Agents));
+        assert!(matches!(agents.command, CodexCompatCommand::Agents(_)));
+        let remote_agents = CodexCompatCli::try_parse_from([
+            "mcg",
+            "agents",
+            "--remote",
+            "wss://codex.example.test:443",
+            "--remote-auth-token-env",
+            "CODEX_REMOTE_TOKEN",
+        ])
+        .expect("Codex-compatible remote agents command");
+        let CodexCompatCommand::Agents(remote_agents_args) = &remote_agents.command else {
+            panic!("remote agents command did not preserve its argument group");
+        };
+        assert_eq!(
+            remote_agents_args.remote.remote.as_deref(),
+            Some("wss://codex.example.test:443")
+        );
+        assert_eq!(
+            remote_agents_args.remote.remote_auth_token_env.as_deref(),
+            Some("CODEX_REMOTE_TOKEN")
+        );
 
         let apply = CodexCompatCli::try_parse_from(["mcg", "a", "task-123"])
             .expect("Codex-compatible apply alias");

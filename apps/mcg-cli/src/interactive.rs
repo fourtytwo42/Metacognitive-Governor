@@ -498,6 +498,25 @@ pub fn select_session(
     )
 }
 
+/// Opens the global agent-session picker and returns the selected stable session id.
+///
+/// # Errors
+///
+/// Returns an I/O error when terminal setup, rendering, or input handling fails.
+pub fn select_agent_session(
+    candidates: &[SessionPickerCandidate],
+    no_alt_screen: bool,
+) -> io::Result<Option<String>> {
+    select_candidate(
+        candidates,
+        no_alt_screen,
+        "Browse governed agent sessions",
+        "Search conversations, roles, states, or ids",
+        "No matching governed agent session · Esc cancels",
+        "↑↓ select · Enter open · type to filter · Esc cancel",
+    )
+}
+
 /// Asks which working directory should govern a resumed or forked conversation.
 pub fn select_resume_cwd(
     current: &str,
@@ -645,6 +664,24 @@ impl TuiModel {
 
     pub fn set_status(&mut self, value: impl Into<String>) {
         self.status = value.into();
+    }
+
+    /// Focuses an exact agent session already present in the scoped conversation view.
+    pub fn focus_agent_session(&mut self, session_id: ConversationAgentSessionId) -> bool {
+        if self
+            .view
+            .team
+            .sessions
+            .iter()
+            .any(|session| session.id == session_id)
+        {
+            self.selected_agent_session_id = Some(session_id);
+            self.transcript_scroll = 0;
+            self.status = format!("Viewing {}", self.selected_agent_name());
+            true
+        } else {
+            false
+        }
     }
 
     pub fn push_notices(&mut self, notices: Vec<String>) {
@@ -2435,6 +2472,26 @@ mod tests {
                 .is_none()
         );
         assert!(model.selected_agent_session_id.is_none());
+    }
+
+    #[test]
+    fn global_agent_browser_can_focus_only_a_session_in_the_selected_conversation() {
+        let mut agent_view = view(false);
+        let selected = agent_session(
+            &agent_view.conversation,
+            "Tester",
+            ConversationAgentKind::Tester,
+            ConversationAgentSessionState::Working,
+        );
+        let absent = ConversationAgentSessionId::new();
+        agent_view.team.sessions.push(selected.clone());
+        let mut model = TuiModel::new(agent_view, "project".into(), "main".into());
+
+        assert!(!model.focus_agent_session(absent));
+        assert!(model.selected_agent_session_id.is_none());
+        assert!(model.focus_agent_session(selected.id));
+        assert_eq!(model.selected_agent_session_id, Some(selected.id));
+        assert_eq!(model.selected_agent_name(), "Tester");
     }
 
     #[test]

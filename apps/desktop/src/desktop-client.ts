@@ -473,6 +473,25 @@ export interface ConversationAgentSession {
   created_at: string;
   updated_at: string;
 }
+export interface GlobalAgentSessionSummary {
+  schema_version: number;
+  session_id: string;
+  conversation_id: string;
+  conversation_title: string;
+  conversation_state: ConversationState;
+  project_id?: string;
+  role_id: string;
+  organization_revision_id: string;
+  kind: ConversationAgentKind;
+  display_name: string;
+  parent_session_id?: string;
+  state: ConversationAgentSessionState;
+  codex_thread_id?: string;
+  model?: string;
+  created_at: string;
+  updated_at: string;
+}
+export interface GlobalAgentSessionListResponse { sessions: GlobalAgentSessionSummary[] }
 export type AgentDelegationState = "requested" | "preparing" | "running" | "waiting" | "blocked" | "reported" | "integrating" | "completed" | "failed" | "cancelled";
 export type DelegationFailureClass = "none" | "precondition" | "policy_denied" | "transient_tool" | "agent_omission" | "verification" | "conflict" | "delivery" | "cancelled" | "uncertain";
 export type DelegationRecoveryDirective = "none" | "retry_same_thread" | "retry_new_delegation" | "replan" | "await_owner" | "retain_for_review" | "do_not_retry";
@@ -2857,6 +2876,10 @@ export function publishOrganizationRevision(preview: OrganizationRevisionPreview
 
 export function listAgentRuns(): Promise<AgentRunListResponse> {
   return invoke("list_agent_runs");
+}
+
+export function listGlobalAgentSessions(): Promise<GlobalAgentSessionListResponse> {
+  return invoke("list_global_agent_sessions");
 }
 
 export function getAgentRun(runId: string): Promise<AgentRunView> {

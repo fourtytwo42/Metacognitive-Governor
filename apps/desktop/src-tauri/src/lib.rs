@@ -16,13 +16,14 @@ use mcg_api::{
     DelegationRetryRequest, DeploySiteRequest, DiscoverProjectRequest,
     ExperimentBenchmarkListResponse, ExperimentDecisionListResponse, ExperimentListResponse,
     GitHubConnectionStatus, GitHubLoginStart, GitHubRepository, GitHubRepositoryList,
-    GovernorOverviewResponse, GovernorProposalListResponse, ImportOrganizationRequest,
-    ImportSharedOrganizationRequest, InheritOrganizationRequest, InstallLocalPluginRequest,
-    InstallRegistryPluginRequest, InvokePluginRequest, LaunchTaskRequest, LaunchTaskResponse,
-    LinkGitHubRepository, ManagedMemoryResponse, ManagedWorktreeListResponse, McpListResponse,
-    MemoryClaimHistoryResponse, MemoryClaimListResponse, NavigateBrowserSessionRequest,
-    OrganizationAssignmentResponse, OrganizationHistoryResponse, OrganizationListResponse,
-    OrganizationMutationResponse, OrganizationPublisherListResponse, OrganizationRevisionPreview,
+    GlobalAgentSessionListResponse, GovernorOverviewResponse, GovernorProposalListResponse,
+    ImportOrganizationRequest, ImportSharedOrganizationRequest, InheritOrganizationRequest,
+    InstallLocalPluginRequest, InstallRegistryPluginRequest, InvokePluginRequest,
+    LaunchTaskRequest, LaunchTaskResponse, LinkGitHubRepository, ManagedMemoryResponse,
+    ManagedWorktreeListResponse, McpListResponse, MemoryClaimHistoryResponse,
+    MemoryClaimListResponse, NavigateBrowserSessionRequest, OrganizationAssignmentResponse,
+    OrganizationHistoryResponse, OrganizationListResponse, OrganizationMutationResponse,
+    OrganizationPublisherListResponse, OrganizationRevisionPreview,
     OrganizationShareReviewListResponse, OwnerGovernorApprovalRequest,
     PlatformSessionHistoryResponse, PlatformSessionListResponse, PluginInvocationHistoryResponse,
     PluginListResponse, PrepareCloudDiffApplyRequest, PreviewOrganizationRevisionRequest,
@@ -1837,6 +1838,16 @@ async fn list_agent_runs() -> Result<AgentRunListResponse, String> {
         reqwest::Client::new().get(format!("{LOCAL_DAEMON}/api/v1/runs?limit=50")),
         None::<&()>,
         "Agent run listing",
+    )
+    .await
+}
+
+#[tauri::command]
+async fn list_global_agent_sessions() -> Result<GlobalAgentSessionListResponse, String> {
+    daemon_json(
+        reqwest::Client::new().get(format!("{LOCAL_DAEMON}/api/v1/agent-sessions?limit=200")),
+        None::<&()>,
+        "Global agent session listing",
     )
     .await
 }
@@ -4229,6 +4240,7 @@ pub fn run() {
             preview_organization_revision,
             publish_organization_revision,
             list_agent_runs,
+            list_global_agent_sessions,
             get_agent_run,
             cancel_agent_run,
             list_organizations,

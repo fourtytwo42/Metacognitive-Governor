@@ -1832,6 +1832,8 @@ input:focus, select:focus, textarea:focus { border-color: #777; box-shadow: 0 0 
 .health-dot.health-ready, .health-dot.health-active, .health-dot.health-connected, .health-dot.health-healthy { background: #58c989; box-shadow: 0 0 0 3px rgba(88, 201, 137, .1); }
 .health-dot.health-warning, .health-dot.health-degraded { background: #e5ad54; }
 .agent-section-card { padding: 18px; }
+.compact-search { display: block; margin: 12px 0 4px; }
+.compact-search input { width: min(100%, 460px); }
 .agent-overview-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
 .agent-overview-grid .agent-section-card { display: grid; align-content: start; gap: 8px; min-height: 150px; }
 .agent-overview-grid .link-button { justify-self: start; margin-top: auto; }
@@ -1848,8 +1850,8 @@ input:focus, select:focus, textarea:focus { border-color: #777; box-shadow: 0 0 
 .assignment-row, .team-row, .instance-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 13px 4px; border-top: 1px solid var(--mcg-border); }
 .assignment-row > span, .team-row > span, .instance-row > span { display: grid; min-width: 0; gap: 3px; }
 .assignment-row small, .team-row small, .instance-row small { color: var(--mcg-muted); }
-.canonical-workflow-row, .canonical-action-row { flex-wrap: wrap; align-items: flex-start; }
-.canonical-workflow-row > span, .canonical-action-row > span { flex: 1 1 360px; }
+.canonical-workflow-row, .canonical-action-row, .global-agent-session-row { flex-wrap: wrap; align-items: flex-start; }
+.canonical-workflow-row > span, .canonical-action-row > span, .global-agent-session-row > span { flex: 1 1 360px; }
 .workflow-inspection, .action-inspection, .invocation-inspection { flex: 1 0 100%; display: grid; gap: 10px; padding: 12px; border: 1px solid var(--mcg-border); border-radius: 10px; background: var(--mcg-bg); }
 .workflow-inspection p, .workflow-inspection ul, .action-inspection p, .action-inspection ul, .invocation-inspection p, .invocation-inspection ul { margin: 0; }
 .workflow-inspection pre, .action-inspection pre, .invocation-inspection pre { max-height: 360px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }

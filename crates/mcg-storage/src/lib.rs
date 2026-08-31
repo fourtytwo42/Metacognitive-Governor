@@ -13,9 +13,10 @@ use mcg_domain::{
     ConversationAgentSession, ConversationId, ConversationMessage, ConversationMessageId,
     ConversationPreview, ConversationPreviewId, ConversationPreviewState, ConversationTeamState,
     ConversationTurn, ConversationTurnId, ConversationView, CoordinationBatch, CoordinationBatchId,
-    CoordinationBatchState, LeaseId, ManagedWorktree, MemoryClaimId, MemoryTransferId, ProjectId,
-    ProjectSnapshotId, SharedContextHit, SharedContextSourceKind, TaskEnvelope, TaskId, TaskState,
-    ToolExecutionId, ToolRequestId, effective_delegation_attempt_ids,
+    CoordinationBatchState, GLOBAL_AGENT_SESSION_SUMMARY_SCHEMA_VERSION, GlobalAgentSessionSummary,
+    LeaseId, ManagedWorktree, MemoryClaimId, MemoryTransferId, ProjectId, ProjectSnapshotId,
+    SharedContextHit, SharedContextSourceKind, TaskEnvelope, TaskId, TaskState, ToolExecutionId,
+    ToolRequestId, effective_delegation_attempt_ids,
 };
 use mcg_events::{EventEnvelope, EventKind, TaskCreatedPayload, TaskStateChangedPayload};
 use mcg_projects::{
@@ -3741,6 +3742,75 @@ impl SqliteEventStore {
         })
     }
 
+    /// Returns a bounded, newest-first inventory of governed agent sessions across conversations.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::InvalidData`] when `limit` is outside `1..=200` or a stored
+    /// conversation/session binding is invalid. Storage and decoding failures are propagated.
+    pub fn global_agent_sessions(
+        &self,
+        limit: usize,
+        include_archived: bool,
+    ) -> Result<Vec<GlobalAgentSessionSummary>, StorageError> {
+        if !(1..=200).contains(&limit) {
+            return Err(StorageError::InvalidData(
+                "global agent session limit must be between 1 and 200".into(),
+            ));
+        }
+        let sql = if include_archived {
+            "SELECT c.conversation_json, s.session_json
+             FROM conversation_agent_sessions s
+             JOIN conversations c ON c.conversation_id = s.conversation_id
+             ORDER BY s.updated_at DESC, s.session_id
+             LIMIT ?1"
+        } else {
+            "SELECT c.conversation_json, s.session_json
+             FROM conversation_agent_sessions s
+             JOIN conversations c ON c.conversation_id = s.conversation_id
+             WHERE c.state = 'active'
+             ORDER BY s.updated_at DESC, s.session_id
+             LIMIT ?1"
+        };
+        let mut statement = self.connection.prepare(sql)?;
+        statement
+            .query_map(
+                [i64::try_from(limit).map_err(|_| {
+                    StorageError::InvalidData("global agent session limit is invalid".into())
+                })?],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )?
+            .map(|row| {
+                let (conversation_json, session_json) = row?;
+                let conversation: Conversation = serde_json::from_str(&conversation_json)?;
+                let session: ConversationAgentSession = serde_json::from_str(&session_json)?;
+                if session.conversation_id != conversation.id {
+                    return Err(StorageError::InvalidData(
+                        "global agent session conversation binding is invalid".into(),
+                    ));
+                }
+                Ok(GlobalAgentSessionSummary {
+                    schema_version: GLOBAL_AGENT_SESSION_SUMMARY_SCHEMA_VERSION,
+                    session_id: session.id,
+                    conversation_id: conversation.id,
+                    conversation_title: conversation.title,
+                    conversation_state: conversation.state,
+                    project_id: conversation.project_id,
+                    role_id: session.role_id,
+                    organization_revision_id: session.organization_revision_id,
+                    kind: session.kind,
+                    display_name: session.display_name,
+                    parent_session_id: session.parent_session_id,
+                    state: session.state,
+                    codex_thread_id: session.codex_thread_id,
+                    model: session.model,
+                    created_at: session.created_at,
+                    updated_at: session.updated_at,
+                })
+            })
+            .collect()
+    }
+
     pub fn agent_delegation(
         &self,
         delegation_id: mcg_domain::AgentDelegationId,
@@ -6970,6 +7040,87 @@ mod tests {
             CoordinationBatchState::RecoveryRequired
         );
         assert_eq!(recovered.wakes[0].state, AgentWakeState::RecoveryRequired);
+    }
+
+    #[test]
+    fn global_agent_sessions_are_bounded_newest_first_and_archive_aware() {
+        let mut store = SqliteEventStore::open_in_memory().expect("store should open");
+        let active = Conversation::new("Active release work", None);
+        let mut archived = Conversation::new("Archived investigation", None);
+        archived.state = mcg_domain::ConversationState::Archived;
+        store
+            .create_conversation(&active, None)
+            .expect("active conversation");
+        store
+            .create_conversation(&archived, None)
+            .expect("archived conversation");
+
+        let now = Utc::now();
+        let active_session = ConversationAgentSession {
+            schema_version: mcg_domain::CONVERSATION_TEAM_SCHEMA_VERSION,
+            id: mcg_domain::ConversationAgentSessionId::new(),
+            conversation_id: active.id,
+            role_id: mcg_domain::RoleId::new(),
+            organization_revision_id: mcg_domain::OrganizationRevisionId::new(),
+            kind: mcg_domain::ConversationAgentKind::Coder,
+            display_name: "Coding Agent Atlas".into(),
+            parent_session_id: None,
+            state: mcg_domain::ConversationAgentSessionState::Working,
+            codex_thread_id: Some("thread-active".into()),
+            model: Some("fixture".into()),
+            prompt_revision: 1,
+            created_at: now,
+            updated_at: now + chrono::Duration::seconds(2),
+        };
+        let archived_session = ConversationAgentSession {
+            schema_version: mcg_domain::CONVERSATION_TEAM_SCHEMA_VERSION,
+            id: mcg_domain::ConversationAgentSessionId::new(),
+            conversation_id: archived.id,
+            role_id: mcg_domain::RoleId::new(),
+            organization_revision_id: mcg_domain::OrganizationRevisionId::new(),
+            kind: mcg_domain::ConversationAgentKind::Tester,
+            display_name: "Tester".into(),
+            parent_session_id: None,
+            state: mcg_domain::ConversationAgentSessionState::Retired,
+            codex_thread_id: Some("thread-archived".into()),
+            model: None,
+            prompt_revision: 1,
+            created_at: now,
+            updated_at: now + chrono::Duration::seconds(1),
+        };
+        store
+            .save_conversation_agent_session(&archived_session)
+            .expect("archived session");
+        store
+            .save_conversation_agent_session(&active_session)
+            .expect("active session");
+
+        let active_only = store
+            .global_agent_sessions(10, false)
+            .expect("active inventory");
+        assert_eq!(active_only.len(), 1);
+        assert_eq!(active_only[0].session_id, active_session.id);
+        assert_eq!(active_only[0].conversation_title, active.title);
+        assert_eq!(active_only[0].project_id, active.project_id);
+
+        let all = store
+            .global_agent_sessions(2, true)
+            .expect("complete inventory");
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].session_id, active_session.id);
+        assert_eq!(all[1].session_id, archived_session.id);
+        assert_eq!(
+            all[1].conversation_state,
+            mcg_domain::ConversationState::Archived
+        );
+        assert!(matches!(
+            store.global_agent_sessions(0, true),
+            Err(StorageError::InvalidData(_))
+        ));
+        assert!(matches!(
+            store.global_agent_sessions(201, true),
+            Err(StorageError::InvalidData(_))
+        ));
     }
 
     #[test]

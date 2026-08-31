@@ -160,6 +160,7 @@ import {
   listOrganizationShareReviews,
   listOrganizations,
   listAgentRuns,
+  listGlobalAgentSessions,
   listGovernorProposals,
   listManagedWorktrees,
   listCloudDiffApplies,
@@ -293,6 +294,7 @@ import {
   type Conversation,
   type ConversationActivity,
   type ConversationAgentSession,
+  type GlobalAgentSessionSummary,
   type AgentMessage,
   type AgentDelegation,
   type ConversationTeamState,
@@ -2857,6 +2859,8 @@ export function App() {
   const [governorConversationId, setGovernorConversationId] = useState("");
   const [organizationAssignments, setOrganizationAssignments] = useState<OrganizationAssignments | null>(null);
   const [agentRuns, setAgentRuns] = useState<AgentRunView[]>([]);
+  const [globalAgentSessions, setGlobalAgentSessions] = useState<GlobalAgentSessionSummary[]>([]);
+  const [globalAgentSearch, setGlobalAgentSearch] = useState("");
   const [selectedAgentRunId, setSelectedAgentRunId] = useState<string | null>(null);
   const [organizationDraft, setOrganizationDraft] = useState<OrganizationGenome | null>(null);
   const [organizationPreview, setOrganizationPreview] = useState<OrganizationRevisionPreview | null>(null);
@@ -4347,6 +4351,13 @@ export function App() {
     listAgentRuns()
       .then((response) => {
         if (active) setAgentRuns(response.runs);
+      })
+      .catch((error) => {
+        if (active) setAgentError(errorMessage(error));
+      });
+    listGlobalAgentSessions()
+      .then((response) => {
+        if (active) setGlobalAgentSessions(response.sessions);
       })
       .catch((error) => {
         if (active) setAgentError(errorMessage(error));
@@ -7279,9 +7290,10 @@ export function App() {
   }
 
   async function refreshAgents() {
-    const [overview, runs, policy, worktrees] = await Promise.all([
+    const [overview, runs, sessions, policy, worktrees] = await Promise.all([
       getGovernorOverview(),
       listAgentRuns(),
+      listGlobalAgentSessions(),
       getGovernorControlPolicy(),
       listManagedWorktrees()
     ]);
@@ -7289,6 +7301,7 @@ export function App() {
     setGovernorOverview(overview);
     setOrganizationAssignments(overview.assignments);
     setAgentRuns(runs.runs);
+    setGlobalAgentSessions(sessions.sessions);
     setGovernorPolicy(policy);
     setGovernorProposals(proposals.proposals);
     setManagedWorktrees(worktrees.worktrees);
@@ -7944,6 +7957,18 @@ export function App() {
     !normalizedShortcutSearch || `${name} ${description} ${shortcut}`.toLocaleLowerCase().includes(normalizedShortcutSearch)
   );
   const selectedAgentRun = agentRuns.find((run) => run.run.id === selectedAgentRunId) ?? null;
+  const normalizedGlobalAgentSearch = globalAgentSearch.trim().toLocaleLowerCase();
+  const visibleGlobalAgentSessions = globalAgentSessions.filter((session) =>
+    !normalizedGlobalAgentSearch || [
+      session.display_name,
+      session.conversation_title,
+      session.kind,
+      session.state,
+      session.session_id,
+      session.conversation_id,
+      session.model ?? ""
+    ].some((value) => value.toLocaleLowerCase().includes(normalizedGlobalAgentSearch))
+  );
   const selectedAgentTask = selectedAgentRun
     ? tasks.find((task) => task.id === selectedAgentRun.run.task_id) ?? null
     : null;
@@ -8946,6 +8971,25 @@ export function App() {
                   </>}
                 </div>
               </details>
+            </article>
+
+            <article className="agent-section-card global-agent-session-section" aria-label="Global agent sessions">
+              <div className="section-heading compact-heading">
+                <div><h3>Global agent sessions</h3><p className="muted">Browse Chat, Coordinator, Coding, and Tester sessions across every active conversation.</p></div>
+                <span className="count-badge">{visibleGlobalAgentSessions.length}</span>
+              </div>
+              <label className="compact-search"><span className="sr-only">Search global agent sessions</span><input type="search" aria-label="Search global agent sessions" value={globalAgentSearch} onChange={(event) => setGlobalAgentSearch(event.target.value)} placeholder="Search agents or conversations" /></label>
+              {visibleGlobalAgentSessions.length === 0 ? <p className="empty-state">{globalAgentSessions.length === 0 ? "No governed agent sessions yet." : "No agent sessions match this search."}</p> : <div className="instance-list">
+                {visibleGlobalAgentSessions.map((session) => <div className="instance-row global-agent-session-row" key={session.session_id} data-agent-state={session.state}>
+                  <span>
+                    <strong>{session.display_name}</strong>
+                    <small>{session.conversation_title} · {session.kind.replaceAll("_", " ")}</small>
+                    {advanced && <small>Session {session.session_id} · updated {new Date(session.updated_at).toLocaleString()}{session.model ? ` · ${session.model}` : ""}</small>}
+                    {userSettings?.interface_complexity === "developer" && <small>Conversation {session.conversation_id} · role {session.role_id} · organization revision {session.organization_revision_id}{session.codex_thread_id ? ` · Codex thread ${session.codex_thread_id}` : ""}</small>}
+                  </span>
+                  <div className="card-actions"><em className={`agent-state state-${session.state}`}>{session.state}</em><button className="secondary" type="button" onClick={() => openChat(session.conversation_id)}>Open conversation</button></div>
+                </div>)}
+              </div>}
             </article>
 
             <article className="agent-section-card canonical-workflow-section" aria-label="Durable workflows">

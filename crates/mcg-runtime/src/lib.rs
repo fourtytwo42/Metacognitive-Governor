@@ -86,10 +86,10 @@ use mcg_domain::{
     ConversationTurnState, ConversationView, ConversationVisibility, CoordinationBatch,
     CoordinationBatchId, CoordinationBatchState, CoordinatorReviewDecision, EvaluationId,
     ExecutionPreferences, ExperimentBenchmarkId, ExperimentDecisionId, ExperimentId,
-    GovernorProposalId, LeaseId, ManagedWorktree, ManagedWorktreeId, ManagedWorktreeState,
-    MemoryClaimId, MemoryTransferId, MentionCandidate, MentionKind, MentionTarget,
-    NotificationSeverity, OrganizationId, OrganizationImportId, OrganizationRevisionId,
-    OrganizationShareReviewId, PLATFORM_SCHEMA_VERSION, PlatformCapability,
+    GlobalAgentSessionSummary, GovernorProposalId, LeaseId, ManagedWorktree, ManagedWorktreeId,
+    ManagedWorktreeState, MemoryClaimId, MemoryTransferId, MentionCandidate, MentionKind,
+    MentionTarget, NotificationSeverity, OrganizationId, OrganizationImportId,
+    OrganizationRevisionId, OrganizationShareReviewId, PLATFORM_SCHEMA_VERSION, PlatformCapability,
     PlatformCapabilityAvailability, PlatformCapabilityKind, PlatformCapabilitySnapshot,
     PlatformCapabilitySnapshotId, PlatformSession, PlatformSessionEvent, PlatformSessionId,
     PlatformSessionKind, PlatformSessionOwner, PlatformSessionState, PluginCapabilityGrant,
@@ -4903,6 +4903,22 @@ impl AppRuntime {
 
     pub fn conversations(&self, include_archived: bool) -> Result<Vec<Conversation>, RuntimeError> {
         Ok(self.store()?.conversations(include_archived)?)
+    }
+
+    /// Returns a bounded global projection of governed agent sessions.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the authoritative store is unavailable, `limit` is outside
+    /// `1..=200`, or persisted conversation/session state fails validation.
+    pub fn global_agent_sessions(
+        &self,
+        limit: usize,
+        include_archived: bool,
+    ) -> Result<Vec<GlobalAgentSessionSummary>, RuntimeError> {
+        Ok(self
+            .store()?
+            .global_agent_sessions(limit, include_archived)?)
     }
 
     pub fn cli_tui_preferences(&self) -> Result<CliTuiPreferences, RuntimeError> {
