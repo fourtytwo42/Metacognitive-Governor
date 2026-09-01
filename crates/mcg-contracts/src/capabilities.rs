@@ -517,6 +517,7 @@ pub struct ToolInvocationProposal {
     pub requested_capabilities: ToolCapabilitySet,
     pub requested_limits: ToolResourceLimits,
     pub required_sandbox: SandboxCapabilityProfile,
+    pub platform: ExecutionPlatform,
     pub deadline: DateTime<Utc>,
 }
 
@@ -623,6 +624,7 @@ pub struct ToolInvocationPermit {
     pub capabilities: ToolCapabilitySet,
     pub limits: ToolResourceLimits,
     pub sandbox: SandboxCapabilityProfile,
+    pub platform: ExecutionPlatform,
     pub policy: PolicyBinding,
     pub expires_at: DateTime<Utc>,
     pub secret_handles: Vec<SecretHandleId>,
@@ -951,6 +953,7 @@ mod tests {
             requested_capabilities: manifest.required_capabilities.clone(),
             requested_limits: limits(),
             required_sandbox: manifest.sandbox_requirement,
+            platform: ExecutionPlatform::Windows,
             deadline: now + chrono::Duration::minutes(1),
         };
         let proposal_hash = tool_invocation_proposal_hash(&proposal).expect("proposal hash");
@@ -975,6 +978,7 @@ mod tests {
             capabilities: proposal.requested_capabilities.clone(),
             limits: proposal.requested_limits,
             sandbox: sandbox(IsolationGuarantee::Hard),
+            platform: proposal.platform,
             policy: PolicyBinding {
                 content_hash: policy_payload
                     .content_hash("MetaCog.ToolPolicy")

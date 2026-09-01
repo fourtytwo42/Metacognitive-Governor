@@ -48,10 +48,9 @@ use mcg_contracts::{
     ReconciliationJobId, ReconciliationObservation, RequestId, RootStatus, RpcEnvelope,
     RuntimeActorId, RuntimeIdentity, RuntimeInstanceId, RuntimeInvocationRequest,
     RuntimeInvocationResult, SandboxCapabilityProfile, SecretHandleId, SourceRef, StableTypeId,
-    TOOL_POLICY_HASH_DOMAIN, ToolInvocationPermit, ToolInvocationProposal, ToolManifest,
-    ToolPolicy, VersionedPayload, WorkflowAttempt, WorkflowCancelRequest, WorkflowId,
-    WorkflowState, canonical_contract_hash, decode_canonical_cbor_v1,
-    tool_invocation_proposal_hash,
+    ToolInvocationPermit, ToolInvocationProposal, ToolManifest, ToolPolicy, VersionedPayload,
+    WorkflowAttempt, WorkflowCancelRequest, WorkflowId, WorkflowState, canonical_contract_hash,
+    decode_canonical_cbor_v1, tool_invocation_proposal_hash,
 };
 use mcg_domain::{AgentLeaseId, EvaluationId};
 use mcg_platform::{
@@ -85,11 +84,12 @@ use mcg_storage::{
     AgentTurnVerificationTarget, AgentTurnWorkflowAttachment, ConsumerEvaluationCompletion,
     ModelEgressAuthorizationReceipt, ModelSecretHandleBinding, ModelSecretSlot,
     ReconciliationResolutionReceipt, RootMigrationReceipt, STORAGE_SCHEMA_VERSION, StorageError,
-    acquire_data_directory_lock, create_backup_bundle_from_snapshot, evaluation_report_source_ref,
-    inspect_database_before_root, model_descriptor_source_ref, model_destination_source_ref,
-    model_disclosure_hash, model_egress_policy_binding, model_egress_route_payload,
-    model_proposal_hash, model_provider_source_ref, model_secret_slots_for_auth,
-    snapshot_database_before_root,
+    ToolCapabilityAuthorizationReceipt, acquire_data_directory_lock,
+    create_backup_bundle_from_snapshot, evaluation_report_source_ref, inspect_database_before_root,
+    model_descriptor_source_ref, model_destination_source_ref, model_disclosure_hash,
+    model_egress_policy_binding, model_egress_route_payload, model_proposal_hash,
+    model_provider_source_ref, model_secret_slots_for_auth, snapshot_database_before_root,
+    tool_policy_binding,
 };
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -162,6 +162,9 @@ pub struct RuntimeInvocationCancellationReceipt {
 
 /// Root-owned, content-minimized authorization for one exact governed provider request.
 pub type RuntimeModelEgressAuthorizationReceipt = ModelEgressAuthorizationReceipt;
+
+/// Root-owned, content-minimized authorization for one exact governed Tool action.
+pub type RuntimeToolCapabilityAuthorizationReceipt = ToolCapabilityAuthorizationReceipt;
 
 #[derive(Debug, Clone)]
 pub struct GovernedModelProviderDispatchReceipt {
@@ -437,7 +440,8 @@ pub fn authorize_runtime_tool_capability(
     }
 
     let manifest_ref = manifest.versioned_ref()?;
-    if proposal.tool_manifest != manifest_ref
+    if proposal.platform != platform
+        || proposal.tool_manifest != manifest_ref
         || !policy.allowed_manifests.contains(&manifest_ref)
         || !manifest.platform_support.contains(&platform)
     {
@@ -490,14 +494,7 @@ pub fn authorize_runtime_tool_capability(
         );
     }
 
-    let policy_payload = VersionedPayload::canonical_v1(
-        StableTypeId::parse(ToolPolicy::TYPE_ID)?,
-        &serde_json::to_value(policy)?,
-    )?;
-    let policy_binding = PolicyBinding {
-        content_hash: policy_payload.content_hash(TOOL_POLICY_HASH_DOMAIN)?,
-        payload: policy_payload,
-    };
+    let policy_binding = tool_policy_binding(policy)?;
     let permit = ToolInvocationPermit {
         id: PermitId::new(),
         action_id: proposal.action_id,
@@ -514,6 +511,7 @@ pub fn authorize_runtime_tool_capability(
         capabilities: proposal.requested_capabilities.clone(),
         limits: proposal.requested_limits,
         sandbox: available_sandbox,
+        platform,
         policy: policy_binding,
         expires_at: proposal.deadline,
         secret_handles: proposal
@@ -526,6 +524,63 @@ pub fn authorize_runtime_tool_capability(
     };
     permit.validate()?;
     Ok(permit)
+}
+
+/// Intersects one untrusted Runtime Tool proposal with the exact registered manifest, Root policy,
+/// and measured host guarantees, then atomically persists the resulting permit and opaque handles.
+/// Exact active replay returns the original durable authority; no manifest or profile registration
+/// grants execution authority by itself.
+///
+/// # Errors
+/// Returns an error for unregistered, inactive, expired, substituted, over-scoped,
+/// under-isolated, unsupported, or unauthenticated proposals.
+#[allow(clippy::too_many_arguments)]
+pub fn authorize_and_persist_runtime_tool_capability(
+    runtime: &AppRuntime,
+    proposal: &ToolInvocationProposal,
+    expected_runtime_identity: &RuntimeIdentity,
+    manifest: &ToolManifest,
+    policy: &ToolPolicy,
+    available_sandbox: SandboxCapabilityProfile,
+    platform: mcg_contracts::ExecutionPlatform,
+    now: chrono::DateTime<Utc>,
+) -> Result<RuntimeToolCapabilityAuthorizationReceipt, ProtectedRootError> {
+    let registered = runtime
+        .tool_manifest(manifest.id, manifest.version)?
+        .ok_or_else(|| StorageError::InvalidData("Tool manifest is not registered".into()))?;
+    if registered != *manifest {
+        return Err(StorageError::Conflict(
+            "Root Tool authorization received a manifest different from durable evidence".into(),
+        )
+        .into());
+    }
+    let expected_policy = tool_policy_binding(policy)?;
+    if let Some(existing) = runtime.active_tool_capability_authorization(proposal.action_id, now)? {
+        if existing.proposal != *proposal
+            || existing.permit.policy != expected_policy
+            || existing.permit.sandbox != available_sandbox
+            || existing.permit.platform != platform
+            || existing.permit.tool_manifest != manifest.versioned_ref()?
+            || existing.permit.runtime_identity != *expected_runtime_identity
+        {
+            return Err(StorageError::Conflict(
+                "Root Tool authorization replay substituted proposal, policy, manifest, or host"
+                    .into(),
+            )
+            .into());
+        }
+        return Ok(existing);
+    }
+    let permit = authorize_runtime_tool_capability(
+        proposal,
+        expected_runtime_identity,
+        manifest,
+        policy,
+        available_sandbox,
+        platform,
+        now,
+    )?;
+    Ok(runtime.authorize_tool_capability(proposal, policy, &permit, now)?)
 }
 
 /// Canonically binds the exact provider request bytes authorized by Root.
@@ -6649,6 +6704,7 @@ mod tests {
             requested_capabilities: required_capabilities.clone(),
             requested_limits: limits,
             required_sandbox,
+            platform: ExecutionPlatform::Windows,
             deadline: at + chrono::Duration::minutes(2),
         };
         let policy = ToolPolicy {
@@ -6738,6 +6794,167 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn root_tool_capability_authority_persists_and_replays_through_runtime() {
+        use mcg_contracts::{
+            ExecutionPlatform, FilesystemAccess, FilesystemCapability, IsolationGuarantee,
+            SandboxCapabilityProfile, ToolCapabilitySet, ToolInvocationProposal, ToolManifest,
+            ToolManifestId, ToolPolicy, ToolResourceLimits,
+        };
+
+        let (temporary, config, runtime, execution, actor, at) = authorized_filesystem_fixture();
+        let (action, _) = runtime
+            .canonical_action_for_execution(execution.id)
+            .expect("load canonical Tool action")
+            .expect("canonical Tool action exists");
+        let attempt = runtime
+            .canonical_workflows()
+            .expect("load canonical workflows")
+            .into_iter()
+            .find(|attempt| attempt.attempt_id == action.attempt_id)
+            .expect("Tool workflow attempt");
+        let runtime_identity = RuntimeIdentity {
+            instance_id: RuntimeInstanceId::new(),
+            build_hash: workflow_hash("persisted-tool-runtime"),
+            protocol_version: PROTOCOL_V1,
+            started_at: at - chrono::Duration::seconds(1),
+        };
+        let capabilities = ToolCapabilitySet {
+            filesystem: vec![FilesystemCapability {
+                root: "capability-root".into(),
+                access: FilesystemAccess::Write,
+            }],
+            network: Vec::new(),
+            secret_slots: vec![
+                StableTypeId::parse("mcg.tool_secret.persisted_fixture.v1").expect("secret slot"),
+            ],
+            process_spawn: false,
+        };
+        let limits = ToolResourceLimits {
+            timeout_ms: 30_000,
+            max_output_bytes: 1_048_576,
+            max_memory_bytes: 256 * 1_048_576,
+            max_child_processes: 1,
+        };
+        let required_sandbox = SandboxCapabilityProfile {
+            filesystem_scope: IsolationGuarantee::Hard,
+            network: IsolationGuarantee::BestEffort,
+            process_tree: IsolationGuarantee::Hard,
+            secrets: IsolationGuarantee::Hard,
+            environment: IsolationGuarantee::Hard,
+            resources: IsolationGuarantee::BestEffort,
+            protected_paths: IsolationGuarantee::Hard,
+        };
+        let manifest = ToolManifest {
+            id: ToolManifestId::new(),
+            version: 1,
+            name: "fixture.persisted-write".into(),
+            summary: "Persist one exact governed Tool authorization".into(),
+            runner: root_invocation_source("persisted-tool-runner"),
+            input_schema: root_invocation_source("persisted-tool-input"),
+            output_schema: root_invocation_source("persisted-tool-output"),
+            maximum_effect_class: EffectClass::Reversible,
+            required_capabilities: capabilities.clone(),
+            resource_ceiling: limits,
+            sandbox_requirement: required_sandbox,
+            platform_support: vec![ExecutionPlatform::Windows],
+            receipt_semantics: StableTypeId::parse("mcg.tool_receipt.persisted_fixture.v1")
+                .expect("receipt type"),
+            reconciler: Some(root_invocation_source("persisted-tool-reconciler")),
+        };
+        runtime
+            .register_tool_manifest(&manifest, at)
+            .expect("register exact Tool manifest");
+        let proposal = ToolInvocationProposal {
+            action_id: action.id,
+            attempt_id: action.attempt_id,
+            attempt_revision: attempt.revision,
+            lease_generation: attempt.lease_generation,
+            runtime_actor: actor,
+            runtime_identity: runtime_identity.clone(),
+            task_contract: action.task_contract.clone(),
+            tool_manifest: manifest.versioned_ref().expect("Tool reference"),
+            arguments: ArtifactRef {
+                content_hash: action.operation_hash.clone(),
+                media_type: "application/cbor".into(),
+                byte_length: u64::try_from(action.operation.bytes.len()).expect("argument size"),
+            },
+            argument_hash: action.operation_hash.clone(),
+            requested_effect_class: action.effect_class,
+            requested_capabilities: capabilities.clone(),
+            requested_limits: limits,
+            required_sandbox,
+            platform: ExecutionPlatform::Windows,
+            deadline: at + chrono::Duration::minutes(2),
+        };
+        let policy = ToolPolicy {
+            allowed_manifests: vec![manifest.versioned_ref().expect("allowed Tool")],
+            maximum_effect_class: EffectClass::Consequential,
+            maximum_capabilities: capabilities,
+            maximum_limits: limits,
+            maximum_permit_lifetime_seconds: 300,
+        };
+        let available = SandboxCapabilityProfile {
+            filesystem_scope: IsolationGuarantee::Hard,
+            network: IsolationGuarantee::Hard,
+            process_tree: IsolationGuarantee::Hard,
+            secrets: IsolationGuarantee::Hard,
+            environment: IsolationGuarantee::Hard,
+            resources: IsolationGuarantee::Hard,
+            protected_paths: IsolationGuarantee::Hard,
+        };
+        let receipt = authorize_and_persist_runtime_tool_capability(
+            &runtime,
+            &proposal,
+            &runtime_identity,
+            &manifest,
+            &policy,
+            available,
+            ExecutionPlatform::Windows,
+            at,
+        )
+        .expect("persist Root Tool authorization");
+        assert_eq!(receipt.proposal, proposal);
+        assert_eq!(receipt.permit.platform, ExecutionPlatform::Windows);
+        assert_eq!(receipt.secret_handles.len(), 1);
+        assert_eq!(
+            authorize_and_persist_runtime_tool_capability(
+                &runtime,
+                &proposal,
+                &runtime_identity,
+                &manifest,
+                &policy,
+                available,
+                ExecutionPlatform::Windows,
+                at,
+            )
+            .expect("exact Root Tool replay"),
+            receipt
+        );
+        assert_eq!(
+            runtime
+                .resolve_tool_secret_handle_binding(
+                    receipt.permit.id,
+                    receipt.permit.secret_handles[0],
+                    at,
+                )
+                .expect("resolve exact opaque Tool handle"),
+            receipt.secret_handles[0]
+        );
+
+        drop(runtime);
+        let reopened = open(config).expect("reopen Root with durable Tool authority");
+        assert_eq!(
+            reopened
+                .active_tool_capability_authorization(action.id, at)
+                .expect("reload active Tool authority"),
+            Some(receipt)
+        );
+        drop(reopened);
+        drop(temporary);
     }
 
     #[test]

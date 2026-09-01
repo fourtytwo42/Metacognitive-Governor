@@ -59,15 +59,17 @@ use mcg_config::{
 };
 use mcg_contracts::{
     ActionEnvelope, ActionExecution, ActionExecutionId, ActionId, ActionInspection, ActionReceipt,
-    ActionSummary, ActionValidation, ArtifactRef, CompletionCertificate, ContentHash,
-    ContextManifest, CorrelationId, EffectOutcome, InvocationId, InvocationInspection,
+    ActionSummary, ActionValidation, ArtifactRef, CapabilityProfile, CompletionCertificate,
+    ContentHash, ContextManifest, CorrelationId, EffectOutcome, InvocationId, InvocationInspection,
     InvocationManifest, InvocationSummary, ModelEgressPolicy, ModelInvocationPermit,
     ModelInvocationProposal, ModelRun, ModelRunCostProvenance, ModelRunErrorClass, ModelRunId,
     ModelRunOutcomeEvidence, ModelRunState, ModelUsage, PermitId, ReconciliationJob,
     ReconciliationJobId, ReconciliationObservation, RuntimeActorId, RuntimeIdentity,
-    RuntimeInvocationRequest, RuntimeInvocationResult, SecretHandleId, SourceRef, StableTypeId,
-    WorkflowAttempt, WorkflowCancelRequest, WorkflowId, WorkflowInspection,
-    WorkflowInvocationActivity, WorkflowState, canonical_contract_hash,
+    RuntimeInvocationRequest, RuntimeInvocationResult, SecretHandleId, SkillManifest,
+    SkillManifestId, SourceRef, StableTypeId, ToolInvocationPermit, ToolInvocationProposal,
+    ToolManifest, ToolManifestId, ToolPolicy, VersionedRef, WorkflowAttempt, WorkflowCancelRequest,
+    WorkflowId, WorkflowInspection, WorkflowInvocationActivity, WorkflowState,
+    canonical_contract_hash,
 };
 use mcg_domain::{
     AgentContextCheckpoint, AgentContextCheckpointCause, AgentContextCheckpointId,
@@ -156,9 +158,9 @@ use mcg_storage::{
     ModelSecretHandleBinding, ReconciliationClaimReceipt, ReconciliationRecoveryReport,
     ReconciliationResolutionReceipt, RecoveryReport, RootMigrationReceipt, RootOwnership,
     RuntimeResponseArtifact, STORAGE_SCHEMA_VERSION, SqliteEventStore, StorageError,
-    WorkflowRecoveryReport, acquire_data_directory_lock,
-    create_encrypted_backup_bundle_from_snapshot, decrypt_backup_bundle_secrets,
-    evaluation_report_source_ref,
+    ToolCapabilityAuthorizationReceipt, ToolSecretHandleBinding, WorkflowRecoveryReport,
+    acquire_data_directory_lock, create_encrypted_backup_bundle_from_snapshot,
+    decrypt_backup_bundle_secrets, evaluation_report_source_ref,
 };
 pub use mcg_storage::{
     AgentTurnCommit, AutomaticExperimentDisposition, AutomaticExperimentOutcome,
@@ -4208,6 +4210,103 @@ impl AppRuntime {
         now: DateTime<Utc>,
     ) -> Result<ContentHash, RuntimeError> {
         Ok(self.store()?.persist_context_manifest(context, now)?)
+    }
+
+    /// Registers or exactly replays one immutable Tool manifest revision in Root-owned storage.
+    /// Registration is inventory evidence and does not itself grant execution authority.
+    ///
+    /// # Errors
+    /// Returns a runtime error for malformed, substituted, or non-monotonic manifest evidence.
+    pub fn register_tool_manifest(
+        &self,
+        manifest: &ToolManifest,
+        now: DateTime<Utc>,
+    ) -> Result<VersionedRef<ToolManifestId>, RuntimeError> {
+        Ok(self.store()?.register_tool_manifest(manifest, now)?)
+    }
+
+    /// Loads and revalidates one exact immutable Tool manifest revision.
+    ///
+    /// # Errors
+    /// Returns a runtime error for malformed or hash-inconsistent durable evidence.
+    pub fn tool_manifest(
+        &self,
+        id: ToolManifestId,
+        version: u64,
+    ) -> Result<Option<ToolManifest>, RuntimeError> {
+        Ok(self.store()?.tool_manifest(id, version)?)
+    }
+
+    /// Registers or exactly replays one immutable Skill manifest after resolving its exact Tool
+    /// dependencies. Registration remains non-authoritative capability evidence.
+    ///
+    /// # Errors
+    /// Returns a runtime error for malformed, missing, substituted, or non-monotonic evidence.
+    pub fn register_skill_manifest(
+        &self,
+        manifest: &SkillManifest,
+        now: DateTime<Utc>,
+    ) -> Result<VersionedRef<SkillManifestId>, RuntimeError> {
+        Ok(self.store()?.register_skill_manifest(manifest, now)?)
+    }
+
+    /// Rebuilds one non-authoritative Capability Profile selection projection.
+    ///
+    /// # Errors
+    /// Returns a runtime error for malformed or unhashable profile evidence.
+    pub fn rebuild_capability_profile(
+        &self,
+        profile: &CapabilityProfile,
+        now: DateTime<Utc>,
+    ) -> Result<ContentHash, RuntimeError> {
+        Ok(self.store()?.rebuild_capability_profile(profile, now)?)
+    }
+
+    /// Commits one exact Root-issued Tool proposal, permit, and opaque-handle authorization.
+    /// Policy intersection and permit construction remain inside Protected Root.
+    ///
+    /// # Errors
+    /// Returns a runtime error for stale, unregistered, substituted, or conflicting authority.
+    pub fn authorize_tool_capability(
+        &self,
+        proposal: &ToolInvocationProposal,
+        policy: &ToolPolicy,
+        permit: &ToolInvocationPermit,
+        now: DateTime<Utc>,
+    ) -> Result<ToolCapabilityAuthorizationReceipt, RuntimeError> {
+        Ok(self
+            .store()?
+            .authorize_tool_capability(proposal, policy, permit, now)?)
+    }
+
+    /// Loads a Tool authorization only while its exact workflow generation and permit remain
+    /// active.
+    ///
+    /// # Errors
+    /// Returns a runtime error for stale, expired, or malformed durable authority.
+    pub fn active_tool_capability_authorization(
+        &self,
+        action_id: ActionId,
+        now: DateTime<Utc>,
+    ) -> Result<Option<ToolCapabilityAuthorizationReceipt>, RuntimeError> {
+        Ok(self
+            .store()?
+            .active_tool_capability_authorization(action_id, now)?)
+    }
+
+    /// Resolves only the metadata behind one exact active Tool secret handle.
+    ///
+    /// # Errors
+    /// Returns a runtime error for missing, mismatched, expired, or malformed authority.
+    pub fn resolve_tool_secret_handle_binding(
+        &self,
+        permit_id: PermitId,
+        handle_id: SecretHandleId,
+        now: DateTime<Utc>,
+    ) -> Result<ToolSecretHandleBinding, RuntimeError> {
+        Ok(self
+            .store()?
+            .resolve_tool_secret_handle_binding(permit_id, handle_id, now)?)
     }
 
     /// Loads the secret-free provider connection and catalog that Root must resolve exactly.

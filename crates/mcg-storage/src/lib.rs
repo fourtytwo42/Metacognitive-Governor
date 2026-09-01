@@ -39,6 +39,7 @@ mod actions;
 mod agents;
 mod backup;
 mod backup_secrets;
+mod capabilities;
 mod egress;
 mod experiments;
 mod invocations;
@@ -67,6 +68,9 @@ pub use backup_secrets::{
     BACKUP_SECRET_ENCRYPTION_SCHEMA_VERSION, BACKUP_SECRET_ENTRY, BackupMcpSecret,
     BackupPassphrase, BackupProviderSecret, BackupSecretEncryptionMetadata, BackupSecretSnapshot,
     decrypt_backup_secrets, encrypt_backup_secrets,
+};
+pub use capabilities::{
+    ToolCapabilityAuthorizationReceipt, ToolSecretHandleBinding, tool_policy_binding,
 };
 
 pub use actions::{
@@ -99,7 +103,7 @@ pub use workflows::{
 };
 
 type EventRow = (i64, String, i64, String, Option<String>, String, String);
-pub const STORAGE_SCHEMA_VERSION: i64 = 60;
+pub const STORAGE_SCHEMA_VERSION: i64 = 61;
 
 const MIGRATION_1: &str = r"
 CREATE TABLE IF NOT EXISTS events (
@@ -2215,6 +2219,150 @@ BEFORE DELETE ON workflow_source_attachments BEGIN
 END;
 ";
 
+const MIGRATION_61: &str = r"
+CREATE TABLE IF NOT EXISTS tool_manifest_versions (
+    tool_manifest_id TEXT NOT NULL,
+    version INTEGER NOT NULL CHECK(version > 0),
+    manifest_hash_json TEXT NOT NULL,
+    manifest_json TEXT NOT NULL,
+    registered_at TEXT NOT NULL,
+    PRIMARY KEY(tool_manifest_id, version),
+    UNIQUE(manifest_hash_json)
+);
+CREATE TABLE IF NOT EXISTS tool_manifest_heads (
+    tool_manifest_id TEXT PRIMARY KEY,
+    current_version INTEGER NOT NULL CHECK(current_version > 0),
+    current_hash_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(tool_manifest_id, current_version)
+        REFERENCES tool_manifest_versions(tool_manifest_id, version)
+);
+CREATE TABLE IF NOT EXISTS skill_manifest_versions (
+    skill_manifest_id TEXT NOT NULL,
+    version INTEGER NOT NULL CHECK(version > 0),
+    manifest_hash_json TEXT NOT NULL,
+    manifest_json TEXT NOT NULL,
+    registered_at TEXT NOT NULL,
+    PRIMARY KEY(skill_manifest_id, version),
+    UNIQUE(manifest_hash_json)
+);
+CREATE TABLE IF NOT EXISTS skill_manifest_heads (
+    skill_manifest_id TEXT PRIMARY KEY,
+    current_version INTEGER NOT NULL CHECK(current_version > 0),
+    current_hash_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY(skill_manifest_id, current_version)
+        REFERENCES skill_manifest_versions(skill_manifest_id, version)
+);
+CREATE TABLE IF NOT EXISTS capability_profiles (
+    source_type TEXT NOT NULL,
+    source_locator TEXT NOT NULL,
+    source_hash_json TEXT NOT NULL,
+    profile_hash_json TEXT NOT NULL,
+    profile_json TEXT NOT NULL,
+    rebuilt_at TEXT NOT NULL,
+    PRIMARY KEY(source_type, source_locator)
+);
+CREATE TABLE IF NOT EXISTS tool_invocation_proposals (
+    action_id TEXT PRIMARY KEY,
+    workflow_attempt_id TEXT NOT NULL,
+    tool_manifest_id TEXT NOT NULL,
+    tool_manifest_version INTEGER NOT NULL CHECK(tool_manifest_version > 0),
+    argument_hash_json TEXT NOT NULL,
+    proposal_hash_json TEXT NOT NULL,
+    proposal_json TEXT NOT NULL,
+    proposed_at TEXT NOT NULL,
+    FOREIGN KEY(action_id) REFERENCES action_envelopes(action_id),
+    FOREIGN KEY(workflow_attempt_id) REFERENCES workflow_attempts(attempt_id),
+    FOREIGN KEY(tool_manifest_id, tool_manifest_version)
+        REFERENCES tool_manifest_versions(tool_manifest_id, version)
+);
+CREATE TABLE IF NOT EXISTS tool_invocation_permits (
+    permit_id TEXT PRIMARY KEY,
+    action_id TEXT NOT NULL UNIQUE,
+    proposal_hash_json TEXT NOT NULL,
+    permit_hash_json TEXT NOT NULL,
+    permit_json TEXT NOT NULL,
+    issued_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    FOREIGN KEY(action_id) REFERENCES tool_invocation_proposals(action_id)
+);
+CREATE TABLE IF NOT EXISTS tool_secret_handle_bindings (
+    secret_handle_id TEXT PRIMARY KEY,
+    permit_id TEXT NOT NULL,
+    slot_type TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    UNIQUE(permit_id, slot_type),
+    FOREIGN KEY(permit_id) REFERENCES tool_invocation_permits(permit_id)
+);
+CREATE INDEX IF NOT EXISTS tool_invocation_permits_expiry
+    ON tool_invocation_permits(expires_at);
+CREATE INDEX IF NOT EXISTS tool_secret_handle_bindings_permit
+    ON tool_secret_handle_bindings(permit_id);
+CREATE TRIGGER IF NOT EXISTS tool_manifest_versions_no_update
+BEFORE UPDATE ON tool_manifest_versions BEGIN
+    SELECT RAISE(FAIL, 'Tool manifest versions are immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS tool_manifest_versions_no_delete
+BEFORE DELETE ON tool_manifest_versions BEGIN
+    SELECT RAISE(FAIL, 'Tool manifest versions are durable evidence');
+END;
+CREATE TRIGGER IF NOT EXISTS tool_manifest_heads_monotonic_update
+BEFORE UPDATE ON tool_manifest_heads
+WHEN NEW.tool_manifest_id <> OLD.tool_manifest_id
+  OR NEW.current_version <> OLD.current_version + 1
+BEGIN
+    SELECT RAISE(FAIL, 'Tool manifest head must advance exactly one version');
+END;
+CREATE TRIGGER IF NOT EXISTS tool_manifest_heads_no_delete
+BEFORE DELETE ON tool_manifest_heads BEGIN
+    SELECT RAISE(FAIL, 'Tool manifest heads cannot be deleted');
+END;
+CREATE TRIGGER IF NOT EXISTS skill_manifest_versions_no_update
+BEFORE UPDATE ON skill_manifest_versions BEGIN
+    SELECT RAISE(FAIL, 'Skill manifest versions are immutable');
+END;
+CREATE TRIGGER IF NOT EXISTS skill_manifest_versions_no_delete
+BEFORE DELETE ON skill_manifest_versions BEGIN
+    SELECT RAISE(FAIL, 'Skill manifest versions are durable evidence');
+END;
+CREATE TRIGGER IF NOT EXISTS skill_manifest_heads_monotonic_update
+BEFORE UPDATE ON skill_manifest_heads
+WHEN NEW.skill_manifest_id <> OLD.skill_manifest_id
+  OR NEW.current_version <> OLD.current_version + 1
+BEGIN
+    SELECT RAISE(FAIL, 'Skill manifest head must advance exactly one version');
+END;
+CREATE TRIGGER IF NOT EXISTS skill_manifest_heads_no_delete
+BEFORE DELETE ON skill_manifest_heads BEGIN
+    SELECT RAISE(FAIL, 'Skill manifest heads cannot be deleted');
+END;
+CREATE TRIGGER IF NOT EXISTS tool_invocation_proposals_no_update
+BEFORE UPDATE ON tool_invocation_proposals BEGIN
+    SELECT RAISE(FAIL, 'Tool invocation proposals are immutable evidence');
+END;
+CREATE TRIGGER IF NOT EXISTS tool_invocation_proposals_no_delete
+BEFORE DELETE ON tool_invocation_proposals BEGIN
+    SELECT RAISE(FAIL, 'Tool invocation proposals are durable evidence');
+END;
+CREATE TRIGGER IF NOT EXISTS tool_invocation_permits_no_update
+BEFORE UPDATE ON tool_invocation_permits BEGIN
+    SELECT RAISE(FAIL, 'Tool invocation permits are immutable authority');
+END;
+CREATE TRIGGER IF NOT EXISTS tool_invocation_permits_no_delete
+BEFORE DELETE ON tool_invocation_permits BEGIN
+    SELECT RAISE(FAIL, 'Tool invocation permits are durable authority');
+END;
+CREATE TRIGGER IF NOT EXISTS tool_secret_handle_bindings_no_update
+BEFORE UPDATE ON tool_secret_handle_bindings BEGIN
+    SELECT RAISE(FAIL, 'Tool secret-handle bindings are immutable authority');
+END;
+CREATE TRIGGER IF NOT EXISTS tool_secret_handle_bindings_no_delete
+BEFORE DELETE ON tool_secret_handle_bindings BEGIN
+    SELECT RAISE(FAIL, 'Tool secret-handle bindings are durable authority');
+END;
+";
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RootOwnership {
     pub runtime_identity: RuntimeIdentity,
@@ -2491,6 +2639,7 @@ impl SqliteEventStore {
             (58_i64, MIGRATION_58),
             (59_i64, MIGRATION_59),
             (60_i64, MIGRATION_60),
+            (61_i64, MIGRATION_61),
         ] {
             let applied = self.connection.query_row(
                 "SELECT EXISTS(SELECT 1 FROM mcg_schema WHERE version = ?1)",
@@ -6371,7 +6520,15 @@ mod tests {
             store
                 .connection
                 .execute_batch(
-                    "DROP TABLE workflow_source_attachments;
+                    "DROP TABLE tool_secret_handle_bindings;
+                     DROP TABLE tool_invocation_permits;
+                     DROP TABLE tool_invocation_proposals;
+                     DROP TABLE capability_profiles;
+                     DROP TABLE skill_manifest_heads;
+                     DROP TABLE skill_manifest_versions;
+                     DROP TABLE tool_manifest_heads;
+                     DROP TABLE tool_manifest_versions;
+                     DROP TABLE workflow_source_attachments;
                      DROP TABLE model_secret_handle_bindings;
                      DROP TABLE model_invocation_permits;
                      DROP TABLE model_invocation_proposals;
@@ -6393,7 +6550,7 @@ mod tests {
                      DROP TABLE task_contract_heads;
                      DROP TABLE task_contract_versions;
                      DROP TABLE root_ownership;
-                     DELETE FROM mcg_schema WHERE version IN (51, 52, 53, 54, 55, 56, 57, 58, 59, 60);",
+                     DELETE FROM mcg_schema WHERE version IN (51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61);",
                 )
                 .expect("downgrade fixture to schema 50");
         }

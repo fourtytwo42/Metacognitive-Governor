@@ -107,7 +107,15 @@ async fn old_profile_survives_interruption_retry_and_verified_backup_restore() {
     Connection::open(&database)
         .expect("open fixture for schema downgrade")
         .execute_batch(
-            "DROP TABLE workflow_source_attachments;
+            "DROP TABLE tool_secret_handle_bindings;
+             DROP TABLE tool_invocation_permits;
+             DROP TABLE tool_invocation_proposals;
+             DROP TABLE capability_profiles;
+             DROP TABLE skill_manifest_heads;
+             DROP TABLE skill_manifest_versions;
+             DROP TABLE tool_manifest_heads;
+             DROP TABLE tool_manifest_versions;
+             DROP TABLE workflow_source_attachments;
              DROP TABLE model_secret_handle_bindings;
              DROP TABLE model_invocation_permits;
              DROP TABLE model_invocation_proposals;
@@ -129,7 +137,7 @@ async fn old_profile_survives_interruption_retry_and_verified_backup_restore() {
              DROP TABLE task_contract_heads;
              DROP TABLE task_contract_versions;
              DROP TABLE root_ownership;
-             DELETE FROM mcg_schema WHERE version IN (51, 52, 53, 54, 55, 56, 57, 58, 59, 60);",
+             DELETE FROM mcg_schema WHERE version IN (51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61);",
         )
         .expect("create representative schema-50 fixture");
     let before = inspect_database_before_root(&database).expect("inspect schema-50 fixture");
