@@ -1,6 +1,6 @@
 # MetaCog Cognitive Runtime Implementation Plan
 
-**Status:** Active staged delivery plan; Stages 0–4 have implementation checkpoints, Stage 5 is implemented through reconstructable real-process Work/Verify, governed agent inspection, and the compatibility-agent model bridge, and Stage 6 now includes exact Runtime/lease-bound model-egress permits, deterministic Root dispatch/result fencing, a verified isolated credential-resolving OpenAI-compatible provider runner, fresh/resumed production compatibility-agent routing, bounded distinct-authority retry, and independent certificate closure
+**Status:** Active staged delivery plan; Stages 0–4 have implementation checkpoints, Stage 5 is implemented through reconstructable real-process Work/Verify, governed agent inspection, and the compatibility-agent model bridge, and Stage 6 now includes exact Runtime/lease-bound model-egress permits, deterministic Root dispatch/result fencing, a verified isolated credential-resolving OpenAI-compatible provider runner, fresh/resumed production compatibility-agent routing, bounded distinct-authority retry, governed in-flight non-streaming cancellation, and independent certificate closure
 **Scope:** Alignment with the Adaptive Cognitive Agent Runtime PRD v1.4.2, Cognitive Runtime Implementation Contract v0.1, and Cognitive Runtime Experimental Protocol Specification v0.2
 **Product:** MetaCog desktop and `mcg` CLI on Windows, macOS, and Linux
 
@@ -680,7 +680,7 @@ Do not claim consciousness, subjective identity, unrestricted self-improvement, 
 1. Finish remaining Stage 3 source reattachment, child propagation, event streaming, wake triggers, reconciliation-before-cancellation settlement, and the remaining nonterminal crash/reassignment matrix.
 2. Extend Stage 4's implemented owner-authorized compensation and real-child fault paths through packaged adversarial and native three-platform qualification.
 3. Finish Stage 5 packaged remote-inventory, cancellation, replacement, crash-injection, and native qualification; direct remote Codex sub-agent inventory and canonical workflow/current-attempt invocation drill-down are implemented.
-4. Extend the completed compatibility-agent Root permit, bounded distinct-authority retry, independent Verify, and certificate settlement path with governed streaming/cancellation, OAuth, observed fingerprints, remaining provider migration, tool/capability permits, redaction/security E2E, and cross-platform product qualification.
+4. Extend the completed compatibility-agent Root permit, bounded distinct-authority retry, governed non-streaming cancellation, independent Verify, and certificate settlement path with true streaming and stream cancellation, OAuth, observed fingerprints, remaining provider migration, tool/capability permits, redaction/security E2E, and cross-platform product qualification.
 5. Build and pass the Stage 7 Protected Evaluator and Phase 0 integrity gate before beginning recursive improvement work.
 6. Continue through Stages 8–13 only behind the recorded scientific and production gates, with matched Windows/macOS/Linux package and native UAT evidence at every affected boundary.
 
