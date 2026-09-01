@@ -88,6 +88,30 @@ impl NegotiatingHttpMcpClient {
         }
     }
 
+    /// Calls one legacy HTTP tool only after the same initialized physical session reproduces the
+    /// exact authorized catalog. Current stateless HTTP calls use the separately governed modern
+    /// route and are deliberately excluded from this session API.
+    ///
+    /// # Errors
+    /// Returns negotiation, transport, catalog-substitution, remote, or schema failures.
+    pub async fn call_tool_against_catalog(
+        &self,
+        catalog: &McpToolCatalog,
+        name: &str,
+        arguments: Value,
+    ) -> Result<McpToolResult, McpError> {
+        if catalog.protocol_version == MCP_PROTOCOL_VERSION
+            || self.connection.protocol_mode == McpProtocolMode::Modern20260728
+        {
+            return Err(McpError::Negotiation(
+                "catalog-bound HTTP sessions are reserved for the legacy protocol".into(),
+            ));
+        }
+        self.legacy()?
+            .call_tool_against_catalog(catalog, name, arguments)
+            .await
+    }
+
     fn modern(&self) -> Result<ModernHttpMcpClient, McpError> {
         let mut connection = self.connection.clone();
         connection.protocol_mode = McpProtocolMode::Modern20260728;

@@ -87,6 +87,37 @@ impl StdioMcpClient {
         result
     }
 
+    /// Spawns one bounded child, negotiates and lists on that same process, revalidates the exact
+    /// Root-authorized catalog, calls one tool, and terminates the child.
+    ///
+    /// # Errors
+    /// Returns spawn, framing, timeout, negotiation, catalog-substitution, remote, or schema
+    /// failures.
+    pub async fn call_tool_against_catalog(
+        &self,
+        catalog: &McpToolCatalog,
+        name: &str,
+        arguments: Value,
+    ) -> Result<McpToolResult, McpError> {
+        if name.trim().is_empty() || !arguments.is_object() {
+            return Err(McpError::Configuration(
+                "MCP tool name is required and arguments must be an object".into(),
+            ));
+        }
+        let mut process = self.spawn()?;
+        let result = process
+            .call_tool_against_catalog(
+                &self.connection.id,
+                self.connection.protocol_mode,
+                catalog,
+                name,
+                arguments,
+            )
+            .await;
+        process.stop().await;
+        result
+    }
+
     fn spawn(&self) -> Result<StdioProcess, McpError> {
         let McpTransport::Stdio { command, args } = &self.connection.transport else {
             return Err(McpError::Configuration(
@@ -167,6 +198,56 @@ impl StdioProcess {
         arguments: Value,
     ) -> Result<McpToolResult, McpError> {
         let era = self.negotiate(mode).await?;
+        let params = json!({"name": name, "arguments": arguments});
+        let result = self
+            .request(
+                "tools/call",
+                if matches!(era, Era::Modern { .. }) {
+                    modern_params(params)
+                } else {
+                    params
+                },
+                REQUEST_TIMEOUT,
+            )
+            .await?;
+        serde_json::from_value(result).map_err(|error| McpError::InvalidResponse(error.to_string()))
+    }
+
+    async fn call_tool_against_catalog(
+        &mut self,
+        connection_id: &str,
+        mode: McpProtocolMode,
+        catalog: &McpToolCatalog,
+        name: &str,
+        arguments: Value,
+    ) -> Result<McpToolResult, McpError> {
+        let era = self.negotiate(mode).await?;
+        let listed = self
+            .request(
+                "tools/list",
+                if matches!(era, Era::Modern { .. }) {
+                    modern_params(json!({}))
+                } else {
+                    json!({})
+                },
+                REQUEST_TIMEOUT,
+            )
+            .await?;
+        let listed: ListTools = serde_json::from_value(listed)
+            .map_err(|error| McpError::InvalidResponse(error.to_string()))?;
+        catalog.validate_live_snapshot(
+            connection_id,
+            era.protocol_version(),
+            era.server_info(),
+            era.capabilities(),
+            listed.tools,
+            Utc::now(),
+        )?;
+        if !catalog.tools.iter().any(|tool| tool.name == name) {
+            return Err(McpError::InvalidResponse(
+                "requested MCP tool is absent from the authorized catalog".into(),
+            ));
+        }
         let params = json!({"name": name, "arguments": arguments});
         let result = self
             .request(
@@ -494,10 +575,19 @@ mod tests {
         assert_eq!(catalog.tools[0].name, "echo");
 
         let result = client
-            .call_tool("echo", json!({"message": "hello"}))
+            .call_tool_against_catalog(&catalog, "echo", json!({"message": "hello"}))
             .await
-            .expect("call");
+            .expect("catalog-bound call");
         assert_eq!(result.structured_content, Some(json!({"message": "hello"})));
+
+        let mut substituted = catalog;
+        substituted.tools[0].description = Some("substituted".into());
+        assert!(
+            client
+                .call_tool_against_catalog(&substituted, "echo", json!({}))
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -510,6 +600,23 @@ mod tests {
         let catalog = client.discover().await.expect("discover");
         assert_eq!(catalog.protocol_version, LEGACY_MCP_PROTOCOL_VERSION);
         assert_eq!(catalog.server_info.name, "legacy-fixture");
+        let result = client
+            .call_tool_against_catalog(&catalog, "echo", json!({"message": "legacy"}))
+            .await
+            .expect("legacy catalog-bound call");
+        assert_eq!(
+            result.structured_content,
+            Some(json!({"message": "legacy"}))
+        );
+
+        let mut substituted = catalog;
+        substituted.server_info.version = Some("substituted".into());
+        assert!(
+            client
+                .call_tool_against_catalog(&substituted, "echo", json!({}))
+                .await
+                .is_err()
+        );
     }
 
     #[test]

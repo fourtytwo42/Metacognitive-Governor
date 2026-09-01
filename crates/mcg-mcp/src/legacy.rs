@@ -139,6 +139,58 @@ impl LegacyHttpMcpClient {
         serde_json::from_value(result).map_err(|error| McpError::InvalidResponse(error.to_string()))
     }
 
+    /// Initializes one bounded legacy session, revalidates its live tool catalog against the
+    /// exact Root-authorized snapshot, calls one tool on that same session, and returns the result.
+    ///
+    /// # Errors
+    /// Returns transport, authentication, negotiation, catalog-substitution, remote, or schema
+    /// failures.
+    pub async fn call_tool_against_catalog(
+        &self,
+        catalog: &McpToolCatalog,
+        name: &str,
+        arguments: Value,
+    ) -> Result<McpToolResult, McpError> {
+        if name.trim().is_empty() || !arguments.is_object() {
+            return Err(McpError::Configuration(
+                "MCP tool name is required and arguments must be an object".into(),
+            ));
+        }
+        let initialized = self.initialize().await?;
+        let listed = self
+            .request(
+                2,
+                "tools/list",
+                json!({}),
+                initialized.session_id.as_deref(),
+            )
+            .await?;
+        let listed: LegacyListTools = serde_json::from_value(listed)
+            .map_err(|error| McpError::InvalidResponse(error.to_string()))?;
+        catalog.validate_live_snapshot(
+            &self.connection.id,
+            &initialized.protocol_version,
+            &initialized.server_info,
+            &initialized.capabilities,
+            listed.tools,
+            Utc::now(),
+        )?;
+        if !catalog.tools.iter().any(|tool| tool.name == name) {
+            return Err(McpError::InvalidResponse(
+                "requested MCP tool is absent from the authorized catalog".into(),
+            ));
+        }
+        let result = self
+            .request(
+                3,
+                "tools/call",
+                json!({"name": name, "arguments": arguments}),
+                initialized.session_id.as_deref(),
+            )
+            .await?;
+        serde_json::from_value(result).map_err(|error| McpError::InvalidResponse(error.to_string()))
+    }
+
     async fn initialize(&self) -> Result<Initialized, McpError> {
         let (result, session_id) = self
             .request_with_session(
@@ -473,7 +525,19 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["alpha", "zeta"]
         );
-        let result = client.call_tool("alpha", json!({})).await.expect("call");
+        let result = client
+            .call_tool_against_catalog(&catalog, "alpha", json!({}))
+            .await
+            .expect("catalog-bound call");
         assert_eq!(result.structured_content, Some(json!({"ok": true})));
+
+        let mut substituted = catalog;
+        substituted.tools[0].annotations = json!({"readOnlyHint": true});
+        assert!(
+            client
+                .call_tool_against_catalog(&substituted, "alpha", json!({}))
+                .await
+                .is_err()
+        );
     }
 }

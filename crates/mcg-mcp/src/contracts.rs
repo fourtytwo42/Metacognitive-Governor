@@ -271,6 +271,38 @@ impl McpToolCatalog {
         }
         Ok(())
     }
+
+    /// Revalidates one live session against the exact unexpired catalog snapshot used for
+    /// authorization. Discovery timestamps are intentionally excluded because the live probe is
+    /// fresh; every authority-bearing server and tool field must remain byte-for-byte equivalent.
+    ///
+    /// # Errors
+    /// Returns invalid-response when the authorized catalog is expired or the live session
+    /// changes connection, protocol, server identity, capabilities, or tool descriptors.
+    pub fn validate_live_snapshot(
+        &self,
+        connection_id: &str,
+        protocol_version: &str,
+        server_info: &McpServerInfo,
+        capabilities: &Value,
+        mut tools: Vec<McpToolDescriptor>,
+        now: DateTime<Utc>,
+    ) -> Result<(), McpError> {
+        self.validate()?;
+        tools.sort_by(|left, right| left.name.cmp(&right.name));
+        if self.expires_at <= now
+            || self.connection_id != connection_id
+            || self.protocol_version != protocol_version
+            || self.server_info != *server_info
+            || self.capabilities != *capabilities
+            || self.tools != tools
+        {
+            return Err(McpError::InvalidResponse(
+                "live MCP session differs from the exact authorized catalog".into(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -335,5 +367,70 @@ mod tests {
         let credential = McpCredential::new("private-token").expect("credential");
         assert_eq!(format!("{credential:?}"), "McpCredential([REDACTED])");
         assert!(!format!("{credential:?}").contains("private-token"));
+    }
+
+    #[test]
+    fn live_catalog_snapshot_rejects_expiry_and_descriptor_substitution() {
+        let now = Utc::now();
+        let server_info = McpServerInfo {
+            name: "fixture".into(),
+            version: Some("1".into()),
+        };
+        let capabilities = serde_json::json!({"tools": {}});
+        let tools = vec![McpToolDescriptor {
+            name: "echo".into(),
+            title: None,
+            description: None,
+            input_schema: serde_json::json!({"type": "object"}),
+            output_schema: None,
+            annotations: serde_json::json!({"readOnlyHint": true}),
+        }];
+        let catalog = McpToolCatalog {
+            connection_id: "fixture".into(),
+            protocol_version: MCP_PROTOCOL_VERSION.into(),
+            server_info: server_info.clone(),
+            capabilities: capabilities.clone(),
+            tools: tools.clone(),
+            discovered_at: now,
+            expires_at: now + chrono::TimeDelta::minutes(5),
+        };
+        assert!(
+            catalog
+                .validate_live_snapshot(
+                    "fixture",
+                    MCP_PROTOCOL_VERSION,
+                    &server_info,
+                    &capabilities,
+                    tools.clone(),
+                    now,
+                )
+                .is_ok()
+        );
+        let mut substituted = tools;
+        substituted[0].annotations = serde_json::json!({"readOnlyHint": false});
+        assert!(
+            catalog
+                .validate_live_snapshot(
+                    "fixture",
+                    MCP_PROTOCOL_VERSION,
+                    &server_info,
+                    &capabilities,
+                    substituted,
+                    now,
+                )
+                .is_err()
+        );
+        assert!(
+            catalog
+                .validate_live_snapshot(
+                    "fixture",
+                    MCP_PROTOCOL_VERSION,
+                    &server_info,
+                    &capabilities,
+                    catalog.tools.clone(),
+                    catalog.expires_at,
+                )
+                .is_err()
+        );
     }
 }
