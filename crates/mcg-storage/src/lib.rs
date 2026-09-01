@@ -99,7 +99,8 @@ pub use scheduler::{ScheduleClaim, ScheduleWakeMutation};
 pub use shadow_workspaces::ShadowWorkspaceMutation;
 pub use workflows::{
     AgentTurnVerificationTarget, AgentTurnWorkflowAttachment, AgentTurnWorkflowAuthority,
-    TaskContractHead, WorkflowRecoveryReport, task_contract_content_hash,
+    PluginInvocationWorkflowAttachment, PluginInvocationWorkflowAuthority, TaskContractHead,
+    WorkflowRecoveryReport, task_contract_content_hash,
 };
 
 type EventRow = (i64, String, i64, String, Option<String>, String, String);

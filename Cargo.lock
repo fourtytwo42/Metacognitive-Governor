@@ -4310,6 +4310,8 @@ dependencies = [
  "mcg-contracts",
  "mcg-domain",
  "mcg-platform",
+ "mcg-plugin-protocol",
+ "mcg-plugin-runner",
  "mcg-provider-runner",
  "mcg-providers",
  "mcg-runtime",

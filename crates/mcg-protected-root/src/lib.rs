@@ -54,7 +54,7 @@ use mcg_contracts::{
     WorkflowState, canonical_contract_hash, decode_canonical_cbor_v1,
     tool_invocation_proposal_hash,
 };
-use mcg_domain::{AgentLeaseId, EvaluationId};
+use mcg_domain::{AgentLeaseId, EvaluationId, PluginInvocationId, PluginRevisionId};
 use mcg_platform::{
     MAX_ROOT_INVOCATION_MODEL_RUNS, MAX_ROOT_INVOCATION_SUMMARIES,
     MAX_ROOT_TOOL_AUTHORIZATION_SUMMARIES, MAX_ROOT_WORKFLOW_INVOCATIONS, PlatformError,
@@ -71,6 +71,12 @@ use mcg_platform::{
     ROOT_WORKFLOW_SHOW_REQUEST_TYPE, ROOT_WORKFLOW_SHOW_RESPONSE_TYPE, RootIpcSession,
     create_root_ipc_session, read_canonical_frame, remove_root_ipc_session, write_canonical_frame,
 };
+use mcg_plugin_runner::{
+    PluginRunnerAuthorization, PluginRunnerClient, PluginRunnerClientError, PluginRunnerRequest,
+    PluginRunnerResponse, current_execution_platform as plugin_execution_platform,
+    governed_plugin_tool_manifest, governed_plugin_tool_policy, plugin_runner_invocation_artifact,
+    plugin_runner_invocation_payload, plugin_runner_sandbox_profile,
+};
 use mcg_provider_runner::{
     ProviderRunnerAuthorization, ProviderRunnerClient, ProviderRunnerClientError,
     ProviderRunnerExecution, ProviderRunnerRequest, RunnerSecretHandleBinding, RunnerSecretSlot,
@@ -83,7 +89,8 @@ use mcg_providers::{
     ProviderConnection, ProviderError, ProviderKind, ProviderStream, actual_cost,
 };
 use mcg_runtime::{
-    AppRuntime, ProtectedAgentModelDispatcher, ProtectedCompatibilityVerifier, RuntimeError,
+    AppRuntime, ProtectedAgentModelDispatcher, ProtectedCompatibilityVerifier,
+    ProtectedPluginDispatcher, RuntimeError,
 };
 use mcg_storage::{
     AgentTurnVerificationTarget, AgentTurnWorkflowAttachment, ConsumerEvaluationCompletion,
@@ -899,6 +906,8 @@ const COMPATIBILITY_AGENT_PERMIT_SECONDS: i64 = 2 * 60;
 const COMPATIBILITY_AGENT_CALL_MAX_COST_MICROUSD: u64 = 5_000_000;
 const COMPATIBILITY_AGENT_PROVIDER_MAX_ATTEMPTS: u32 = 2;
 const GOVERNED_PROVIDER_AUTHORITY_POLL_MILLISECONDS: u64 = 25;
+const PLUGIN_WORKFLOW_LEASE_SECONDS: u64 = 5 * 60;
+const PLUGIN_PERMIT_SECONDS: i64 = 2 * 60;
 
 struct RootAgentModelDispatcher {
     runtime: Weak<AppRuntime>,
@@ -907,10 +916,351 @@ struct RootAgentModelDispatcher {
     runtime_identity: RuntimeIdentity,
 }
 
+struct RootPluginDispatcher {
+    runtime: Weak<AppRuntime>,
+    root_executable: PathBuf,
+    runtime_actor: RuntimeActorId,
+    runtime_identity: RuntimeIdentity,
+    #[cfg(test)]
+    test_gateway: Option<Arc<dyn RootPluginRunnerGateway>>,
+}
+
+#[async_trait::async_trait]
+trait RootPluginRunnerGateway: Send + Sync {
+    fn runner_source(&self) -> &SourceRef;
+
+    async fn invoke(
+        &self,
+        request: &PluginRunnerRequest,
+    ) -> Result<PluginRunnerResponse, PluginRunnerClientError>;
+}
+
+#[async_trait::async_trait]
+impl RootPluginRunnerGateway for PluginRunnerClient {
+    fn runner_source(&self) -> &SourceRef {
+        PluginRunnerClient::runner_source(self)
+    }
+
+    async fn invoke(
+        &self,
+        request: &PluginRunnerRequest,
+    ) -> Result<PluginRunnerResponse, PluginRunnerClientError> {
+        PluginRunnerClient::invoke(self, request).await
+    }
+}
+
 struct RootCompatibilityVerifier {
     runtime: Weak<AppRuntime>,
     root_executable: PathBuf,
     data_directory: PathBuf,
+}
+
+#[async_trait::async_trait]
+impl ProtectedPluginDispatcher for RootPluginDispatcher {
+    #[allow(clippy::too_many_lines)]
+    async fn invoke(
+        &self,
+        invocation_id: PluginInvocationId,
+        plugin_revision_id: PluginRevisionId,
+        mut request: PluginRunnerRequest,
+    ) -> Result<PluginRunnerResponse, PluginRunnerClientError> {
+        if request.authorization.is_some() {
+            return Err(PluginRunnerClientError::Denied(
+                "Runtime cannot author plugin Tool authority".into(),
+            ));
+        }
+        let runtime = self.runtime.upgrade().ok_or_else(|| {
+            PluginRunnerClientError::Denied("Protected Root runtime is unavailable".into())
+        })?;
+        let now = Utc::now();
+        let authority = runtime
+            .root_claim_active_plugin_invocation_workflow(
+                invocation_id,
+                self.runtime_actor,
+                PLUGIN_WORKFLOW_LEASE_SECONDS,
+                now,
+            )
+            .map_err(protected_plugin_denied)?;
+        if authority.invocation.id != invocation_id
+            || authority.invocation.plugin_revision_id != plugin_revision_id
+            || authority.revision.id != plugin_revision_id
+            || request.manifest != authority.revision.manifest
+            || request.module_sha256 != authority.revision.module_sha256
+        {
+            return Err(PluginRunnerClientError::Denied(
+                "plugin request differs from the exact durable invocation revision".into(),
+            ));
+        }
+        if !authority
+            .revision
+            .manifest
+            .requested_capabilities
+            .is_empty()
+        {
+            return Err(PluginRunnerClientError::Denied(
+                "plugin capability broker is not yet permit-consuming".into(),
+            ));
+        }
+        let input_bytes = serde_json::to_vec(&request.input)
+            .map_err(|error| PluginRunnerClientError::Denied(error.to_string()))?;
+        if format!("{:x}", Sha256::digest(input_bytes)) != authority.invocation.input_sha256 {
+            return Err(PluginRunnerClientError::Denied(
+                "plugin request input differs from the durable invocation".into(),
+            ));
+        }
+
+        #[cfg(test)]
+        let client: Arc<dyn RootPluginRunnerGateway> = if let Some(gateway) = &self.test_gateway {
+            gateway.clone()
+        } else {
+            Arc::new(PluginRunnerClient::adjacent_to(&self.root_executable)?)
+        };
+        #[cfg(not(test))]
+        let client: Arc<dyn RootPluginRunnerGateway> =
+            Arc::new(PluginRunnerClient::adjacent_to(&self.root_executable)?);
+        let platform = plugin_execution_platform();
+        let manifest = governed_plugin_tool_manifest(
+            client.runner_source(),
+            &plugin_revision_id.to_string(),
+            &request.manifest,
+            &request.module_sha256,
+            &request.limits,
+            platform,
+        )
+        .map_err(PluginRunnerClientError::Denied)?;
+        runtime
+            .register_tool_manifest(&manifest, now)
+            .map_err(protected_plugin_denied)?;
+        let operation = plugin_runner_invocation_payload(
+            &invocation_id.to_string(),
+            &plugin_revision_id.to_string(),
+            &request.manifest,
+            &request.module_sha256,
+            &request.input,
+            &request.limits,
+        )
+        .map_err(PluginRunnerClientError::Denied)?;
+        let arguments = plugin_runner_invocation_artifact(
+            &invocation_id.to_string(),
+            &plugin_revision_id.to_string(),
+            &request.manifest,
+            &request.module_sha256,
+            &request.input,
+            &request.limits,
+        )
+        .map_err(PluginRunnerClientError::Denied)?;
+        let attempt = authority.workflow.attempt;
+        let lease_expiry = attempt.lease_expires_at.ok_or_else(|| {
+            PluginRunnerClientError::Denied("plugin workflow has no active lease".into())
+        })?;
+        let deadline = lease_expiry.min(now + Duration::seconds(PLUGIN_PERMIT_SECONDS));
+        let action_id = ActionId::new();
+        let execution_id = ActionExecutionId::new();
+        let action_authority = policy_binding(
+            "mcg.plugin_action_authority.v1",
+            "MetaCog.PluginActionAuthority",
+            &serde_json::json!({
+                "invocation_id": invocation_id,
+                "plugin_revision_id": plugin_revision_id,
+                "source": authority.workflow.attachment.source,
+            }),
+        )
+        .map_err(protected_plugin_denied)?;
+        let budget = policy_binding(
+            "mcg.plugin_action_budget.v1",
+            "MetaCog.PluginActionBudget",
+            &serde_json::json!({"limits": request.limits}),
+        )
+        .map_err(protected_plugin_denied)?;
+        let envelope = ActionEnvelope {
+            id: action_id,
+            workflow_id: attempt.workflow_id,
+            attempt_id: attempt.attempt_id,
+            task_contract: attempt.task_contract.clone(),
+            actor: self.runtime_actor,
+            origin: Some(ActionOrigin {
+                conversation: None,
+                invocation: Some(authority.workflow.attachment.source),
+                command: None,
+                approval: None,
+                agent: None,
+                evidence: Vec::new(),
+            }),
+            authority: action_authority,
+            elevated_authority: None,
+            expected_versions: Vec::new(),
+            operation,
+            operation_hash: arguments.content_hash.clone(),
+            effect_class: EffectClass::Observational,
+            preconditions: Vec::new(),
+            budget_reservation: budget,
+            idempotency_key: format!("plugin-runner:{invocation_id}:{action_id}"),
+            compensation: None,
+            compensates_action: None,
+            reconciler: None,
+            reconciliation_deadline: None,
+            created_at: now,
+        };
+        let execution = ActionExecution {
+            id: execution_id,
+            action_id,
+            attempt_number: 1,
+            state: ActionExecutionState::Authorized,
+            revision: 1,
+            lease_generation: 0,
+            executor: None,
+            outcome: None,
+            created_at: now,
+            updated_at: now,
+        };
+        runtime
+            .authorize_canonical_action(
+                &envelope,
+                &execution,
+                attempt.revision,
+                attempt.lease_generation,
+                CorrelationId::new(),
+                now,
+            )
+            .map_err(protected_plugin_denied)?;
+        let proposal = ToolInvocationProposal {
+            action_id,
+            attempt_id: attempt.attempt_id,
+            attempt_revision: attempt.revision,
+            lease_generation: attempt.lease_generation,
+            runtime_actor: self.runtime_actor,
+            runtime_identity: self.runtime_identity.clone(),
+            task_contract: attempt.task_contract,
+            tool_manifest: manifest
+                .versioned_ref()
+                .map_err(|error| PluginRunnerClientError::Denied(error.to_string()))?,
+            arguments,
+            argument_hash: envelope.operation_hash.clone(),
+            requested_effect_class: EffectClass::Observational,
+            requested_capabilities: manifest.required_capabilities.clone(),
+            requested_limits: manifest.resource_ceiling,
+            required_sandbox: manifest.sandbox_requirement,
+            platform,
+            deadline,
+        };
+        let policy =
+            governed_plugin_tool_policy(&manifest).map_err(PluginRunnerClientError::Denied)?;
+        let receipt = authorize_and_persist_runtime_tool_capability(
+            &runtime,
+            &proposal,
+            &self.runtime_identity,
+            &manifest,
+            &policy,
+            plugin_runner_sandbox_profile(),
+            platform,
+            now,
+        )
+        .map_err(protected_plugin_denied)?;
+        request.authorization = Some(PluginRunnerAuthorization {
+            invocation_id: invocation_id.to_string(),
+            plugin_revision_id: plugin_revision_id.to_string(),
+            manifest,
+            proposal: receipt.proposal,
+            proposal_hash: receipt.proposal_hash,
+            policy,
+            permit: receipt.permit,
+            permit_hash: receipt.permit_hash,
+            permit_ref: receipt.permit_ref,
+        });
+        let dispatched = runtime
+            .dispatch_canonical_action(
+                execution_id,
+                1,
+                0,
+                self.runtime_actor,
+                CorrelationId::new(),
+                &format!("dispatch-plugin-runner:{action_id}"),
+                Utc::now(),
+            )
+            .map_err(protected_plugin_denied)?;
+        let response = client.invoke(&request).await;
+        if settle_observational_plugin_action(
+            &runtime,
+            action_id,
+            execution_id,
+            &dispatched,
+            response.as_ref().ok(),
+            response.as_ref().err(),
+        )
+        .is_err()
+        {
+            return Err(PluginRunnerClientError::Process);
+        }
+        response
+    }
+}
+
+fn protected_plugin_denied(error: impl std::fmt::Display) -> PluginRunnerClientError {
+    PluginRunnerClientError::Denied(error.to_string())
+}
+
+fn settle_observational_plugin_action(
+    runtime: &AppRuntime,
+    action_id: ActionId,
+    execution_id: ActionExecutionId,
+    dispatched: &ActionExecution,
+    response: Option<&PluginRunnerResponse>,
+    error: Option<&PluginRunnerClientError>,
+) -> Result<(), RuntimeError> {
+    let now = Utc::now();
+    let response_sha256 = response
+        .map(serde_json::to_vec)
+        .transpose()
+        .map_err(StorageError::from)?
+        .map(|bytes| format!("{:x}", Sha256::digest(bytes)));
+    let observation = VersionedPayload::canonical_v1(
+        StableTypeId::parse("mcg.plugin_runner_observation.v1")
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?,
+        &serde_json::json!({
+            "response_sha256": response_sha256,
+            "error_code": error.map(plugin_runner_client_error_code),
+        }),
+    )
+    .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+    let observed = runtime.observe_canonical_action(
+        &ActionReceipt {
+            id: ActionReceiptId::new(),
+            action_id,
+            execution_id,
+            observation,
+            observed_at: now,
+        },
+        dispatched.revision,
+        dispatched.lease_generation,
+        CorrelationId::new(),
+        &format!("observe-plugin-runner:{action_id}"),
+        now,
+    )?;
+    runtime.classify_canonical_action(
+        execution_id,
+        observed.revision,
+        observed.lease_generation,
+        EffectOutcome::NoEffectConfirmed,
+        None,
+        CorrelationId::new(),
+        &format!("classify-plugin-runner:{action_id}"),
+        now,
+    )?;
+    Ok(())
+}
+
+const fn plugin_runner_client_error_code(error: &PluginRunnerClientError) -> &'static str {
+    match error {
+        PluginRunnerClientError::Unavailable => "unavailable",
+        PluginRunnerClientError::ExecutableChanged => "executable_changed",
+        PluginRunnerClientError::Denied(_) => "denied",
+        PluginRunnerClientError::RequestTooLarge => "request_too_large",
+        PluginRunnerClientError::Timeout => "timeout",
+        PluginRunnerClientError::ResponseTooLarge => "response_too_large",
+        PluginRunnerClientError::DiagnosticOutput => "diagnostic_output",
+        PluginRunnerClientError::InvalidResponse => "invalid_response",
+        PluginRunnerClientError::Process => "process",
+    }
 }
 
 #[async_trait::async_trait]
@@ -3854,6 +4204,14 @@ pub fn open(config: AppConfig) -> Result<Arc<AppRuntime>, ProtectedRootError> {
     )?);
     let identity = current_runtime_identity()?;
     runtime.initialize_root_ownership(identity.clone(), migration_receipt)?;
+    runtime.install_protected_plugin_dispatcher(Arc::new(RootPluginDispatcher {
+        runtime: Arc::downgrade(&runtime),
+        root_executable: root_executable.clone(),
+        runtime_actor: RuntimeActorId(identity.instance_id.0),
+        runtime_identity: identity.clone(),
+        #[cfg(test)]
+        test_gateway: None,
+    }))?;
     runtime.install_protected_agent_model_dispatcher(Arc::new(RootAgentModelDispatcher {
         runtime: Arc::downgrade(&runtime),
         root_executable: root_executable.clone(),
@@ -4642,12 +5000,19 @@ mod tests {
         TaskContract, TaskContractId, TaskContractStatus, VersionedRef, WaitReason,
         WorkflowAttempt, WorkflowId, WorkflowState,
     };
-    use mcg_domain::{AgentInstanceId, RunId, TaskEnvelope, TaskState};
+    use mcg_domain::{
+        AgentInstanceId, PLUGIN_CATALOG_SCHEMA_VERSION, PluginCapabilityGrant,
+        PluginCapabilityScope, PluginInstallSource, PluginInvocationId, PluginRevision,
+        PluginRevisionId, PluginSignature, PluginSignatureState, RunId, TaskEnvelope, TaskState,
+    };
     use mcg_platform::{
         cancel_root_workflow, exchange_root_rpc, query_root_action, query_root_actions,
         query_root_capabilities, query_root_capability, query_root_invocation,
         query_root_invocations, query_root_status, query_root_workflow,
         query_root_workflow_activity, query_root_workflows, root_ipc_session_path,
+    };
+    use mcg_plugin_protocol::{
+        PLUGIN_SCHEMA_VERSION, PluginCapability, PluginClass, PluginManifest, PluginResult,
     };
     use mcg_providers::{
         CONTRACT_VERSION, ContentPart, Message, MessageRole, ModelCapabilities, ModelDescriptor,
@@ -4836,6 +5201,45 @@ mod tests {
     struct DeterministicModelGateway {
         calls: Mutex<usize>,
         response: ModelResponse,
+    }
+
+    struct RecordingPluginGateway {
+        runner: SourceRef,
+        requests: Arc<Mutex<Vec<PluginRunnerRequest>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl RootPluginRunnerGateway for RecordingPluginGateway {
+        fn runner_source(&self) -> &SourceRef {
+            &self.runner
+        }
+
+        async fn invoke(
+            &self,
+            request: &PluginRunnerRequest,
+        ) -> Result<PluginRunnerResponse, PluginRunnerClientError> {
+            if request.authorization.is_none() {
+                return Err(PluginRunnerClientError::Denied(
+                    "fixture received no Root authority".into(),
+                ));
+            }
+            self.requests
+                .lock()
+                .expect("plugin requests")
+                .push(request.clone());
+            Ok(PluginRunnerResponse {
+                schema_version: PLUGIN_SCHEMA_VERSION,
+                plugin_id: Some(request.manifest.id.clone()),
+                state: mcg_plugin_runner::PluginRunnerState::Succeeded,
+                result: Some(PluginResult {
+                    schema_version: PLUGIN_SCHEMA_VERSION,
+                    plugin_id: request.manifest.id.clone(),
+                    output: request.input.clone(),
+                }),
+                error_code: None,
+                detail: None,
+            })
+        }
     }
 
     #[async_trait::async_trait]
@@ -7136,6 +7540,171 @@ mod tests {
         );
         drop(reopened);
         drop(temporary);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn root_plugin_dispatch_issues_exact_permit_and_settles_observational_action() {
+        let temporary = tempfile::tempdir().expect("temporary Root data directory");
+        let config = AppConfig::default().with_data_directory(temporary.path());
+        let runtime = Arc::new(AppRuntime::open(config).expect("runtime"));
+        let identity = current_runtime_identity().expect("Root identity");
+        runtime
+            .initialize_root_ownership(
+                identity.clone(),
+                RootMigrationReceipt {
+                    schema_version: PROTOCOL_V1,
+                    from_storage_schema: STORAGE_SCHEMA_VERSION,
+                    to_storage_schema: STORAGE_SCHEMA_VERSION,
+                    backup_path: None,
+                    backup_sha256: None,
+                    migrated_at: Utc::now(),
+                },
+            )
+            .expect("Root ownership");
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let runner = SourceRef {
+            source_type: StableTypeId::parse("mcg.plugin_runner_executable.v1")
+                .expect("runner type"),
+            locator: if cfg!(windows) {
+                "mcg-plugin-runner.exe".into()
+            } else {
+                "mcg-plugin-runner".into()
+            },
+            content_hash: ContentHash {
+                algorithm: HashAlgorithm::Sha256,
+                domain: "MetaCog.PluginRunnerExecutable".into(),
+                digest_hex: "c".repeat(64),
+            },
+        };
+        runtime
+            .install_protected_plugin_dispatcher(Arc::new(RootPluginDispatcher {
+                runtime: Arc::downgrade(&runtime),
+                root_executable: PathBuf::from("unused-in-injected-test"),
+                runtime_actor: RuntimeActorId(identity.instance_id.0),
+                runtime_identity: identity,
+                test_gateway: Some(Arc::new(RecordingPluginGateway {
+                    runner,
+                    requests: requests.clone(),
+                })),
+            }))
+            .expect("install Root plugin dispatcher");
+        let module = br#"(module (func (export "_start")))"#;
+        let revision = PluginRevision {
+            schema_version: PLUGIN_CATALOG_SCHEMA_VERSION,
+            id: PluginRevisionId::new(),
+            manifest: PluginManifest {
+                schema_version: PLUGIN_SCHEMA_VERSION,
+                id: "example.root-governed".into(),
+                display_name: "Root governed plugin fixture".into(),
+                version: "1.0.0".into(),
+                class: PluginClass::SandboxedWasi,
+                requested_capabilities: Vec::new(),
+            },
+            module_sha256: format!("{:x}", Sha256::digest(module)),
+            module_size_bytes: u64::try_from(module.len()).expect("module size"),
+            source: PluginInstallSource::LocalImport,
+            signature: PluginSignature {
+                state: PluginSignatureState::Unsigned,
+                scheme: None,
+                signer: None,
+                signature_sha256: None,
+            },
+            installed_at: Utc::now(),
+        };
+        let installation = runtime
+            .install_sandboxed_plugin(&revision, module)
+            .expect("install plugin");
+        runtime
+            .set_plugin_enabled(&revision.manifest.id, installation.revision, true)
+            .expect("enable plugin");
+        let invocation_id = PluginInvocationId::new();
+        let result = runtime
+            .invoke_sandboxed_plugin(
+                invocation_id,
+                &revision.manifest.id,
+                None,
+                serde_json::json!({"governed": true}),
+            )
+            .await
+            .expect("invoke through Root");
+        assert_eq!(
+            result.invocation.state,
+            mcg_domain::PluginInvocationState::Succeeded
+        );
+        let authorization = {
+            let captured = requests.lock().expect("captured requests");
+            assert_eq!(captured.len(), 1);
+            captured[0]
+                .authorization
+                .clone()
+                .expect("Root authorization")
+        };
+        assert_eq!(authorization.invocation_id, invocation_id.to_string());
+        assert_eq!(authorization.plugin_revision_id, revision.id.to_string());
+        assert!(authorization.permit.secret_handles.is_empty());
+        assert!(authorization.permit.capabilities.filesystem.is_empty());
+        assert!(authorization.permit.capabilities.network.is_empty());
+        assert!(!authorization.permit.capabilities.process_spawn);
+        let actions = runtime.canonical_actions(10).expect("actions");
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].state, ActionExecutionState::NoEffectConfirmed);
+        assert_eq!(actions[0].outcome, Some(EffectOutcome::NoEffectConfirmed));
+        let capabilities = runtime
+            .tool_authorizations(10, Utc::now())
+            .expect("Tool authority");
+        assert_eq!(capabilities.len(), 1);
+        assert_eq!(capabilities[0].action_id, actions[0].action_id);
+
+        let mut capability_revision = revision.clone();
+        capability_revision.id = PluginRevisionId::new();
+        capability_revision.manifest.id = "example.root-denied-capability".into();
+        capability_revision.manifest.display_name = "Denied capability fixture".into();
+        capability_revision.manifest.requested_capabilities =
+            vec![PluginCapability::FilesystemRead];
+        let capability_installation = runtime
+            .install_sandboxed_plugin(&capability_revision, module)
+            .expect("install capability-bearing plugin");
+        let capability_installation = runtime
+            .set_plugin_capability_grants(
+                &capability_revision.manifest.id,
+                capability_installation.revision,
+                vec![PluginCapabilityGrant {
+                    schema_version: PLUGIN_CATALOG_SCHEMA_VERSION,
+                    capability: PluginCapability::FilesystemRead,
+                    scopes: vec![PluginCapabilityScope::TaskProject],
+                }],
+            )
+            .expect("grant compatibility capability");
+        runtime
+            .set_plugin_enabled(
+                &capability_revision.manifest.id,
+                capability_installation.revision,
+                true,
+            )
+            .expect("enable capability-bearing plugin");
+        let denied = runtime
+            .invoke_sandboxed_plugin(
+                PluginInvocationId::new(),
+                &capability_revision.manifest.id,
+                None,
+                serde_json::json!({"must_not_launch": true}),
+            )
+            .await
+            .expect("fail-closed plugin result");
+        assert_eq!(
+            denied.invocation.state,
+            mcg_domain::PluginInvocationState::Failed
+        );
+        assert_eq!(
+            denied.invocation.error_code.as_deref(),
+            Some("authorization_denied")
+        );
+        assert_eq!(
+            requests.lock().expect("captured requests").len(),
+            1,
+            "capability-bearing plugins must be denied before the runner is contacted"
+        );
     }
 
     #[test]

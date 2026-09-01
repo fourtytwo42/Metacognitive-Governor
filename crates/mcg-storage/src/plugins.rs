@@ -527,7 +527,9 @@ fn valid_plugin_identifier(value: &str) -> bool {
         })
 }
 
-fn validate_running_invocation(invocation: &PluginInvocationRecord) -> Result<(), StorageError> {
+pub(crate) fn validate_running_invocation(
+    invocation: &PluginInvocationRecord,
+) -> Result<(), StorageError> {
     if invocation.schema_version != PLUGIN_CATALOG_SCHEMA_VERSION
         || invocation.state != PluginInvocationState::Running
         || invocation.result_sha256.is_some()
@@ -749,7 +751,7 @@ fn insert_plugin_invocation_event(
     Ok(())
 }
 
-fn load_plugin_installation(
+pub(crate) fn load_plugin_installation(
     connection: &rusqlite::Connection,
     plugin_id: &str,
 ) -> Result<Option<PluginInstallation>, StorageError> {
@@ -763,7 +765,7 @@ fn load_plugin_installation(
     decode_optional(json)
 }
 
-fn load_plugin_revision(
+pub(crate) fn load_plugin_revision(
     connection: &rusqlite::Connection,
     revision_id: PluginRevisionId,
 ) -> Result<Option<PluginRevision>, StorageError> {
@@ -777,7 +779,7 @@ fn load_plugin_revision(
     decode_optional(json)
 }
 
-fn load_plugin_invocation(
+pub(crate) fn load_plugin_invocation(
     connection: &rusqlite::Connection,
     invocation_id: mcg_domain::PluginInvocationId,
 ) -> Result<Option<PluginInvocationRecord>, StorageError> {

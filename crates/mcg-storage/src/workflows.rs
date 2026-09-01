@@ -11,13 +11,20 @@ use mcg_contracts::{
     WaitReason, WorkflowAttempt, WorkflowEvent, WorkflowId, WorkflowSourceAttachment,
     WorkflowState, decode_canonical_cbor_v1,
 };
-use mcg_domain::{AgentLeaseId, RunId, TaskEnvelope, TaskState, WorkItemId};
+use mcg_domain::{
+    AgentLeaseId, PluginInstallation, PluginInvocationId, PluginInvocationRecord,
+    PluginInvocationState, PluginRevision, RunId, TaskEnvelope, TaskState, WorkItemId,
+};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use sha2::{Digest, Sha256};
 
 use crate::{
     SqliteEventStore, StorageError,
     actions::{cancellation_effect_status, fence_actions_for_workflow_cancellation},
+    plugins::{
+        load_plugin_installation, load_plugin_invocation, load_plugin_revision,
+        validate_plugin_revision, validate_running_invocation,
+    },
 };
 
 const TASK_CONTRACT_HASH_DOMAIN: &str = "MetaCog.TaskContract";
@@ -63,6 +70,33 @@ pub struct AgentTurnWorkflowAttachment {
 pub struct AgentTurnWorkflowAuthority {
     pub workflow: AgentTurnWorkflowAttachment,
     pub legacy_lease: AgentLease,
+}
+
+/// Canonical workflow derived only from one exact active durable plugin invocation/revision.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginInvocationWorkflowAttachment {
+    pub task_contract: TaskContract,
+    pub attempt: WorkflowAttempt,
+    pub attachment: WorkflowSourceAttachment,
+    pub creation_event: WorkflowEvent,
+}
+
+/// Atomic authority returned when an active plugin invocation is attached and claimed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginInvocationWorkflowAuthority {
+    pub workflow: PluginInvocationWorkflowAttachment,
+    pub invocation: PluginInvocationRecord,
+    pub revision: PluginRevision,
+}
+
+#[derive(Debug, Clone)]
+struct ActivePluginInvocationSource {
+    invocation: PluginInvocationRecord,
+    invocation_json: String,
+    revision: PluginRevision,
+    revision_json: String,
+    installation: PluginInstallation,
+    installation_json: String,
 }
 
 /// Exact completed compatibility Work evidence awaiting independent Verify.
@@ -342,6 +376,83 @@ impl SqliteEventStore {
         })
     }
 
+    /// Atomically attaches and claims one currently Running plugin invocation.
+    ///
+    /// The store derives the canonical contract, workflow, source snapshot, revision, module,
+    /// installation state, and plugin identity from authoritative rows. The caller supplies only
+    /// the invocation identity, Root-owned actor, and bounded lease duration.
+    ///
+    /// # Errors
+    /// Returns a storage error for stale/terminal invocation state, disabled or changed plugin
+    /// authority, conflicting canonical ownership, invalid lease bounds, or damaged evidence.
+    pub fn claim_active_plugin_invocation_workflow(
+        &mut self,
+        invocation_id: PluginInvocationId,
+        lease_owner: RuntimeActorId,
+        maximum_lease_seconds: u64,
+        now: DateTime<Utc>,
+    ) -> Result<PluginInvocationWorkflowAuthority, StorageError> {
+        if maximum_lease_seconds == 0 || maximum_lease_seconds > 24 * 60 * 60 {
+            return Err(StorageError::InvalidData(
+                "canonical plugin workflow lease bound is invalid".into(),
+            ));
+        }
+        let maximum_lease_seconds = i64::try_from(maximum_lease_seconds).map_err(|_| {
+            StorageError::InvalidData("canonical plugin workflow lease bound overflowed".into())
+        })?;
+        let transaction = self.connection.transaction()?;
+        let mut workflow = attach_active_plugin_invocation_workflow_in_transaction(
+            &transaction,
+            invocation_id,
+            now,
+        )?;
+        let source = load_active_plugin_invocation_source(&transaction, invocation_id, now)?;
+        let lease_expires_at = now
+            .checked_add_signed(chrono::Duration::seconds(maximum_lease_seconds))
+            .ok_or_else(|| {
+                StorageError::InvalidData(
+                    "canonical plugin workflow lease expiry overflowed".into(),
+                )
+            })?;
+        let current = load_attempt(&transaction, workflow.attempt.attempt_id)?.ok_or(
+            StorageError::WorkflowAttemptNotFound(workflow.attempt.attempt_id),
+        )?;
+        let attempt = match current.state {
+            WorkflowState::Ready => claim_workflow_attempt_in_transaction(
+                &transaction,
+                current.attempt_id,
+                current.revision,
+                current.lease_generation,
+                lease_owner,
+                lease_expires_at,
+                CorrelationId::new(),
+                &format!(
+                    "claim-plugin-invocation:{invocation_id}:{lease_owner}:{}:{}",
+                    current.revision, current.lease_generation
+                ),
+                now,
+            )?,
+            WorkflowState::Running
+                if current.lease_owner == Some(lease_owner)
+                    && current.lease_expires_at.is_some_and(|expiry| expiry > now) =>
+            {
+                current
+            }
+            _ => {
+                return Err(StorageError::Conflict(
+                    "canonical plugin workflow is not claimable by this Runtime actor".into(),
+                ));
+            }
+        };
+        workflow.attempt = attempt;
+        transaction.commit()?;
+        Ok(PluginInvocationWorkflowAuthority {
+            workflow,
+            invocation: source.invocation,
+            revision: source.revision,
+        })
+    }
+
     /// Lists every completed compatibility lease in one run that is durably attached to an exact
     /// Verifying workflow, including its objectively mappable planned conditions and completed
     /// Work invocation lineage.
@@ -520,6 +631,245 @@ fn attach_active_agent_lease_workflow_in_transaction(
         attachment,
         creation_event,
     })
+}
+
+fn attach_active_plugin_invocation_workflow_in_transaction(
+    transaction: &Transaction<'_>,
+    invocation_id: PluginInvocationId,
+    now: DateTime<Utc>,
+) -> Result<PluginInvocationWorkflowAttachment, StorageError> {
+    let source_type = stable_type_id("mcg.plugin_invocation_source.v1")?;
+    let source_locator = invocation_id.to_string();
+    if let Some(attachment) = load_workflow_source_attachment_by_source(
+        transaction,
+        source_type.as_str(),
+        &source_locator,
+    )? {
+        let workflow = load_agent_turn_workflow_attachment(transaction, attachment)?;
+        return Ok(PluginInvocationWorkflowAttachment {
+            task_contract: workflow.task_contract,
+            attempt: workflow.attempt,
+            attachment: workflow.attachment,
+            creation_event: workflow.creation_event,
+        });
+    }
+
+    let source = load_active_plugin_invocation_source(transaction, invocation_id, now)?;
+    let (task_contract, mut attempt, attachment) =
+        derive_plugin_invocation_workflow(&source, source_type, now)?;
+    attempt.task_contract.content_hash = task_contract_content_hash(&task_contract)?;
+    let mut attachment = attachment;
+    attachment.task_contract = attempt.task_contract.clone();
+    let creation_event = create_workflow_in_transaction(
+        transaction,
+        &task_contract,
+        &attempt,
+        CorrelationId::new(),
+        now,
+    )?;
+    insert_or_replay_workflow_source_attachment(transaction, &attachment)?;
+    Ok(PluginInvocationWorkflowAttachment {
+        task_contract,
+        attempt,
+        attachment,
+        creation_event,
+    })
+}
+
+fn load_active_plugin_invocation_source(
+    connection: &Connection,
+    invocation_id: PluginInvocationId,
+    now: DateTime<Utc>,
+) -> Result<ActivePluginInvocationSource, StorageError> {
+    let invocation = load_plugin_invocation(connection, invocation_id)?
+        .ok_or_else(|| StorageError::InvalidData("plugin invocation was not found".into()))?;
+    validate_running_invocation(&invocation)?;
+    if invocation.state != PluginInvocationState::Running || invocation.started_at > now {
+        return Err(StorageError::Conflict(
+            "plugin invocation is not active at the authorization time".into(),
+        ));
+    }
+    let revision = load_plugin_revision(connection, invocation.plugin_revision_id)?.ok_or(
+        StorageError::PluginRevisionNotFound(invocation.plugin_revision_id),
+    )?;
+    validate_plugin_revision(&revision)?;
+    let installation = load_plugin_installation(connection, &invocation.plugin_id)?
+        .ok_or_else(|| StorageError::PluginNotFound(invocation.plugin_id.clone()))?;
+    if !installation.enabled
+        || installation.active_revision_id != revision.id
+        || revision.manifest.id != invocation.plugin_id
+    {
+        return Err(StorageError::Conflict(
+            "plugin installation authority changed before canonical execution".into(),
+        ));
+    }
+    Ok(ActivePluginInvocationSource {
+        invocation_json: serde_json::to_string(&invocation)?,
+        revision_json: serde_json::to_string(&revision)?,
+        installation_json: serde_json::to_string(&installation)?,
+        invocation,
+        revision,
+        installation,
+    })
+}
+
+#[allow(clippy::too_many_lines)]
+fn derive_plugin_invocation_workflow(
+    source: &ActivePluginInvocationSource,
+    source_type: StableTypeId,
+    now: DateTime<Utc>,
+) -> Result<(TaskContract, WorkflowAttempt, WorkflowSourceAttachment), StorageError> {
+    let snapshot = VersionedPayload::canonical_v1(
+        source_type.clone(),
+        &serde_json::json!({
+            "invocation_id": source.invocation.id,
+            "invocation_sha256": sha256_text(&source.invocation_json),
+            "plugin_id": source.invocation.plugin_id,
+            "plugin_revision_id": source.revision.id,
+            "revision_sha256": sha256_text(&source.revision_json),
+            "installation_revision": source.installation.revision,
+            "installation_sha256": sha256_text(&source.installation_json),
+            "module_sha256": source.revision.module_sha256,
+            "input_sha256": source.invocation.input_sha256,
+            "task_id": source.invocation.task_id,
+        }),
+    )
+    .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+    let source_ref = SourceRef {
+        source_type,
+        locator: source.invocation.id.to_string(),
+        content_hash: snapshot
+            .content_hash(WORKFLOW_SOURCE_SNAPSHOT_HASH_DOMAIN)
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?,
+    };
+    let authority = agent_turn_policy(
+        "mcg.plugin_invocation_authority_policy.v1",
+        "MetaCog.PluginInvocationAuthority",
+        &serde_json::json!({
+            "invocation_id": source.invocation.id,
+            "plugin_id": source.invocation.plugin_id,
+            "plugin_revision_id": source.revision.id,
+            "installation_revision": source.installation.revision,
+        }),
+    )?;
+    let environment = agent_turn_policy(
+        "mcg.plugin_invocation_environment_policy.v1",
+        "MetaCog.PluginInvocationEnvironment",
+        &serde_json::json!({
+            "module_sha256": source.revision.module_sha256,
+            "input_sha256": source.invocation.input_sha256,
+            "task_id": source.invocation.task_id,
+            "source_snapshot_hash": source_ref.content_hash,
+        }),
+    )?;
+    let side_effects = agent_turn_policy(
+        "mcg.plugin_invocation_side_effect_policy.v1",
+        "MetaCog.PluginInvocationSideEffects",
+        &serde_json::json!({
+            "maximum_effect": "observational",
+            "ambient_capabilities": [],
+        }),
+    )?;
+    let risk = agent_turn_policy(
+        "mcg.plugin_invocation_risk_policy.v1",
+        "MetaCog.PluginInvocationRisk",
+        &serde_json::json!({
+            "isolation": "closed_ambient_wasip1",
+            "requested_broker_capabilities": source.revision.manifest.requested_capabilities,
+        }),
+    )?;
+    let budgets = agent_turn_policy(
+        "mcg.plugin_invocation_budget_policy.v1",
+        "MetaCog.PluginInvocationBudget",
+        &serde_json::json!({"physical_runner_attempts": 1}),
+    )?;
+    let rollback = agent_turn_policy(
+        "mcg.plugin_invocation_rollback_policy.v1",
+        "MetaCog.PluginInvocationRollback",
+        &serde_json::json!({"mode": "no_external_effect_to_rollback"}),
+    )?;
+    let task_contract_id = TaskContractId::new();
+    let task_contract = TaskContract {
+        id: task_contract_id,
+        version: 1,
+        previous_version: None,
+        user_intent_ref: source_ref.clone(),
+        objective: format!("Execute sandboxed plugin {}", source.invocation.plugin_id),
+        non_goals: vec!["Grant ambient host authority to the WASI guest".into()],
+        requirements: vec![ContractClause {
+            clause_id: "exact-plugin-revision".into(),
+            statement: format!(
+                "Execute plugin {} revision {} with exact module and input digests",
+                source.invocation.plugin_id, source.revision.id
+            ),
+            source_refs: vec![source_ref.clone()],
+        }],
+        constraints: vec![ContractClause {
+            clause_id: "closed-ambient-authority".into(),
+            statement: "The guest receives no ambient filesystem, network, process, environment, terminal, or secret authority".into(),
+            source_refs: vec![source_ref.clone()],
+        }],
+        assumptions: Vec::new(),
+        acceptance_criteria: vec![ContractClause {
+            clause_id: "bounded-runner-result".into(),
+            statement: "The fixed runner returns one identity-matched bounded result or a categorical failure".into(),
+            source_refs: vec![source_ref.clone()],
+        }],
+        dependencies: Vec::new(),
+        permitted_side_effects: side_effects,
+        authority,
+        environment: environment.clone(),
+        risk,
+        budgets,
+        rollback: rollback.clone(),
+        status: TaskContractStatus::Active,
+        created_at: now,
+    };
+    let workflow_id = WorkflowId::new();
+    let attempt_id = AttemptId::new();
+    let attempt = WorkflowAttempt {
+        workflow_id,
+        attempt_id,
+        task_contract: VersionedRef {
+            id: task_contract_id,
+            version: 1,
+            content_hash: source_ref.content_hash.clone(),
+        },
+        parent_attempt_id: None,
+        attempt_number: 1,
+        state: WorkflowState::Ready,
+        revision: 1,
+        lease_owner: None,
+        lease_generation: 0,
+        lease_expires_at: None,
+        heartbeat_at: None,
+        checkpoint: None,
+        environment_snapshot: environment.content_hash,
+        configuration: VersionedRef {
+            id: ConfigurationId::new(),
+            version: 1,
+            content_hash: source_ref.content_hash.clone(),
+        },
+        idempotency_key: format!("attach-plugin-invocation:{}", source.invocation.id),
+        retry_policy: RetryPolicy {
+            max_attempts: 1,
+            initial_backoff_ms: 0,
+            maximum_backoff_ms: 0,
+        },
+        compensation_policy: rollback,
+        created_at: now,
+        updated_at: now,
+    };
+    let attachment = WorkflowSourceAttachment {
+        schema_version: WorkflowSourceAttachment::SCHEMA_VERSION,
+        source: source_ref,
+        source_snapshot: snapshot,
+        workflow_id,
+        attempt_id,
+        task_contract: attempt.task_contract.clone(),
+        attached_at: now,
+    };
+    Ok((task_contract, attempt, attachment))
 }
 
 fn resume_approval_wait_in_transaction(
@@ -2696,6 +3046,12 @@ mod tests {
         WORKFLOW_SOURCE_SNAPSHOT_HASH_DOMAIN, WaitReason,
     };
     use mcg_domain::{AgentInstanceId, RunId};
+    use mcg_domain::{
+        PLUGIN_CATALOG_SCHEMA_VERSION, PluginInstallSource, PluginInvocationId,
+        PluginInvocationRecord, PluginInvocationState, PluginRevision, PluginRevisionId,
+        PluginSignature, PluginSignatureState,
+    };
+    use mcg_plugin_protocol::{PLUGIN_SCHEMA_VERSION, PluginClass, PluginManifest};
     use mcg_providers::{
         CONTRACT_VERSION, CostEstimate, ModelResponse, PlannedRoute, PriceProvenance,
         ProviderModelRef, Usage,
@@ -2717,6 +3073,31 @@ mod tests {
         PolicyBinding {
             payload,
             content_hash,
+        }
+    }
+
+    fn plugin_revision(at: DateTime<Utc>) -> PluginRevision {
+        PluginRevision {
+            schema_version: PLUGIN_CATALOG_SCHEMA_VERSION,
+            id: PluginRevisionId::new(),
+            manifest: PluginManifest {
+                schema_version: PLUGIN_SCHEMA_VERSION,
+                id: "example.workflow-plugin".into(),
+                display_name: "Workflow plugin fixture".into(),
+                version: "1.0.0".into(),
+                class: PluginClass::SandboxedWasi,
+                requested_capabilities: Vec::new(),
+            },
+            module_sha256: "a".repeat(64),
+            module_size_bytes: 1_024,
+            source: PluginInstallSource::LocalImport,
+            signature: PluginSignature {
+                state: PluginSignatureState::Unsigned,
+                scheme: None,
+                signer: None,
+                signature_sha256: None,
+            },
+            installed_at: at,
         }
     }
 
@@ -2998,6 +3379,100 @@ mod tests {
 
     #[test]
     #[allow(clippy::too_many_lines)] // The full persisted authority chain is intentional evidence.
+    fn active_plugin_invocation_is_attached_claimed_and_revalidated() {
+        let mut store = SqliteEventStore::open_in_memory().expect("store");
+        let at = now();
+        let revision = plugin_revision(at);
+        let installation = store
+            .install_unsigned_local_plugin_revision(&revision)
+            .expect("install plugin");
+        let installation = store
+            .set_plugin_enabled(
+                &revision.manifest.id,
+                installation.revision,
+                true,
+                at + chrono::Duration::seconds(1),
+            )
+            .expect("enable plugin");
+        let invocation = PluginInvocationRecord {
+            schema_version: PLUGIN_CATALOG_SCHEMA_VERSION,
+            id: PluginInvocationId::new(),
+            plugin_id: revision.manifest.id.clone(),
+            plugin_revision_id: revision.id,
+            task_id: None,
+            input_sha256: "b".repeat(64),
+            state: PluginInvocationState::Running,
+            result_sha256: None,
+            error_code: None,
+            started_at: at + chrono::Duration::seconds(2),
+            completed_at: None,
+        };
+        store
+            .begin_plugin_invocation(&invocation)
+            .expect("begin invocation");
+        let owner = RuntimeActorId::new();
+        let authority = store
+            .claim_active_plugin_invocation_workflow(
+                invocation.id,
+                owner,
+                300,
+                at + chrono::Duration::seconds(3),
+            )
+            .expect("claim canonical plugin workflow");
+        assert_eq!(authority.invocation, invocation);
+        assert_eq!(authority.revision, revision);
+        assert_eq!(authority.workflow.attempt.state, WorkflowState::Running);
+        assert_eq!(authority.workflow.attempt.lease_owner, Some(owner));
+        assert_eq!(
+            authority.workflow.attachment.source.locator,
+            invocation.id.to_string()
+        );
+        assert_eq!(
+            authority.workflow.task_contract.user_intent_ref,
+            authority.workflow.attachment.source
+        );
+
+        let replay = store
+            .claim_active_plugin_invocation_workflow(
+                invocation.id,
+                owner,
+                300,
+                at + chrono::Duration::seconds(4),
+            )
+            .expect("same-owner replay");
+        assert_eq!(replay.workflow, authority.workflow);
+        assert!(
+            store
+                .claim_active_plugin_invocation_workflow(
+                    invocation.id,
+                    RuntimeActorId::new(),
+                    300,
+                    at + chrono::Duration::seconds(4),
+                )
+                .is_err()
+        );
+
+        store
+            .set_plugin_enabled(
+                &revision.manifest.id,
+                installation.revision,
+                false,
+                at + chrono::Duration::seconds(5),
+            )
+            .expect("disable plugin");
+        assert!(
+            store
+                .claim_active_plugin_invocation_workflow(
+                    invocation.id,
+                    owner,
+                    300,
+                    at + chrono::Duration::seconds(6),
+                )
+                .is_err()
+        );
+    }
+
+    #[test]
     fn active_agent_lease_is_attached_from_exact_authoritative_source_rows() {
         let mut store = SqliteEventStore::open_in_memory().unwrap();
         let observed_at = now();

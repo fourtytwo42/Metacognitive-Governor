@@ -105,6 +105,8 @@ pub enum PluginRunnerClientError {
     Unavailable,
     #[error("plugin runner executable identity changed")]
     ExecutableChanged,
+    #[error("plugin execution was denied: {0}")]
+    Denied(String),
     #[error("plugin runner request is too large")]
     RequestTooLarge,
     #[error("plugin runner timed out")]

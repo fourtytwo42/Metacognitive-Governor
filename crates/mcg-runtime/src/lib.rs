@@ -100,10 +100,10 @@ use mcg_domain::{
     PlatformCapabilitySnapshotId, PlatformSession, PlatformSessionEvent, PlatformSessionId,
     PlatformSessionKind, PlatformSessionOwner, PlatformSessionState, PluginCapabilityGrant,
     PluginCapabilityScope, PluginInstallation, PluginInvocationId, PluginInvocationRecord,
-    PluginInvocationState, PluginRevision, ProjectId, ProxyCallId, ProxyConversationId,
-    ReviewedTopologyPlanId, ReviewedTopologyStepId, RiskLevel, RunId, SITE_SCHEMA_VERSION,
-    SSH_SCHEMA_VERSION, SSH_WORKFLOW_SCHEMA_VERSION, ScheduleDefinition, ScheduleId,
-    ScheduleOccurrence, ScheduleOccurrenceId, ScheduleOccurrenceState, ScheduleState,
+    PluginInvocationState, PluginRevision, PluginRevisionId, ProjectId, ProxyCallId,
+    ProxyConversationId, ReviewedTopologyPlanId, ReviewedTopologyStepId, RiskLevel, RunId,
+    SITE_SCHEMA_VERSION, SSH_SCHEMA_VERSION, SSH_WORKFLOW_SCHEMA_VERSION, ScheduleDefinition,
+    ScheduleId, ScheduleOccurrence, ScheduleOccurrenceId, ScheduleOccurrenceState, ScheduleState,
     ScheduleTrigger, SchedulerNotification, SchedulerNotificationId, SharedContextHit, Site,
     SiteDeployment, SiteDeploymentCommand, SiteDeploymentId, SiteDeploymentState, SiteEnvironment,
     SiteHealthCheck, SiteHealthCheckId, SiteHealthState, SiteId, SiteMonitor, SiteRevision,
@@ -155,12 +155,13 @@ use mcg_storage::{
     AgentTurnDisposition, AgentTurnVerificationTarget, AgentTurnWorkflowAttachment,
     AgentTurnWorkflowAuthority, BackupMcpSecret, BackupProviderSecret, BackupSecretSnapshot,
     ConsumerEvaluationCompletion, DataDirectoryLock, ModelEgressAuthorizationReceipt,
-    ModelSecretHandleBinding, ReconciliationClaimReceipt, ReconciliationRecoveryReport,
-    ReconciliationResolutionReceipt, RecoveryReport, RootMigrationReceipt, RootOwnership,
-    RuntimeResponseArtifact, STORAGE_SCHEMA_VERSION, SqliteEventStore, StorageError,
-    ToolCapabilityAuthorizationReceipt, ToolSecretHandleBinding, WorkflowRecoveryReport,
-    acquire_data_directory_lock, create_encrypted_backup_bundle_from_snapshot,
-    decrypt_backup_bundle_secrets, evaluation_report_source_ref,
+    ModelSecretHandleBinding, PluginInvocationWorkflowAuthority, ReconciliationClaimReceipt,
+    ReconciliationRecoveryReport, ReconciliationResolutionReceipt, RecoveryReport,
+    RootMigrationReceipt, RootOwnership, RuntimeResponseArtifact, STORAGE_SCHEMA_VERSION,
+    SqliteEventStore, StorageError, ToolCapabilityAuthorizationReceipt, ToolSecretHandleBinding,
+    WorkflowRecoveryReport, acquire_data_directory_lock,
+    create_encrypted_backup_bundle_from_snapshot, decrypt_backup_bundle_secrets,
+    evaluation_report_source_ref,
 };
 pub use mcg_storage::{
     AgentTurnCommit, AutomaticExperimentDisposition, AutomaticExperimentOutcome,
@@ -1664,6 +1665,17 @@ trait PluginRunnerGateway: Send + Sync {
     ) -> Result<PluginRunnerResponse, PluginRunnerClientError>;
 }
 
+/// Root-installed physical execution boundary for sandboxed plugin turns.
+#[async_trait]
+pub trait ProtectedPluginDispatcher: Send + Sync {
+    async fn invoke(
+        &self,
+        invocation_id: PluginInvocationId,
+        plugin_revision_id: PluginRevisionId,
+        request: PluginRunnerRequest,
+    ) -> Result<PluginRunnerResponse, PluginRunnerClientError>;
+}
+
 struct ProcessPluginRunnerGateway(PluginRunnerClient);
 
 #[async_trait]
@@ -1743,6 +1755,9 @@ const fn plugin_runner_failure(
     match error {
         PluginRunnerClientError::ExecutableChanged => {
             (PluginInvocationState::Failed, "runner_identity_changed")
+        }
+        PluginRunnerClientError::Denied(_) => {
+            (PluginInvocationState::Failed, "authorization_denied")
         }
         PluginRunnerClientError::Unavailable | PluginRunnerClientError::RequestTooLarge => {
             (PluginInvocationState::Failed, "runner_unavailable")
@@ -3454,6 +3469,7 @@ pub struct AppRuntime {
     shadow_command_verifier: Arc<dyn ShadowCommandVerifier>,
     plugin_runner: Option<Arc<dyn PluginRunnerGateway>>,
     plugin_trust: Arc<PluginTrustStore>,
+    protected_plugins: Arc<RwLock<Option<Arc<dyn ProtectedPluginDispatcher>>>>,
     protected_agent_models: Arc<RwLock<Option<Arc<dyn ProtectedAgentModelDispatcher>>>>,
     protected_compatibility_verifier: Arc<RwLock<Option<Arc<dyn ProtectedCompatibilityVerifier>>>>,
     _ephemeral_data_directory: Option<tempfile::TempDir>,
@@ -4096,6 +4112,26 @@ impl AppRuntime {
     ) -> Result<AgentTurnWorkflowAuthority, RuntimeError> {
         Ok(self.store()?.claim_active_agent_lease_workflow(
             lease_id,
+            lease_owner,
+            maximum_lease_seconds,
+            now,
+        )?)
+    }
+
+    /// Root-only atomic attachment and claim of one active durable plugin invocation.
+    ///
+    /// # Errors
+    /// Returns a runtime error for stale plugin authority, conflicting canonical ownership, or
+    /// unreadable durable state.
+    pub fn root_claim_active_plugin_invocation_workflow(
+        &self,
+        invocation_id: PluginInvocationId,
+        lease_owner: RuntimeActorId,
+        maximum_lease_seconds: u64,
+        now: DateTime<Utc>,
+    ) -> Result<PluginInvocationWorkflowAuthority, RuntimeError> {
+        Ok(self.store()?.claim_active_plugin_invocation_workflow(
+            invocation_id,
             lease_owner,
             maximum_lease_seconds,
             now,
@@ -5173,6 +5209,7 @@ impl AppRuntime {
             shadow_command_verifier: default_shadow_command_verifier(),
             plugin_runner: package_plugin_runner(),
             plugin_trust: Arc::new(plugin_trust),
+            protected_plugins: Arc::new(RwLock::new(None)),
             protected_agent_models: Arc::new(RwLock::new(None)),
             protected_compatibility_verifier: Arc::new(RwLock::new(None)),
             _ephemeral_data_directory: ephemeral_data_directory,
@@ -15883,14 +15920,31 @@ impl AppRuntime {
                 );
             }
         };
-        let Some(runner) = self.plugin_runner.clone() else {
+        let protected = self
+            .protected_plugins
+            .read()
+            .map_err(|_| RuntimeError::StorageLock)?
+            .clone();
+        if self.root_ownership()?.is_some() && protected.is_none() {
+            return self.settle_plugin_invocation(
+                running,
+                PluginInvocationState::Failed,
+                None,
+                Some("protected_dispatcher_unavailable"),
+            );
+        }
+        let runner = protected
+            .is_none()
+            .then(|| self.plugin_runner.clone())
+            .flatten();
+        if protected.is_none() && runner.is_none() {
             return self.settle_plugin_invocation(
                 running,
                 PluginInvocationState::Failed,
                 None,
                 Some("runner_unavailable"),
             );
-        };
+        }
         let capability_aware = !revision.manifest.requested_capabilities.is_empty();
         let mut host_turn = PluginHostTurn {
             schema_version: PLUGIN_SCHEMA_VERSION,
@@ -15913,7 +15967,16 @@ impl AppRuntime {
                 limits: limits.clone(),
                 authorization: None,
             };
-            let response = match runner.invoke(&request).await {
+            let response_result = if let Some(dispatcher) = &protected {
+                dispatcher.invoke(running.id, revision.id, request).await
+            } else {
+                runner
+                    .as_ref()
+                    .expect("legacy runner checked above")
+                    .invoke(&request)
+                    .await
+            };
+            let response = match response_result {
                 Ok(response) if response.state == PluginRunnerState::Succeeded => response,
                 Ok(response) => {
                     return self.settle_plugin_invocation(
@@ -20922,6 +20985,28 @@ impl AppRuntime {
         if slot.is_some() {
             return Err(StorageError::Conflict(
                 "Protected Root agent-model dispatcher is already installed".into(),
+            )
+            .into());
+        }
+        *slot = Some(dispatcher);
+        Ok(())
+    }
+
+    /// Installs the sole Protected Root dispatcher for production plugin execution.
+    ///
+    /// # Errors
+    /// Returns a conflict when a dispatcher was already installed or the lock is poisoned.
+    pub fn install_protected_plugin_dispatcher(
+        &self,
+        dispatcher: Arc<dyn ProtectedPluginDispatcher>,
+    ) -> Result<(), RuntimeError> {
+        let mut slot = self
+            .protected_plugins
+            .write()
+            .map_err(|_| RuntimeError::StorageLock)?;
+        if slot.is_some() {
+            return Err(StorageError::Conflict(
+                "Protected Root plugin dispatcher is already installed".into(),
             )
             .into());
         }
@@ -32173,6 +32258,33 @@ mod tests {
 
     struct SuccessfulPluginRunner(Arc<AtomicUsize>);
 
+    struct SuccessfulProtectedPluginDispatcher(Arc<AtomicUsize>);
+
+    #[async_trait]
+    impl ProtectedPluginDispatcher for SuccessfulProtectedPluginDispatcher {
+        async fn invoke(
+            &self,
+            _invocation_id: PluginInvocationId,
+            _plugin_revision_id: PluginRevisionId,
+            request: PluginRunnerRequest,
+        ) -> Result<PluginRunnerResponse, PluginRunnerClientError> {
+            assert!(request.authorization.is_none());
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(PluginRunnerResponse {
+                schema_version: PLUGIN_SCHEMA_VERSION,
+                plugin_id: Some(request.manifest.id.clone()),
+                state: PluginRunnerState::Succeeded,
+                result: Some(PluginResult {
+                    schema_version: PLUGIN_SCHEMA_VERSION,
+                    plugin_id: request.manifest.id,
+                    output: request.input,
+                }),
+                error_code: None,
+                detail: None,
+            })
+        }
+    }
+
     #[async_trait]
     impl PluginRunnerGateway for SuccessfulPluginRunner {
         async fn invoke(
@@ -32676,15 +32788,100 @@ mod tests {
     }
 
     #[test]
-    fn plugin_runner_identity_change_is_proved_pre_execution_failure() {
+    fn plugin_runner_pre_execution_failures_retain_categorical_evidence() {
         assert_eq!(
             plugin_runner_failure(&PluginRunnerClientError::ExecutableChanged, false),
             (PluginInvocationState::Failed, "runner_identity_changed")
         );
         assert_eq!(
-            plugin_runner_failure(&PluginRunnerClientError::ExecutableChanged, true),
+            plugin_runner_failure(&PluginRunnerClientError::Denied("policy".into()), false),
+            (PluginInvocationState::Failed, "authorization_denied")
+        );
+        assert_eq!(
+            plugin_runner_failure(&PluginRunnerClientError::Denied("policy".into()), true),
             (PluginInvocationState::Uncertain, "runner_uncertain")
         );
+    }
+
+    #[tokio::test]
+    async fn root_owned_plugin_invocation_uses_only_the_protected_dispatcher() {
+        let directory = tempfile::tempdir().expect("temporary runtime");
+        let config = AppConfig::default().with_data_directory(directory.path());
+        let module = br#"(module (func (export "_start")))"#;
+        let revision = PluginRevision {
+            schema_version: mcg_domain::PLUGIN_CATALOG_SCHEMA_VERSION,
+            id: PluginRevisionId::new(),
+            manifest: mcg_plugin_protocol::PluginManifest {
+                schema_version: PLUGIN_SCHEMA_VERSION,
+                id: "example.protected-plugin".into(),
+                display_name: "Protected plugin fixture".into(),
+                version: "1.0.0".into(),
+                class: mcg_plugin_protocol::PluginClass::SandboxedWasi,
+                requested_capabilities: Vec::new(),
+            },
+            module_sha256: format!("{:x}", Sha256::digest(module)),
+            module_size_bytes: u64::try_from(module.len()).expect("module size"),
+            source: mcg_domain::PluginInstallSource::LocalImport,
+            signature: mcg_domain::PluginSignature {
+                state: mcg_domain::PluginSignatureState::Unsigned,
+                scheme: None,
+                signer: None,
+                signature_sha256: None,
+            },
+            installed_at: Utc::now(),
+        };
+        let mut runtime = AppRuntime::open(config).expect("runtime");
+        let legacy_calls = Arc::new(AtomicUsize::new(0));
+        runtime.plugin_runner = Some(Arc::new(SuccessfulPluginRunner(legacy_calls.clone())));
+        let installation = runtime
+            .install_sandboxed_plugin(&revision, module)
+            .expect("install plugin");
+        runtime
+            .set_plugin_enabled(&revision.manifest.id, installation.revision, true)
+            .expect("enable plugin");
+        let identity = RuntimeIdentity {
+            instance_id: mcg_contracts::RuntimeInstanceId::new(),
+            build_hash: ContentHash {
+                algorithm: mcg_contracts::HashAlgorithm::Sha256,
+                domain: "MetaCog.TestRootBuild".into(),
+                digest_hex: "a".repeat(64),
+            },
+            protocol_version: mcg_contracts::PROTOCOL_V1,
+            started_at: Utc::now(),
+        };
+        runtime
+            .initialize_root_ownership(
+                identity,
+                RootMigrationReceipt {
+                    schema_version: mcg_contracts::PROTOCOL_V1,
+                    from_storage_schema: STORAGE_SCHEMA_VERSION,
+                    to_storage_schema: STORAGE_SCHEMA_VERSION,
+                    backup_path: None,
+                    backup_sha256: None,
+                    migrated_at: Utc::now(),
+                },
+            )
+            .expect("Root ownership");
+        let protected_calls = Arc::new(AtomicUsize::new(0));
+        runtime
+            .install_protected_plugin_dispatcher(Arc::new(SuccessfulProtectedPluginDispatcher(
+                protected_calls.clone(),
+            )))
+            .expect("protected dispatcher");
+
+        let result = runtime
+            .invoke_sandboxed_plugin(
+                PluginInvocationId::new(),
+                &revision.manifest.id,
+                None,
+                serde_json::json!({"protected": true}),
+            )
+            .await
+            .expect("protected invocation");
+
+        assert_eq!(result.invocation.state, PluginInvocationState::Succeeded);
+        assert_eq!(protected_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(legacy_calls.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]
