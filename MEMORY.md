@@ -2,6 +2,15 @@
 
 Durable project context lives here. Update this file whenever information should survive chat context compression or future agent handoff.
 
+### 2026-09-01 - MCP sessions revalidate exact live catalogs
+
+- Context: Legacy HTTP and stdio MCP clients could negotiate and call, but no API forced the live protocol/server/capability/tool descriptors to equal the unexpired catalog snapshot authorized by Root, and a discovery followed by a call could use a different physical session.
+- Decision: Add an exact live-catalog fence and catalog-bound call APIs. Legacy HTTP now initializes, lists, validates, and calls on one session. Stdio now negotiates, lists, validates, and calls on one child process for both current and legacy eras. Discovery timestamps are fresh and excluded; connection, protocol, server identity, capabilities, and sorted descriptors must match exactly. This is prerequisite groundwork only and does not open plugin legacy/stdio execution before a permit-consuming child and Root settlement exist.
+- Files: `crates/mcg-mcp/src/{contracts,legacy,negotiation,stdio}.rs`. The separately owned untracked `docs/NewPRD/STAGE_3_DURABLE_WORKFLOW.md` remains untouched.
+- Commands/tests: MCP 9 active with two fixture processes ignored, including exact legacy HTTP and modern/legacy stdio same-session calls plus expiry/descriptor/server substitution rejection; strict MCP lint; whole-workspace all-target check; docs/packaging/format/diff gates.
+- Result: Product checkpoint `cc94c02f64fbbba3ae5bfab01e62ecc541ecbefd` is pushed with exact local/remote parity. No Root permit is consumed by this checkpoint, so legacy/stdio plugin execution remains fail-closed.
+- Follow-up: Add the fixed permit-consuming MCP session runner with exact HTTP endpoint or stdio executable identity, opaque bearer resolution only in the child, one conservative irreversible action, bounded result evidence, restart/no-redispatch settlement, package qualification, and native UAT.
+
 ### 2026-09-01 - Plugin browser consumes exact Root authority
 
 - Context: The exact Browser capability, same-origin workflow, and `BrowserOrigin` grant existed, but no physical browser could consume schema-61 authority through Protected Root.
