@@ -2,6 +2,15 @@
 
 Durable project context lives here. Update this file whenever information should survive chat context compression or future agent handoff.
 
+### 2026-09-01 - Exact plugin browser authority contracts
+
+- Context: The browser boundary audit found no browser-specific plugin operation or durable scope, so a plugin could not request narrowly scoped browser work without being confused with ambient network authority.
+- Decision: Add a distinct `Browser` capability, a bounded `BrowserWorkflow` operation over the existing same-origin non-script workflow language, and an exact canonical `BrowserOrigin` grant. Bind browser capability into signed plugin revision bytes so a network-authorized revision cannot be relabeled. Keep the legacy Runtime executor fail-closed until an independently validating Protected Root browser runner consumes the exact permit.
+- Files: `Cargo.lock`, `crates/mcg-plugin-protocol`, `crates/mcg-domain`, `crates/mcg-plugin-trust`, `crates/mcg-storage/src/plugins.rs`, and `crates/mcg-runtime/src/lib.rs`. The separately owned untracked `docs/NewPRD/STAGE_3_DURABLE_WORKFLOW.md` remains untouched.
+- Commands/tests: Plugin protocol 4/4, Domain 7/7, Storage 126/126, plugin trust 4/4, Runtime 114 active with two explicit Windows Sandbox qualifications ignored, whole-workspace all-target check, strict protocol/domain/trust lint, and docs/packaging/format/diff gates.
+- Result: Product checkpoint `05115cb1eaae0b6d3b18c9038b4358b52ddb3961` is pushed with exact local/remote parity. Workflows are limited to 64 validated steps, 512 KiB canonical JSON, bounded viewport/timeout, and exact canonical HTTP(S) origin. Cross-kind scope substitution, unsafe keys, and capability relabeling fail closed. This is an authority-contract checkpoint only; no browser launches through Protected Root yet.
+- Follow-up: Implement the fixed adjacent permit-consuming browser runner, conservative effect settlement, restart/no-redispatch recovery, adversarial origin/navigation/data-egress tests, packaging, and native three-platform UAT.
+
 ### 2026-09-01 - Plugin browser boundary audit
 
 - Context: After modern plugin MCP landed, the next Stage 6 family was browser execution. The plugin protocol and durable scopes contain no browser operation. Existing `BrowserExecutor` and `PersistentBrowserManager` run under the compatibility Runtime and do not consume schema-61 Root permits in an independently validating child.
