@@ -15911,6 +15911,7 @@ impl AppRuntime {
                 module_base64: STANDARD.encode(&module),
                 input: runner_input,
                 limits: limits.clone(),
+                authorization: None,
             };
             let response = match runner.invoke(&request).await {
                 Ok(response) if response.state == PluginRunnerState::Succeeded => response,

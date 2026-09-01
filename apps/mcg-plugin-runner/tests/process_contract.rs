@@ -41,6 +41,7 @@ fn process_executes_one_digest_bound_request_and_exits() {
         module_base64: STANDARD.encode(module),
         input: json!({}),
         limits: WasiPluginLimits::default(),
+        authorization: None,
     };
     let mut child = Command::new(env!("CARGO_BIN_EXE_mcg-plugin-runner"))
         .stdin(Stdio::piped())
@@ -95,6 +96,7 @@ async fn bounded_parent_client_executes_and_validates_the_runner_contract() {
         module_base64: STANDARD.encode(module),
         input: json!({}),
         limits: WasiPluginLimits::default(),
+        authorization: None,
     };
     let client = PluginRunnerClient::with_executable(
         env!("CARGO_BIN_EXE_mcg-plugin-runner"),
@@ -128,6 +130,7 @@ async fn parent_deadline_covers_request_pipe_and_child_lifetime() {
         module_base64: STANDARD.encode(module),
         input: json!({}),
         limits: WasiPluginLimits::default(),
+        authorization: None,
     };
     let client = PluginRunnerClient::with_executable(
         env!("CARGO_BIN_EXE_mcg-plugin-runner"),
@@ -181,6 +184,7 @@ async fn parent_rejects_runner_replacement_before_plugin_execution() {
         module_base64: STANDARD.encode(module),
         input: json!({}),
         limits: WasiPluginLimits::default(),
+        authorization: None,
     };
     assert!(matches!(
         client.invoke(&request).await,
