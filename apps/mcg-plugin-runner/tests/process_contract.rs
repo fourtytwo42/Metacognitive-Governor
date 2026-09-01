@@ -1,4 +1,5 @@
 use std::{
+    fs::OpenOptions,
     io::Write as _,
     process::{Command, Stdio},
 };
@@ -6,8 +7,8 @@ use std::{
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use mcg_plugin_protocol::{PLUGIN_SCHEMA_VERSION, PluginClass, PluginManifest, WasiPluginLimits};
 use mcg_plugin_runner::{
-    PluginRunnerClient, PluginRunnerClientError, PluginRunnerRequest, PluginRunnerResponse,
-    PluginRunnerState, sha256_hex,
+    PLUGIN_RUNNER_EXECUTABLE_HASH_DOMAIN, PluginRunnerClient, PluginRunnerClientError,
+    PluginRunnerRequest, PluginRunnerResponse, PluginRunnerState, sha256_hex,
 };
 use serde_json::json;
 
@@ -139,4 +140,50 @@ async fn parent_deadline_covers_request_pipe_and_child_lifetime() {
 
     assert!(matches!(result, Err(PluginRunnerClientError::Timeout)));
     assert!(started.elapsed() < std::time::Duration::from_secs(5));
+}
+
+#[tokio::test]
+async fn parent_rejects_runner_replacement_before_plugin_execution() {
+    let temporary = tempfile::tempdir().expect("temporary runner directory");
+    let runner_name = if cfg!(windows) {
+        "mcg-plugin-runner.exe"
+    } else {
+        "mcg-plugin-runner"
+    };
+    let runner = temporary.path().join(runner_name);
+    std::fs::copy(env!("CARGO_BIN_EXE_mcg-plugin-runner"), &runner)
+        .expect("copy fixed plugin runner");
+    let client = PluginRunnerClient::with_executable(&runner, std::time::Duration::from_secs(10))
+        .expect("pin copied runner");
+    assert_eq!(
+        client.runner_source().content_hash.domain,
+        PLUGIN_RUNNER_EXECUTABLE_HASH_DOMAIN
+    );
+    OpenOptions::new()
+        .append(true)
+        .open(&runner)
+        .expect("open copied runner")
+        .write_all(b"changed")
+        .expect("replace runner identity");
+
+    let module = br#"(module (func (export "_start")))"#;
+    let request = PluginRunnerRequest {
+        schema_version: PLUGIN_SCHEMA_VERSION,
+        manifest: PluginManifest {
+            schema_version: PLUGIN_SCHEMA_VERSION,
+            id: "example.replaced".into(),
+            display_name: "Replacement fixture".into(),
+            version: "1.0.0".into(),
+            class: PluginClass::SandboxedWasi,
+            requested_capabilities: Vec::new(),
+        },
+        module_sha256: sha256_hex(module),
+        module_base64: STANDARD.encode(module),
+        input: json!({}),
+        limits: WasiPluginLimits::default(),
+    };
+    assert!(matches!(
+        client.invoke(&request).await,
+        Err(PluginRunnerClientError::ExecutableChanged)
+    ));
 }

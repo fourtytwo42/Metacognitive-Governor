@@ -2,6 +2,7 @@
 
 use std::{
     fmt::Write as _,
+    io::Read as _,
     path::{Path, PathBuf},
     process::Stdio,
     time::Duration,
@@ -9,6 +10,7 @@ use std::{
 
 #[cfg(feature = "executor")]
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use mcg_contracts::{ContentHash, HashAlgorithm, SourceRef, StableTypeId};
 use mcg_plugin_protocol::{PLUGIN_SCHEMA_VERSION, PluginManifest, PluginResult, WasiPluginLimits};
 #[cfg(feature = "executor")]
 use mcg_plugins::WasiPluginExecutor;
@@ -25,6 +27,8 @@ pub const RUNNER_REQUEST_MAX_BYTES: usize = 32 * 1_024 * 1_024;
 const RUNNER_DETAIL_MAX_BYTES: usize = 2_048;
 const RUNNER_RESPONSE_MAX_BYTES: usize = 2 * 1_024 * 1_024;
 const RUNNER_STDERR_MAX_BYTES: usize = 4 * 1_024;
+pub const PLUGIN_RUNNER_EXECUTABLE_SOURCE_TYPE: &str = "mcg.plugin_runner_executable.v1";
+pub const PLUGIN_RUNNER_EXECUTABLE_HASH_DOMAIN: &str = "MetaCog.PluginRunnerExecutable";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PluginRunnerRequest {
@@ -58,6 +62,8 @@ pub struct PluginRunnerResponse {
 pub enum PluginRunnerClientError {
     #[error("plugin runner is unavailable")]
     Unavailable,
+    #[error("plugin runner executable identity changed")]
+    ExecutableChanged,
     #[error("plugin runner request is too large")]
     RequestTooLarge,
     #[error("plugin runner timed out")]
@@ -76,6 +82,7 @@ pub enum PluginRunnerClientError {
 pub struct PluginRunnerClient {
     executable: PathBuf,
     outer_timeout: Duration,
+    runner_source: SourceRef,
 }
 
 impl PluginRunnerClient {
@@ -112,13 +119,20 @@ impl PluginRunnerClient {
         }
         let metadata = std::fs::symlink_metadata(executable)
             .map_err(|_| PluginRunnerClientError::Unavailable)?;
-        if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+        if !metadata.file_type().is_file() || is_link_or_reparse(&metadata) {
             return Err(PluginRunnerClientError::Unavailable);
         }
         Ok(Self {
             executable: executable.to_path_buf(),
             outer_timeout,
+            runner_source: plugin_runner_executable_source(executable)?,
         })
+    }
+
+    /// Returns the exact content-addressed runner identity pinned by this client.
+    #[must_use]
+    pub fn runner_source(&self) -> &SourceRef {
+        &self.runner_source
     }
 
     /// Executes exactly one request in a cleared-environment child process.
@@ -129,6 +143,13 @@ impl PluginRunnerClient {
         &self,
         request: &PluginRunnerRequest,
     ) -> Result<PluginRunnerResponse, PluginRunnerClientError> {
+        if plugin_runner_executable_source(&self.executable)
+            .ok()
+            .as_ref()
+            != Some(&self.runner_source)
+        {
+            return Err(PluginRunnerClientError::ExecutableChanged);
+        }
         let expected_plugin_id = request.manifest.id.clone();
         let request =
             serde_json::to_vec(request).map_err(|_| PluginRunnerClientError::InvalidResponse)?;
@@ -392,12 +413,60 @@ fn valid_error_code(value: &str) -> bool {
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
 }
 
+/// Hashes one exact real plugin-runner executable into a stable source reference.
+///
+/// # Errors
+/// Returns unavailable when the path is not a regular non-link file or cannot be read.
+pub fn plugin_runner_executable_source(path: &Path) -> Result<SourceRef, PluginRunnerClientError> {
+    let metadata =
+        std::fs::symlink_metadata(path).map_err(|_| PluginRunnerClientError::Unavailable)?;
+    if !metadata.file_type().is_file() || is_link_or_reparse(&metadata) {
+        return Err(PluginRunnerClientError::Unavailable);
+    }
+    let mut file = std::fs::File::open(path).map_err(|_| PluginRunnerClientError::Unavailable)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0_u8; 64 * 1_024].into_boxed_slice();
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|_| PluginRunnerClientError::Unavailable)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(SourceRef {
+        source_type: StableTypeId::parse(PLUGIN_RUNNER_EXECUTABLE_SOURCE_TYPE)
+            .map_err(|_| PluginRunnerClientError::Unavailable)?,
+        locator: runner_file_name().into(),
+        content_hash: ContentHash {
+            algorithm: HashAlgorithm::Sha256,
+            domain: PLUGIN_RUNNER_EXECUTABLE_HASH_DOMAIN.into(),
+            digest_hex: format!("{:x}", hasher.finalize()),
+        },
+    })
+}
+
 const fn runner_file_name() -> &'static str {
     if cfg!(windows) {
         "mcg-plugin-runner.exe"
     } else {
         "mcg-plugin-runner"
     }
+}
+
+#[cfg(windows)]
+fn is_link_or_reparse(metadata: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt as _;
+
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+    metadata.file_type().is_symlink()
+        || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+fn is_link_or_reparse(metadata: &std::fs::Metadata) -> bool {
+    metadata.file_type().is_symlink()
 }
 
 #[cfg(test)]

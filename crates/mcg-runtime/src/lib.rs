@@ -1741,6 +1741,9 @@ const fn plugin_runner_failure(
         return (PluginInvocationState::Uncertain, "runner_uncertain");
     }
     match error {
+        PluginRunnerClientError::ExecutableChanged => {
+            (PluginInvocationState::Failed, "runner_identity_changed")
+        }
         PluginRunnerClientError::Unavailable | PluginRunnerClientError::RequestTooLarge => {
             (PluginInvocationState::Failed, "runner_unavailable")
         }
@@ -32668,6 +32671,18 @@ mod tests {
         assert_eq!(
             stored.signature.signer.as_deref(),
             Some("publisher.example")
+        );
+    }
+
+    #[test]
+    fn plugin_runner_identity_change_is_proved_pre_execution_failure() {
+        assert_eq!(
+            plugin_runner_failure(&PluginRunnerClientError::ExecutableChanged, false),
+            (PluginInvocationState::Failed, "runner_identity_changed")
+        );
+        assert_eq!(
+            plugin_runner_failure(&PluginRunnerClientError::ExecutableChanged, true),
+            (PluginInvocationState::Uncertain, "runner_uncertain")
         );
     }
 
