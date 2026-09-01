@@ -1674,6 +1674,24 @@ pub trait ProtectedPluginDispatcher: Send + Sync {
         plugin_revision_id: PluginRevisionId,
         request: PluginRunnerRequest,
     ) -> Result<PluginRunnerResponse, PluginRunnerClientError>;
+
+    /// Executes one guest-requested broker capability through Protected Root.
+    ///
+    /// The default denies capability execution so an incomplete Root installation cannot fall
+    /// back to Runtime's ambient host executors.
+    ///
+    /// # Errors
+    /// Returns a Tool error when exact Root authority is absent, denied, or cannot be settled.
+    async fn execute_capability(
+        &self,
+        _invocation_id: PluginInvocationId,
+        _plugin_revision_id: PluginRevisionId,
+        _request: PluginCapabilityRequest,
+    ) -> Result<PluginCapabilityOutcome, ToolError> {
+        Err(ToolError::Denied(
+            "Protected Root capability dispatch is unavailable".into(),
+        ))
+    }
 }
 
 struct ProcessPluginRunnerGateway(PluginRunnerClient);
@@ -2011,6 +2029,20 @@ fn plugin_tool_outcome(outcome: &ToolOutcome) -> serde_json::Value {
             "detail": bounded_plugin_output_text(&evidence.detail, 1_024),
         })).collect::<Vec<_>>(),
     })
+}
+
+fn plugin_capability_outcome(request_id: &str, outcome: &ToolOutcome) -> PluginCapabilityOutcome {
+    if outcome.status == ToolOutcomeStatus::Succeeded {
+        PluginCapabilityOutcome::Succeeded {
+            request_id: request_id.into(),
+            outcome: plugin_tool_outcome(outcome),
+        }
+    } else {
+        PluginCapabilityOutcome::Failed {
+            request_id: request_id.into(),
+            error_code: "tool_failed".into(),
+        }
+    }
 }
 
 fn bounded_plugin_output_text(value: &str, maximum_bytes: usize) -> String {
@@ -16043,21 +16075,17 @@ impl AppRuntime {
                             Some("capability_contract_invalid"),
                         );
                     }
-                    match self
-                        .execute_plugin_capability(&running, &revision, &request)
-                        .await
-                    {
-                        Ok(outcome) if outcome.status == ToolOutcomeStatus::Succeeded => {
-                            let outcome = plugin_tool_outcome(&outcome);
-                            host_turn.outcomes.push(PluginCapabilityOutcome::Succeeded {
-                                request_id: request.id,
-                                outcome,
-                            });
-                        }
-                        Ok(_) => host_turn.outcomes.push(PluginCapabilityOutcome::Failed {
-                            request_id: request.id,
-                            error_code: "tool_failed".into(),
-                        }),
+                    let capability_result = if let Some(dispatcher) = &protected {
+                        dispatcher
+                            .execute_capability(running.id, revision.id, request.clone())
+                            .await
+                    } else {
+                        self.execute_plugin_capability(&running, &revision, &request)
+                            .await
+                            .map(|outcome| plugin_capability_outcome(&request.id, &outcome))
+                    };
+                    match capability_result {
+                        Ok(outcome) => host_turn.outcomes.push(outcome),
                         Err(ToolError::ApprovalRequired { .. }) => {
                             return self.settle_plugin_invocation(
                                 running,
@@ -32282,6 +32310,11 @@ mod tests {
 
     struct SuccessfulProtectedPluginDispatcher(Arc<AtomicUsize>);
 
+    struct CapabilityProtectedPluginDispatcher {
+        invoke_calls: Arc<AtomicUsize>,
+        capability_calls: Arc<AtomicUsize>,
+    }
+
     #[async_trait]
     impl ProtectedPluginDispatcher for SuccessfulProtectedPluginDispatcher {
         async fn invoke(
@@ -32303,6 +32336,67 @@ mod tests {
                 }),
                 error_code: None,
                 detail: None,
+            })
+        }
+    }
+
+    #[async_trait]
+    impl ProtectedPluginDispatcher for CapabilityProtectedPluginDispatcher {
+        async fn invoke(
+            &self,
+            _invocation_id: PluginInvocationId,
+            _plugin_revision_id: PluginRevisionId,
+            request: PluginRunnerRequest,
+        ) -> Result<PluginRunnerResponse, PluginRunnerClientError> {
+            assert!(request.authorization.is_none());
+            let invocation = self.invoke_calls.fetch_add(1, Ordering::SeqCst);
+            let turn = if invocation == 0 {
+                PluginGuestTurn::CapabilityRequest {
+                    request: PluginCapabilityRequest {
+                        schema_version: PLUGIN_SCHEMA_VERSION,
+                        id: "protected-read".into(),
+                        operation: PluginCapabilityOperation::FilesystemRead {
+                            path: "proof.txt".into(),
+                            max_bytes: 1_024,
+                        },
+                    },
+                }
+            } else {
+                let host_turn: PluginHostTurn = serde_json::from_value(request.input.clone())
+                    .expect("protected continuation host turn");
+                assert_eq!(host_turn.outcomes.len(), 1);
+                assert!(matches!(
+                    host_turn.outcomes[0],
+                    PluginCapabilityOutcome::Succeeded { .. }
+                ));
+                PluginGuestTurn::Completed {
+                    output: serde_json::json!({"protected": true}),
+                }
+            };
+            Ok(PluginRunnerResponse {
+                schema_version: PLUGIN_SCHEMA_VERSION,
+                plugin_id: Some(request.manifest.id.clone()),
+                state: PluginRunnerState::Succeeded,
+                result: Some(PluginResult {
+                    schema_version: PLUGIN_SCHEMA_VERSION,
+                    plugin_id: request.manifest.id,
+                    output: serde_json::to_value(turn).expect("serialize protected guest turn"),
+                }),
+                error_code: None,
+                detail: None,
+            })
+        }
+
+        async fn execute_capability(
+            &self,
+            _invocation_id: PluginInvocationId,
+            _plugin_revision_id: PluginRevisionId,
+            request: PluginCapabilityRequest,
+        ) -> Result<PluginCapabilityOutcome, ToolError> {
+            self.capability_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(PluginCapabilityOutcome::Succeeded {
+                request_id: request.id,
+                outcome: serde_json::json!({"stdout": "protected proof"}),
             })
         }
     }
@@ -32904,6 +32998,124 @@ mod tests {
         assert_eq!(result.invocation.state, PluginInvocationState::Succeeded);
         assert_eq!(protected_calls.load(Ordering::SeqCst), 1);
         assert_eq!(legacy_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)] // Covers the full protected/legacy routing boundary in one fixture.
+    async fn root_owned_plugin_capability_never_falls_back_to_the_legacy_broker() {
+        let directory = tempfile::tempdir().expect("temporary runtime");
+        let config = AppConfig::default().with_data_directory(directory.path());
+        let project_root = tempfile::tempdir().expect("plugin project root");
+        std::fs::write(
+            project_root.path().join("proof.txt"),
+            "legacy must not read this",
+        )
+        .expect("project fixture");
+        let module = br#"(module (func (export "_start")))"#;
+        let revision = PluginRevision {
+            schema_version: mcg_domain::PLUGIN_CATALOG_SCHEMA_VERSION,
+            id: PluginRevisionId::new(),
+            manifest: mcg_plugin_protocol::PluginManifest {
+                schema_version: PLUGIN_SCHEMA_VERSION,
+                id: "example.protected-capability".into(),
+                display_name: "Protected capability fixture".into(),
+                version: "1.0.0".into(),
+                class: mcg_plugin_protocol::PluginClass::SandboxedWasi,
+                requested_capabilities: vec![PluginCapability::FilesystemRead],
+            },
+            module_sha256: format!("{:x}", Sha256::digest(module)),
+            module_size_bytes: u64::try_from(module.len()).expect("module size"),
+            source: mcg_domain::PluginInstallSource::LocalImport,
+            signature: mcg_domain::PluginSignature {
+                state: mcg_domain::PluginSignatureState::Unsigned,
+                scheme: None,
+                signer: None,
+                signature_sha256: None,
+            },
+            installed_at: Utc::now(),
+        };
+        let mut runtime = AppRuntime::open(config).expect("runtime");
+        let project_id = ProjectId::new();
+        runtime
+            .discover_project(project_root.path(), project_id)
+            .expect("discover project");
+        let mut task = TaskEnvelope::new("prove protected capability routing");
+        task.project_id = Some(project_id);
+        runtime.create_task(&task).expect("create plugin task");
+        let legacy_calls = Arc::new(AtomicUsize::new(0));
+        runtime.plugin_runner = Some(Arc::new(SuccessfulPluginRunner(legacy_calls.clone())));
+        let installation = runtime
+            .install_sandboxed_plugin(&revision, module)
+            .expect("install plugin");
+        let granted = runtime
+            .set_plugin_capability_grants(
+                &revision.manifest.id,
+                installation.revision,
+                vec![PluginCapabilityGrant {
+                    schema_version: mcg_domain::PLUGIN_CATALOG_SCHEMA_VERSION,
+                    capability: PluginCapability::FilesystemRead,
+                    scopes: vec![PluginCapabilityScope::TaskProject],
+                }],
+            )
+            .expect("grant project read");
+        runtime
+            .set_plugin_enabled(&revision.manifest.id, granted.revision, true)
+            .expect("enable plugin");
+        runtime
+            .initialize_root_ownership(
+                RuntimeIdentity {
+                    instance_id: mcg_contracts::RuntimeInstanceId::new(),
+                    build_hash: ContentHash {
+                        algorithm: mcg_contracts::HashAlgorithm::Sha256,
+                        domain: "MetaCog.TestRootBuild".into(),
+                        digest_hex: "b".repeat(64),
+                    },
+                    protocol_version: mcg_contracts::PROTOCOL_V1,
+                    started_at: Utc::now(),
+                },
+                RootMigrationReceipt {
+                    schema_version: mcg_contracts::PROTOCOL_V1,
+                    from_storage_schema: STORAGE_SCHEMA_VERSION,
+                    to_storage_schema: STORAGE_SCHEMA_VERSION,
+                    backup_path: None,
+                    backup_sha256: None,
+                    migrated_at: Utc::now(),
+                },
+            )
+            .expect("Root ownership");
+        let invoke_calls = Arc::new(AtomicUsize::new(0));
+        let capability_calls = Arc::new(AtomicUsize::new(0));
+        runtime
+            .install_protected_plugin_dispatcher(Arc::new(CapabilityProtectedPluginDispatcher {
+                invoke_calls: invoke_calls.clone(),
+                capability_calls: capability_calls.clone(),
+            }))
+            .expect("protected dispatcher");
+
+        let result = runtime
+            .invoke_sandboxed_plugin(
+                PluginInvocationId::new(),
+                &revision.manifest.id,
+                Some(task.id),
+                serde_json::json!({"goal": "read through Root"}),
+            )
+            .await
+            .expect("protected capability invocation");
+
+        assert_eq!(result.invocation.state, PluginInvocationState::Succeeded);
+        assert_eq!(
+            result.result.expect("protected result").output,
+            serde_json::json!({"protected": true})
+        );
+        assert_eq!(invoke_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(capability_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(legacy_calls.load(Ordering::SeqCst), 0);
+        assert!(
+            runtime
+                .tool_audit(task.id)
+                .expect("legacy audit")
+                .is_empty()
+        );
     }
 
     #[tokio::test]

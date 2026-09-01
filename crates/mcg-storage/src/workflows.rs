@@ -16,6 +16,7 @@ use mcg_domain::{
     AgentLeaseId, PluginInstallation, PluginInvocationId, PluginInvocationRecord,
     PluginInvocationState, PluginRevision, RunId, TaskEnvelope, TaskState, WorkItemId,
 };
+use mcg_projects::ProjectModel;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use sha2::{Digest, Sha256};
 
@@ -84,11 +85,14 @@ pub struct PluginInvocationWorkflowAttachment {
 }
 
 /// Atomic authority returned when an active plugin invocation is attached and claimed.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PluginInvocationWorkflowAuthority {
     pub workflow: PluginInvocationWorkflowAttachment,
     pub invocation: PluginInvocationRecord,
     pub revision: PluginRevision,
+    pub installation: PluginInstallation,
+    pub task: Option<TaskEnvelope>,
+    pub project: Option<ProjectModel>,
 }
 
 #[derive(Debug, Clone)]
@@ -99,6 +103,10 @@ struct ActivePluginInvocationSource {
     revision_json: String,
     installation: PluginInstallation,
     installation_json: String,
+    task: Option<TaskEnvelope>,
+    task_json: Option<String>,
+    project: Option<ProjectModel>,
+    project_json: Option<String>,
 }
 
 /// Exact completed compatibility Work evidence awaiting independent Verify.
@@ -409,6 +417,18 @@ impl SqliteEventStore {
             now,
         )?;
         let source = load_active_plugin_invocation_source(&transaction, invocation_id, now)?;
+        let source_type = stable_type_id("mcg.plugin_invocation_source.v1")?;
+        let current_source = plugin_invocation_source_snapshot(&source, source_type)?;
+        let current_source_hash = current_source
+            .content_hash(WORKFLOW_SOURCE_SNAPSHOT_HASH_DOMAIN)
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        if workflow.attachment.source.content_hash != current_source_hash
+            || workflow.attachment.source_snapshot != current_source
+        {
+            return Err(StorageError::Conflict(
+                "plugin invocation authority changed after canonical attachment".into(),
+            ));
+        }
         let lease_expires_at = now
             .checked_add_signed(chrono::Duration::seconds(maximum_lease_seconds))
             .ok_or_else(|| {
@@ -452,6 +472,9 @@ impl SqliteEventStore {
             workflow,
             invocation: source.invocation,
             revision: source.revision,
+            installation: source.installation,
+            task: source.task,
+            project: source.project,
         })
     }
 
@@ -807,6 +830,43 @@ fn load_active_plugin_invocation_source(
             "plugin installation authority changed before canonical execution".into(),
         ));
     }
+    let (task, task_json, project, project_json) =
+        if revision.manifest.requested_capabilities.is_empty() {
+            (None, None, None, None)
+        } else {
+            let task_id = invocation.task_id.ok_or_else(|| {
+                StorageError::Conflict("plugin broker authority requires an exact task".into())
+            })?;
+            let task_json = connection
+                .query_row(
+                    "SELECT task_json FROM tasks WHERE task_id = ?1",
+                    [task_id.to_string()],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?
+                .ok_or(StorageError::TaskNotFound(task_id))?;
+            let task: TaskEnvelope = serde_json::from_str(&task_json)?;
+            let project_id = task.project_id.ok_or_else(|| {
+                StorageError::Conflict(
+                    "plugin broker authority requires an exact task project".into(),
+                )
+            })?;
+            let project_json = connection
+                .query_row(
+                    "SELECT project_json FROM projects WHERE project_id = ?1",
+                    [project_id.to_string()],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?
+                .ok_or(StorageError::ProjectNotFound(project_id))?;
+            let project: ProjectModel = serde_json::from_str(&project_json)?;
+            (
+                Some(task),
+                Some(task_json),
+                Some(project),
+                Some(project_json),
+            )
+        };
     Ok(ActivePluginInvocationSource {
         invocation_json: serde_json::to_string(&invocation)?,
         revision_json: serde_json::to_string(&revision)?,
@@ -814,17 +874,19 @@ fn load_active_plugin_invocation_source(
         invocation,
         revision,
         installation,
+        task,
+        task_json,
+        project,
+        project_json,
     })
 }
 
-#[allow(clippy::too_many_lines)]
-fn derive_plugin_invocation_workflow(
+fn plugin_invocation_source_snapshot(
     source: &ActivePluginInvocationSource,
     source_type: StableTypeId,
-    now: DateTime<Utc>,
-) -> Result<(TaskContract, WorkflowAttempt, WorkflowSourceAttachment), StorageError> {
-    let snapshot = VersionedPayload::canonical_v1(
-        source_type.clone(),
+) -> Result<VersionedPayload, StorageError> {
+    VersionedPayload::canonical_v1(
+        source_type,
         &serde_json::json!({
             "invocation_id": source.invocation.id,
             "invocation_sha256": sha256_text(&source.invocation_json),
@@ -836,9 +898,21 @@ fn derive_plugin_invocation_workflow(
             "module_sha256": source.revision.module_sha256,
             "input_sha256": source.invocation.input_sha256,
             "task_id": source.invocation.task_id,
+            "task_sha256": source.task_json.as_deref().map(sha256_text),
+            "project_id": source.project.as_ref().map(|project| project.project_id),
+            "project_sha256": source.project_json.as_deref().map(sha256_text),
         }),
     )
-    .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+    .map_err(|error| StorageError::InvalidData(error.to_string()))
+}
+
+#[allow(clippy::too_many_lines)]
+fn derive_plugin_invocation_workflow(
+    source: &ActivePluginInvocationSource,
+    source_type: StableTypeId,
+    now: DateTime<Utc>,
+) -> Result<(TaskContract, WorkflowAttempt, WorkflowSourceAttachment), StorageError> {
+    let snapshot = plugin_invocation_source_snapshot(source, source_type.clone())?;
     let source_ref = SourceRef {
         source_type,
         locator: source.invocation.id.to_string(),
@@ -1000,29 +1074,39 @@ fn validate_successful_plugin_action(
         )?;
         rows.collect::<Result<Vec<_>, _>>()?
     };
-    if rows.len() != 1 {
+    if rows.is_empty() || rows.len() > 33 {
         return Err(StorageError::Conflict(
-            "successful plugin workflow requires exactly one observational action".into(),
+            "successful plugin workflow has an invalid governed action count".into(),
         ));
     }
-    let envelope: ActionEnvelope = serde_json::from_str(&rows[0].0)?;
-    let execution: ActionExecution = serde_json::from_str(&rows[0].1)?;
-    let exact_source = envelope
-        .origin
-        .as_ref()
-        .and_then(|origin| origin.invocation.as_ref())
-        == Some(&attachment.source);
-    if envelope.workflow_id != attempt.workflow_id
-        || envelope.attempt_id != attempt.attempt_id
-        || envelope.task_contract != attempt.task_contract
-        || envelope.effect_class != EffectClass::Observational
-        || execution.action_id != envelope.id
-        || execution.state != ActionExecutionState::NoEffectConfirmed
-        || execution.outcome != Some(EffectOutcome::NoEffectConfirmed)
-        || !exact_source
-    {
+    let mut runner_action_present = false;
+    for (envelope_json, execution_json) in rows {
+        let envelope: ActionEnvelope = serde_json::from_str(&envelope_json)?;
+        let execution: ActionExecution = serde_json::from_str(&execution_json)?;
+        let exact_source = envelope
+            .origin
+            .as_ref()
+            .and_then(|origin| origin.invocation.as_ref())
+            == Some(&attachment.source);
+        runner_action_present |=
+            envelope.operation.type_id.as_str() == "mcg.plugin_runner_invocation.v1";
+        if envelope.workflow_id != attempt.workflow_id
+            || envelope.attempt_id != attempt.attempt_id
+            || envelope.task_contract != attempt.task_contract
+            || envelope.effect_class != EffectClass::Observational
+            || execution.action_id != envelope.id
+            || execution.state != ActionExecutionState::NoEffectConfirmed
+            || execution.outcome != Some(EffectOutcome::NoEffectConfirmed)
+            || !exact_source
+        {
+            return Err(StorageError::Conflict(
+                "successful plugin workflow action evidence is missing or substituted".into(),
+            ));
+        }
+    }
+    if !runner_action_present {
         return Err(StorageError::Conflict(
-            "successful plugin workflow action evidence is missing or substituted".into(),
+            "successful plugin workflow has no exact protected runner action".into(),
         ));
     }
     Ok(())
@@ -3203,11 +3287,14 @@ mod tests {
     };
     use mcg_domain::{AgentInstanceId, RunId};
     use mcg_domain::{
-        PLUGIN_CATALOG_SCHEMA_VERSION, PluginInstallSource, PluginInvocationId,
-        PluginInvocationRecord, PluginInvocationState, PluginRevision, PluginRevisionId,
-        PluginSignature, PluginSignatureState,
+        PLUGIN_CATALOG_SCHEMA_VERSION, PluginCapabilityGrant, PluginCapabilityScope,
+        PluginInstallSource, PluginInvocationId, PluginInvocationRecord, PluginInvocationState,
+        PluginRevision, PluginRevisionId, PluginSignature, PluginSignatureState, ProjectId,
     };
-    use mcg_plugin_protocol::{PLUGIN_SCHEMA_VERSION, PluginClass, PluginManifest};
+    use mcg_plugin_protocol::{
+        PLUGIN_SCHEMA_VERSION, PluginCapability, PluginClass, PluginManifest,
+    };
+    use mcg_projects::ProjectDiscoverer;
     use mcg_providers::{
         CONTRACT_VERSION, CostEstimate, ModelResponse, PlannedRoute, PriceProvenance,
         ProviderModelRef, Usage,
@@ -3679,6 +3766,108 @@ mod tests {
                 )
                 .expect("exact terminal replay"),
             (completed, settled)
+        );
+    }
+
+    #[test]
+    fn plugin_broker_authority_rejects_a_changed_project_snapshot() {
+        let mut store = SqliteEventStore::open_in_memory().expect("store");
+        let project_root = tempfile::tempdir().expect("project root");
+        std::fs::write(project_root.path().join("proof.txt"), "first").expect("project fixture");
+        std::fs::write(
+            project_root.path().join("Cargo.toml"),
+            "[package]\nname='first'\nversion='0.1.0'\n",
+        )
+        .expect("project manifest");
+        let project_id = ProjectId::new();
+        let project =
+            ProjectDiscoverer::discover(project_root.path(), project_id).expect("discover project");
+        store
+            .record_project_snapshot(&project)
+            .expect("record project");
+        let mut task = TaskEnvelope::new("exercise source-bound plugin authority");
+        task.project_id = Some(project_id);
+        store.create_task(&task).expect("create task");
+        let at = now();
+        let mut revision = plugin_revision(at);
+        revision.manifest.requested_capabilities = vec![PluginCapability::FilesystemRead];
+        let installation = store
+            .install_unsigned_local_plugin_revision(&revision)
+            .expect("install plugin");
+        let installation = store
+            .set_plugin_capability_grants(
+                &revision.manifest.id,
+                installation.revision,
+                vec![PluginCapabilityGrant {
+                    schema_version: PLUGIN_CATALOG_SCHEMA_VERSION,
+                    capability: PluginCapability::FilesystemRead,
+                    scopes: vec![PluginCapabilityScope::TaskProject],
+                }],
+                at + chrono::Duration::seconds(1),
+            )
+            .expect("grant project read");
+        store
+            .set_plugin_enabled(
+                &revision.manifest.id,
+                installation.revision,
+                true,
+                at + chrono::Duration::seconds(2),
+            )
+            .expect("enable plugin");
+        let invocation = PluginInvocationRecord {
+            schema_version: PLUGIN_CATALOG_SCHEMA_VERSION,
+            id: PluginInvocationId::new(),
+            plugin_id: revision.manifest.id.clone(),
+            plugin_revision_id: revision.id,
+            task_id: Some(task.id),
+            input_sha256: "b".repeat(64),
+            state: PluginInvocationState::Running,
+            result_sha256: None,
+            error_code: None,
+            started_at: at + chrono::Duration::seconds(3),
+            completed_at: None,
+        };
+        store
+            .begin_plugin_invocation(&invocation)
+            .expect("begin invocation");
+        let owner = RuntimeActorId::new();
+        let authority = store
+            .claim_active_plugin_invocation_workflow(
+                invocation.id,
+                owner,
+                300,
+                at + chrono::Duration::seconds(4),
+            )
+            .expect("claim source-bound plugin workflow");
+        assert_eq!(authority.task, Some(task));
+        assert_eq!(authority.project, Some(project));
+
+        std::fs::write(
+            project_root.path().join("Cargo.toml"),
+            "[package]\nname='changed'\nversion='0.1.0'\n",
+        )
+        .expect("change project fixture");
+        let changed = ProjectDiscoverer::discover(project_root.path(), project_id)
+            .expect("rediscover changed project");
+        store
+            .record_project_snapshot(&changed)
+            .expect("record changed project");
+        let error = store
+            .claim_active_plugin_invocation_workflow(
+                invocation.id,
+                owner,
+                300,
+                at + chrono::Duration::seconds(5),
+            )
+            .expect_err("changed project must invalidate plugin broker authority");
+        assert!(matches!(error, StorageError::Conflict(_)));
+        assert_eq!(
+            store
+                .workflow_attempt(authority.workflow.attempt.attempt_id)
+                .expect("workflow attempt")
+                .expect("running workflow")
+                .state,
+            WorkflowState::Running
         );
     }
 

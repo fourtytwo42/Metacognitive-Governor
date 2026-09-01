@@ -4300,6 +4300,7 @@ name = "mcg-protected-root"
 version = "0.4.67"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "chrono",
  "futures-core",
  "futures-util",
@@ -4316,6 +4317,7 @@ dependencies = [
  "mcg-providers",
  "mcg-runtime",
  "mcg-storage",
+ "mcg-tools",
  "serde",
  "serde_json",
  "sha2 0.10.9",
