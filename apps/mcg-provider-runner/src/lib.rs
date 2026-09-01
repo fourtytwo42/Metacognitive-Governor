@@ -1,20 +1,22 @@
 use std::{
     io::Read as _,
     path::{Path, PathBuf},
+    pin::Pin,
     process::Stdio,
     time::Duration,
 };
 
 use chrono::Utc;
+use futures_core::Stream;
 use mcg_contracts::{
     ArtifactRef, ContentHash, HashAlgorithm, InvocationId, ModelInvocationPermit,
     ModelInvocationProposal, PermitId, SecretHandleId, SourceRef, StableTypeId,
     canonical_contract_hash,
 };
 use mcg_providers::{
-    ModelDescriptor, ModelProvider as _, ModelRequest, ModelResponse,
+    ModelDescriptor, ModelProvider as _, ModelRequest, ModelResponse, ModelStreamEvent,
     OpenAiCompatibleProviderBuilder, ProviderAuthMode, ProviderConnection, ProviderCredential,
-    ProviderCredentialStore, ProviderError, ProviderSecretSlot, RetryPolicy,
+    ProviderCredentialStore, ProviderError, ProviderSecretSlot, ProviderStream, RetryPolicy,
 };
 #[cfg(windows)]
 use process_wrap::tokio::JobObject;
@@ -26,15 +28,21 @@ use sha2::{Digest as _, Sha256};
 use tokio::{
     io::{AsyncRead, AsyncReadExt as _, AsyncWriteExt as _},
     process::Command,
+    sync::{mpsc, oneshot},
     time::Instant,
 };
+use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 
-pub const PROVIDER_RUNNER_PROTOCOL_VERSION: u32 = 1;
+pub const PROVIDER_RUNNER_PROTOCOL_VERSION: u32 = 2;
 pub const PROVIDER_RUNNER_REQUEST_MAX_BYTES: usize = 16 * 1024 * 1024;
 pub const PROVIDER_RUNNER_RESPONSE_MAX_BYTES: usize = 16 * 1024 * 1024;
+pub const PROVIDER_RUNNER_STREAM_FRAME_MAX_BYTES: usize = 16 * 1024 * 1024;
+pub const PROVIDER_RUNNER_STREAM_TOTAL_MAX_BYTES: usize = 16 * 1024 * 1024;
 pub const MODEL_PROVIDER_REQUEST_TYPE: &str = "mcg.model_provider_request.v1";
 pub const MODEL_PROVIDER_REQUEST_HASH_DOMAIN: &str = "MetaCog.ModelProviderRequest";
+pub const MODEL_PROVIDER_STREAM_REQUEST_TYPE: &str = "mcg.model_provider_stream_request.v1";
+pub const MODEL_PROVIDER_STREAM_REQUEST_HASH_DOMAIN: &str = "MetaCog.ModelProviderStreamRequest";
 pub const MODEL_PROVIDER_RESPONSE_TYPE: &str = "mcg.model_provider_response.v1";
 pub const MODEL_PROVIDER_RESPONSE_HASH_DOMAIN: &str = "MetaCog.ModelProviderResponse";
 const PROVIDER_RUNNER_STDERR_MAX_BYTES: usize = 4 * 1024;
@@ -77,10 +85,20 @@ pub struct ProviderRunnerAuthorization {
     pub secret_handles: Vec<RunnerSecretHandleBinding>,
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderRunnerExecution {
+    #[default]
+    Complete,
+    Stream,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProviderRunnerRequest {
     pub protocol_version: u32,
     pub request_id: Uuid,
+    #[serde(default)]
+    pub execution: ProviderRunnerExecution,
     pub authorization: ProviderRunnerAuthorization,
     pub connection: ProviderConnection,
     pub model: ModelDescriptor,
@@ -106,6 +124,32 @@ pub struct ProviderRunnerResponse {
     pub error_code: Option<String>,
     pub detail: String,
 }
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "frame", rename_all = "snake_case")]
+pub enum ProviderRunnerStreamFrame {
+    Event {
+        protocol_version: u32,
+        request_id: Uuid,
+        invocation_id: InvocationId,
+        permit_id: PermitId,
+        sequence: u64,
+        event: ModelStreamEvent,
+    },
+    Terminal {
+        protocol_version: u32,
+        request_id: Uuid,
+        invocation_id: InvocationId,
+        permit_id: PermitId,
+        sequence: u64,
+        outcome: ProviderRunnerOutcome,
+        error_code: Option<String>,
+        detail: String,
+    },
+}
+
+pub type ProviderRunnerStream =
+    Pin<Box<dyn Stream<Item = Result<ModelStreamEvent, ProviderRunnerClientError>> + Send>>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProviderRunnerClientError {
@@ -133,6 +177,30 @@ pub enum ProviderRunnerClientError {
     Denied(String),
     #[error("provider execution failed after dispatch: {0}")]
     Provider(String),
+}
+
+struct CancellableProviderRunnerStream {
+    receiver: ReceiverStream<Result<ModelStreamEvent, ProviderRunnerClientError>>,
+    cancel: Option<oneshot::Sender<()>>,
+}
+
+impl Stream for CancellableProviderRunnerStream {
+    type Item = Result<ModelStreamEvent, ProviderRunnerClientError>;
+
+    fn poll_next(
+        mut self: Pin<&mut Self>,
+        context: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        Pin::new(&mut self.receiver).poll_next(context)
+    }
+}
+
+impl Drop for CancellableProviderRunnerStream {
+    fn drop(&mut self) {
+        if let Some(cancel) = self.cancel.take() {
+            let _ = cancel.send(());
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -189,6 +257,9 @@ impl ProviderRunnerClient {
         &self,
         request: &ProviderRunnerRequest,
     ) -> Result<ModelResponse, ProviderRunnerClientError> {
+        if request.execution != ProviderRunnerExecution::Complete {
+            return Err(ProviderRunnerClientError::InvalidResponse);
+        }
         if executable_identity(&self.executable).ok() != Some(self.executable_sha256) {
             return Err(ProviderRunnerClientError::ExecutableChanged);
         }
@@ -276,6 +347,212 @@ impl ProviderRunnerClient {
         }
         validate_client_response(status.success(), request, &stdout)
     }
+
+    /// Executes one true streaming request in a supervised cleared-environment child.
+    ///
+    /// Dropping the returned stream cancels, terminates, and reaps the entire child process tree.
+    /// Every frame is correlated, monotonically sequenced, and counted against one cumulative
+    /// output bound. The completed event is withheld until the terminal frame, process status,
+    /// and diagnostic channel have all been validated.
+    ///
+    /// # Errors
+    /// Returns a bounded pre-dispatch launch or delivery error. Post-delivery failures appear as
+    /// the terminal stream item because provider contact may already have occurred.
+    pub async fn stream(
+        &self,
+        request: &ProviderRunnerRequest,
+    ) -> Result<ProviderRunnerStream, ProviderRunnerClientError> {
+        if request.execution != ProviderRunnerExecution::Stream {
+            return Err(ProviderRunnerClientError::InvalidResponse);
+        }
+        if executable_identity(&self.executable).ok() != Some(self.executable_sha256) {
+            return Err(ProviderRunnerClientError::ExecutableChanged);
+        }
+        let request_bytes =
+            serde_json::to_vec(request).map_err(|_| ProviderRunnerClientError::InvalidResponse)?;
+        if request_bytes.len() > PROVIDER_RUNNER_REQUEST_MAX_BYTES {
+            return Err(ProviderRunnerClientError::RequestTooLarge);
+        }
+        let mut command = Command::new(&self.executable);
+        command.env_clear();
+        preserve_platform_runtime_environment(&mut command);
+        command
+            .current_dir(
+                self.executable
+                    .parent()
+                    .ok_or(ProviderRunnerClientError::Unavailable)?,
+            )
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut command = CommandWrap::from(command);
+        command.wrap(KillOnDrop);
+        #[cfg(unix)]
+        command.wrap(ProcessGroup::leader());
+        #[cfg(windows)]
+        command.wrap(JobObject);
+        let mut child = command
+            .spawn()
+            .map_err(|_| ProviderRunnerClientError::Launch)?;
+        let (Some(mut stdin), Some(stdout), Some(stderr)) = (
+            child.stdin().take(),
+            child.stdout().take(),
+            child.stderr().take(),
+        ) else {
+            let _ = Box::into_pin(child.kill()).await;
+            let _ = child.wait().await;
+            return Err(ProviderRunnerClientError::Launch);
+        };
+        let deadline = Instant::now() + self.outer_timeout;
+        match tokio::time::timeout_at(deadline, async {
+            stdin.write_all(&request_bytes).await?;
+            stdin.shutdown().await
+        })
+        .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(_)) => {
+                let _ = Box::into_pin(child.kill()).await;
+                let _ = child.wait().await;
+                return Err(ProviderRunnerClientError::Delivery);
+            }
+            Err(_) => {
+                let _ = Box::into_pin(child.kill()).await;
+                let _ = child.wait().await;
+                return Err(ProviderRunnerClientError::Timeout);
+            }
+        }
+        drop(stdin);
+        let identity = ProviderRunnerStreamIdentity {
+            request: request.request_id,
+            invocation: request.authorization.proposal.invocation_id,
+            permit: request.authorization.permit.id,
+        };
+        let (sender, receiver) = mpsc::channel(32);
+        let (cancel_sender, cancel_receiver) = oneshot::channel();
+        tokio::spawn(run_stream_child(
+            child,
+            stdout,
+            stderr,
+            identity,
+            deadline,
+            cancel_receiver,
+            sender,
+        ));
+        Ok(Box::pin(CancellableProviderRunnerStream {
+            receiver: ReceiverStream::new(receiver),
+            cancel: Some(cancel_sender),
+        }))
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ProviderRunnerStreamIdentity {
+    request: Uuid,
+    invocation: InvocationId,
+    permit: PermitId,
+}
+
+struct ProviderRunnerStreamTerminal {
+    outcome: ProviderRunnerOutcome,
+    error_code: Option<String>,
+    detail: String,
+    completed: Option<ModelStreamEvent>,
+}
+
+async fn run_stream_child(
+    mut child: Box<dyn ChildWrapper>,
+    stdout: tokio::process::ChildStdout,
+    stderr: tokio::process::ChildStderr,
+    identity: ProviderRunnerStreamIdentity,
+    deadline: Instant,
+    mut cancel: oneshot::Receiver<()>,
+    sender: mpsc::Sender<Result<ModelStreamEvent, ProviderRunnerClientError>>,
+) {
+    let mut stdout_task = tokio::spawn(read_stream_frames(stdout, identity, sender.clone()));
+    let mut stderr_task = tokio::spawn(read_bounded(stderr, PROVIDER_RUNNER_STDERR_MAX_BYTES));
+    let terminal = tokio::select! {
+        _ = &mut cancel => {
+            stop_stream_child(child.as_mut(), &stdout_task, &stderr_task).await;
+            return;
+        }
+        result = tokio::time::timeout_at(deadline, &mut stdout_task) => match result {
+            Ok(Ok(Ok(terminal))) => terminal,
+            Ok(Ok(Err(error))) => {
+                stop_stream_child(child.as_mut(), &stdout_task, &stderr_task).await;
+                let _ = sender.send(Err(error)).await;
+                return;
+            }
+            Ok(Err(_)) => {
+                stop_stream_child(child.as_mut(), &stdout_task, &stderr_task).await;
+                let _ = sender.send(Err(ProviderRunnerClientError::Process)).await;
+                return;
+            }
+            Err(_) => {
+                stop_stream_child(child.as_mut(), &stdout_task, &stderr_task).await;
+                let _ = sender.send(Err(ProviderRunnerClientError::Timeout)).await;
+                return;
+            }
+        }
+    };
+    let status = tokio::select! {
+        _ = &mut cancel => {
+            stop_stream_child(child.as_mut(), &stdout_task, &stderr_task).await;
+            return;
+        }
+        result = tokio::time::timeout_at(deadline, child.wait()) => match result {
+            Ok(Ok(status)) => status,
+            Ok(Err(_)) => {
+                stop_stream_child(child.as_mut(), &stdout_task, &stderr_task).await;
+                let _ = sender.send(Err(ProviderRunnerClientError::Process)).await;
+                return;
+            }
+            Err(_) => {
+                stop_stream_child(child.as_mut(), &stdout_task, &stderr_task).await;
+                let _ = sender.send(Err(ProviderRunnerClientError::Timeout)).await;
+                return;
+            }
+        }
+    };
+    let stderr_result = tokio::time::timeout_at(deadline, &mut stderr_task).await;
+    let stderr = match stderr_result {
+        Ok(Ok(Ok((stderr, false)))) => stderr,
+        Ok(Ok(Ok((_, true)))) => {
+            let _ = sender
+                .send(Err(ProviderRunnerClientError::ResponseTooLarge))
+                .await;
+            return;
+        }
+        Ok(Ok(Err(_)) | Err(_)) => {
+            let _ = sender.send(Err(ProviderRunnerClientError::Process)).await;
+            return;
+        }
+        Err(_) => {
+            let _ = sender.send(Err(ProviderRunnerClientError::Timeout)).await;
+            return;
+        }
+    };
+    if !stderr.is_empty() {
+        let _ = sender
+            .send(Err(ProviderRunnerClientError::DiagnosticOutput))
+            .await;
+        return;
+    }
+    let result = validate_stream_terminal(status.success(), terminal);
+    let _ = sender.send(result).await;
+}
+
+async fn stop_stream_child(
+    child: &mut dyn ChildWrapper,
+    stdout_task: &tokio::task::JoinHandle<
+        Result<ProviderRunnerStreamTerminal, ProviderRunnerClientError>,
+    >,
+    stderr_task: &tokio::task::JoinHandle<std::io::Result<(Vec<u8>, bool)>>,
+) {
+    let _ = Box::into_pin(child.kill()).await;
+    let _ = child.wait().await;
+    stdout_task.abort();
+    stderr_task.abort();
 }
 
 /// Runs one request using the operating-system protected provider credential store.
@@ -304,6 +581,13 @@ pub async fn execute_request_with_store<S: ProviderCredentialStore + ?Sized>(
         Some(request.authorization.proposal.invocation_id),
         Some(request.authorization.permit.id),
     );
+    if request.execution != ProviderRunnerExecution::Complete {
+        return denied(
+            Some(identity),
+            "execution_mode_mismatch",
+            "provider runner execution mode is invalid",
+        );
+    }
     if let Err(code) = validate_runner_request(&request, started) {
         return denied(
             Some(identity),
@@ -347,6 +631,123 @@ pub async fn execute_request_with_store<S: ProviderCredentialStore + ?Sized>(
     }
 }
 
+pub struct PreparedProviderRunnerStream {
+    pub request_id: Uuid,
+    pub invocation_id: InvocationId,
+    pub permit_id: PermitId,
+    pub stream: ProviderStream,
+}
+
+/// Validates and starts one streaming request using the operating-system credential store.
+///
+/// # Errors
+/// Returns a categorical denial or possible-contact failure when validation, credential
+/// resolution, or provider stream creation cannot complete safely.
+pub async fn execute_stream_request(
+    bytes: &[u8],
+) -> Result<PreparedProviderRunnerStream, ProviderRunnerResponse> {
+    execute_stream_request_with_store(bytes, &mcg_providers::OsProviderCredentialStore).await
+}
+
+/// Validates and starts one streaming request using a supplied protected credential store.
+///
+/// # Errors
+/// Returns a categorical denial or possible-contact failure when validation, credential
+/// resolution, or provider stream creation cannot complete safely.
+pub async fn execute_stream_request_with_store<S: ProviderCredentialStore + ?Sized>(
+    bytes: &[u8],
+    store: &S,
+) -> Result<PreparedProviderRunnerStream, ProviderRunnerResponse> {
+    let started = Utc::now();
+    let request: ProviderRunnerRequest = match serde_json::from_slice(bytes) {
+        Ok(request) if bytes.len() <= PROVIDER_RUNNER_REQUEST_MAX_BYTES => request,
+        _ => {
+            return Err(denied(
+                None,
+                "invalid_request",
+                "provider runner request is invalid",
+            ));
+        }
+    };
+    let identity = (
+        Some(request.request_id),
+        Some(request.authorization.proposal.invocation_id),
+        Some(request.authorization.permit.id),
+    );
+    if request.execution != ProviderRunnerExecution::Stream {
+        return Err(denied(
+            Some(identity),
+            "execution_mode_mismatch",
+            "provider runner execution mode is invalid",
+        ));
+    }
+    if let Err(code) = validate_runner_request(&request, started) {
+        return Err(denied(
+            Some(identity),
+            code,
+            "provider runner authority validation failed",
+        ));
+    }
+    let scoped = ScopedCredentialStore {
+        inner: store,
+        bindings: &request.authorization.secret_handles,
+        connection_id: &request.connection.id,
+    };
+    let provider = build_provider(&request.connection, &scoped).map_err(|_| {
+        denied(
+            Some(identity),
+            "credential_unavailable",
+            "provider credential resolution failed",
+        )
+    })?;
+    let stream = provider
+        .stream_response(request.request)
+        .await
+        .map_err(|error| ProviderRunnerResponse {
+            protocol_version: PROVIDER_RUNNER_PROTOCOL_VERSION,
+            request_id: identity.0,
+            invocation_id: identity.1,
+            permit_id: identity.2,
+            outcome: ProviderRunnerOutcome::OutcomeUnknown,
+            response: None,
+            error_code: Some(provider_error_code(&error).into()),
+            detail: "provider stream failed after dispatch".into(),
+        })?;
+    Ok(PreparedProviderRunnerStream {
+        request_id: request.request_id,
+        invocation_id: request.authorization.proposal.invocation_id,
+        permit_id: request.authorization.permit.id,
+        stream,
+    })
+}
+
+/// Writes one length-prefixed bounded stream frame.
+///
+/// # Errors
+/// Returns an I/O error when serialization exceeds a frame/total bound or output fails.
+pub async fn write_stream_frame<W: tokio::io::AsyncWrite + Unpin>(
+    writer: &mut W,
+    frame: &ProviderRunnerStreamFrame,
+    total_bytes: &mut usize,
+) -> std::io::Result<()> {
+    let bytes = serde_json::to_vec(frame).map_err(std::io::Error::other)?;
+    if bytes.is_empty()
+        || bytes.len() > PROVIDER_RUNNER_STREAM_FRAME_MAX_BYTES
+        || total_bytes.saturating_add(bytes.len()) > PROVIDER_RUNNER_STREAM_TOTAL_MAX_BYTES
+    {
+        return Err(std::io::Error::other(
+            "provider stream output exceeded its bound",
+        ));
+    }
+    let length = u32::try_from(bytes.len())
+        .map_err(|_| std::io::Error::other("provider stream frame is too large"))?;
+    writer.write_u32(length).await?;
+    writer.write_all(&bytes).await?;
+    writer.flush().await?;
+    *total_bytes = total_bytes.saturating_add(bytes.len());
+    Ok(())
+}
+
 fn validate_runner_request(
     request: &ProviderRunnerRequest,
     now: chrono::DateTime<Utc>,
@@ -364,8 +765,11 @@ fn validate_runner_request(
         .connection
         .validate()
         .map_err(|_| "invalid_connection")?;
-    let request_artifact = model_provider_request_artifact(&request.request)
-        .map_err(|_| "invalid_request_artifact")?;
+    let request_artifact = match request.execution {
+        ProviderRunnerExecution::Complete => model_provider_request_artifact(&request.request),
+        ProviderRunnerExecution::Stream => model_provider_stream_request_artifact(&request.request),
+    }
+    .map_err(|_| "invalid_request_artifact")?;
     let disclosure_hash = contract_hash(
         mcg_contracts::ModelDisclosureManifest::TYPE_ID,
         MODEL_DISCLOSURE_HASH_DOMAIN,
@@ -553,6 +957,38 @@ pub fn model_provider_request_artifact(
         MODEL_PROVIDER_REQUEST_HASH_DOMAIN,
         "application/vnd.metacog.model-provider-request+json",
         request,
+    )
+}
+
+#[derive(Serialize)]
+struct ModelProviderStreamRequest<'a> {
+    stream: bool,
+    request: &'a ModelRequest,
+}
+
+/// Hashes an exact streaming provider request under a distinct execution-mode domain.
+///
+/// # Errors
+/// Returns an error for non-finite sampling values or invalid/oversized JSON.
+pub fn model_provider_stream_request_artifact(
+    request: &ModelRequest,
+) -> Result<ArtifactRef, serde_json::Error> {
+    if request.temperature.is_some_and(|value| !value.is_finite())
+        || request.top_p.is_some_and(|value| !value.is_finite())
+    {
+        return Err(serde_json::Error::io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "non-finite sampling value",
+        )));
+    }
+    governed_provider_artifact(
+        MODEL_PROVIDER_STREAM_REQUEST_TYPE,
+        MODEL_PROVIDER_STREAM_REQUEST_HASH_DOMAIN,
+        "application/vnd.metacog.model-provider-stream-request+json",
+        &ModelProviderStreamRequest {
+            stream: true,
+            request,
+        },
     )
 }
 
@@ -748,6 +1184,155 @@ fn validate_client_response(
     }
 }
 
+async fn read_stream_frames<R: AsyncRead + Unpin>(
+    mut reader: R,
+    identity: ProviderRunnerStreamIdentity,
+    sender: mpsc::Sender<Result<ModelStreamEvent, ProviderRunnerClientError>>,
+) -> Result<ProviderRunnerStreamTerminal, ProviderRunnerClientError> {
+    let mut expected_sequence = 0_u64;
+    let mut total_bytes = 0_usize;
+    let mut completed = None;
+    loop {
+        let length = reader
+            .read_u32()
+            .await
+            .map_err(|_| ProviderRunnerClientError::InvalidResponse)?;
+        let length =
+            usize::try_from(length).map_err(|_| ProviderRunnerClientError::ResponseTooLarge)?;
+        if length == 0
+            || length > PROVIDER_RUNNER_STREAM_FRAME_MAX_BYTES
+            || total_bytes.saturating_add(length) > PROVIDER_RUNNER_STREAM_TOTAL_MAX_BYTES
+        {
+            return Err(ProviderRunnerClientError::ResponseTooLarge);
+        }
+        total_bytes = total_bytes.saturating_add(length);
+        let mut bytes = vec![0_u8; length];
+        reader
+            .read_exact(&mut bytes)
+            .await
+            .map_err(|_| ProviderRunnerClientError::InvalidResponse)?;
+        let frame: ProviderRunnerStreamFrame = serde_json::from_slice(&bytes)
+            .map_err(|_| ProviderRunnerClientError::InvalidResponse)?;
+        match frame {
+            ProviderRunnerStreamFrame::Event {
+                protocol_version,
+                request_id,
+                invocation_id,
+                permit_id,
+                sequence,
+                event,
+            } => {
+                validate_stream_frame_identity(
+                    protocol_version,
+                    request_id,
+                    invocation_id,
+                    permit_id,
+                    sequence,
+                    expected_sequence,
+                    identity,
+                )?;
+                if completed.is_some() {
+                    return Err(ProviderRunnerClientError::InvalidResponse);
+                }
+                expected_sequence = expected_sequence.saturating_add(1);
+                if matches!(event, ModelStreamEvent::Completed { .. }) {
+                    completed = Some(event);
+                } else if sender.send(Ok(event)).await.is_err() {
+                    return Err(ProviderRunnerClientError::Process);
+                }
+            }
+            ProviderRunnerStreamFrame::Terminal {
+                protocol_version,
+                request_id,
+                invocation_id,
+                permit_id,
+                sequence,
+                outcome,
+                error_code,
+                detail,
+            } => {
+                validate_stream_frame_identity(
+                    protocol_version,
+                    request_id,
+                    invocation_id,
+                    permit_id,
+                    sequence,
+                    expected_sequence,
+                    identity,
+                )?;
+                return Ok(ProviderRunnerStreamTerminal {
+                    outcome,
+                    error_code,
+                    detail,
+                    completed,
+                });
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_stream_frame_identity(
+    protocol_version: u32,
+    request_id: Uuid,
+    invocation_id: InvocationId,
+    permit_id: PermitId,
+    sequence: u64,
+    expected_sequence: u64,
+    identity: ProviderRunnerStreamIdentity,
+) -> Result<(), ProviderRunnerClientError> {
+    if protocol_version != PROVIDER_RUNNER_PROTOCOL_VERSION
+        || request_id != identity.request
+        || invocation_id != identity.invocation
+        || permit_id != identity.permit
+        || sequence != expected_sequence
+    {
+        return Err(ProviderRunnerClientError::InvalidResponse);
+    }
+    Ok(())
+}
+
+fn validate_stream_terminal(
+    process_succeeded: bool,
+    terminal: ProviderRunnerStreamTerminal,
+) -> Result<ModelStreamEvent, ProviderRunnerClientError> {
+    if terminal.detail.is_empty() || terminal.detail.len() > PROVIDER_RUNNER_DETAIL_MAX_BYTES {
+        return Err(ProviderRunnerClientError::InvalidResponse);
+    }
+    match terminal.outcome {
+        ProviderRunnerOutcome::Completed if process_succeeded && terminal.error_code.is_none() => {
+            terminal
+                .completed
+                .ok_or(ProviderRunnerClientError::InvalidResponse)
+        }
+        ProviderRunnerOutcome::OutcomeUnknown
+            if !process_succeeded
+                && terminal.completed.is_none()
+                && terminal.error_code.as_deref().is_some_and(valid_code) =>
+        {
+            Err(ProviderRunnerClientError::Provider(
+                terminal
+                    .error_code
+                    .unwrap_or_else(|| "provider_stream_failed".into()),
+            ))
+        }
+        ProviderRunnerOutcome::Denied
+            if !process_succeeded
+                && terminal.completed.is_none()
+                && terminal.error_code.as_deref().is_some_and(valid_code) =>
+        {
+            Err(ProviderRunnerClientError::Denied(
+                terminal
+                    .error_code
+                    .unwrap_or_else(|| "provider_stream_denied".into()),
+            ))
+        }
+        ProviderRunnerOutcome::Completed
+        | ProviderRunnerOutcome::OutcomeUnknown
+        | ProviderRunnerOutcome::Denied => Err(ProviderRunnerClientError::InvalidResponse),
+    }
+}
+
 async fn read_bounded<R: AsyncRead + Unpin>(
     reader: R,
     limit: usize,
@@ -884,6 +1469,98 @@ mod tests {
             domain: domain.into(),
             digest_hex: format!("{:x}", hasher.finalize()),
         }
+    }
+
+    async fn read_single_stream_frame(
+        frame: &ProviderRunnerStreamFrame,
+        identity: ProviderRunnerStreamIdentity,
+    ) -> (
+        Result<ProviderRunnerStreamTerminal, ProviderRunnerClientError>,
+        mpsc::Receiver<Result<ModelStreamEvent, ProviderRunnerClientError>>,
+    ) {
+        let (mut writer, reader) = tokio::io::duplex(4 * 1024);
+        let mut total_bytes = 0;
+        write_stream_frame(&mut writer, frame, &mut total_bytes)
+            .await
+            .expect("write stream frame");
+        drop(writer);
+        let (sender, receiver) = mpsc::channel(4);
+        (read_stream_frames(reader, identity, sender).await, receiver)
+    }
+
+    #[tokio::test]
+    async fn stream_reader_rejects_wrong_identity_and_nonmonotonic_sequence() {
+        let identity = ProviderRunnerStreamIdentity {
+            request: Uuid::new_v4(),
+            invocation: InvocationId::new(),
+            permit: PermitId::new(),
+        };
+        let event = ModelStreamEvent::ResponseCreated {
+            id: "stream-response".into(),
+            model: Some("fixture-model".into()),
+        };
+        let wrong_identity = ProviderRunnerStreamFrame::Event {
+            protocol_version: PROVIDER_RUNNER_PROTOCOL_VERSION,
+            request_id: Uuid::new_v4(),
+            invocation_id: identity.invocation,
+            permit_id: identity.permit,
+            sequence: 0,
+            event: event.clone(),
+        };
+        let (result, mut receiver) = read_single_stream_frame(&wrong_identity, identity).await;
+        assert!(matches!(
+            result,
+            Err(ProviderRunnerClientError::InvalidResponse)
+        ));
+        assert!(receiver.try_recv().is_err());
+
+        let nonmonotonic = ProviderRunnerStreamFrame::Event {
+            protocol_version: PROVIDER_RUNNER_PROTOCOL_VERSION,
+            request_id: identity.request,
+            invocation_id: identity.invocation,
+            permit_id: identity.permit,
+            sequence: 1,
+            event,
+        };
+        let (result, mut receiver) = read_single_stream_frame(&nonmonotonic, identity).await;
+        assert!(matches!(
+            result,
+            Err(ProviderRunnerClientError::InvalidResponse)
+        ));
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn stream_reader_withholds_completed_event_without_terminal_frame() {
+        let identity = ProviderRunnerStreamIdentity {
+            request: Uuid::new_v4(),
+            invocation: InvocationId::new(),
+            permit: PermitId::new(),
+        };
+        let frame = ProviderRunnerStreamFrame::Event {
+            protocol_version: PROVIDER_RUNNER_PROTOCOL_VERSION,
+            request_id: identity.request,
+            invocation_id: identity.invocation,
+            permit_id: identity.permit,
+            sequence: 0,
+            event: ModelStreamEvent::Completed {
+                response: ModelResponse {
+                    contract_version: mcg_providers::CONTRACT_VERSION,
+                    id: "uncommitted-stream-response".into(),
+                    model: "fixture-model".into(),
+                    status: Some("completed".into()),
+                    output: Vec::new(),
+                    usage: mcg_providers::Usage::default(),
+                    provider_metadata: serde_json::Value::Null,
+                },
+            },
+        };
+        let (result, mut receiver) = read_single_stream_frame(&frame, identity).await;
+        assert!(matches!(
+            result,
+            Err(ProviderRunnerClientError::InvalidResponse)
+        ));
+        assert!(receiver.try_recv().is_err());
     }
 
     #[allow(clippy::too_many_lines)]
@@ -1087,6 +1764,7 @@ mod tests {
         let runner_request = ProviderRunnerRequest {
             protocol_version: PROVIDER_RUNNER_PROTOCOL_VERSION,
             request_id: Uuid::new_v4(),
+            execution: ProviderRunnerExecution::Complete,
             authorization,
             connection,
             model,
@@ -1151,6 +1829,7 @@ mod tests {
         let mut runner_request = ProviderRunnerRequest {
             protocol_version: PROVIDER_RUNNER_PROTOCOL_VERSION,
             request_id: Uuid::new_v4(),
+            execution: ProviderRunnerExecution::Complete,
             authorization: fixture_authorization(&connection, &model, &request, Utc::now()),
             connection,
             model,
@@ -1172,6 +1851,66 @@ mod tests {
             ),
             Err(ProviderRunnerClientError::Denied(code)) if code == "authority_mismatch"
         ));
+    }
+
+    #[tokio::test]
+    async fn stream_mode_cannot_reuse_a_buffered_request_permit() {
+        let connection = ProviderConnection {
+            contract_version: mcg_providers::CONTRACT_VERSION,
+            id: "stream-mode-substitution".into(),
+            display_name: "Stream mode substitution".into(),
+            kind: ProviderKind::OpenAiCompatible,
+            base_url: "http://127.0.0.1:9/v1".into(),
+            auth_mode: ProviderAuthMode::None,
+            organization: None,
+            project: None,
+        };
+        let model = ModelDescriptor {
+            id: "fixture-model".into(),
+            display_name: "Fixture Model".into(),
+            owned_by: None,
+            context_window: None,
+            capabilities: ModelCapabilities {
+                streaming: Some(true),
+                ..ModelCapabilities::default()
+            },
+            price: None,
+            metadata: serde_json::Value::Null,
+        };
+        let request = ModelRequest {
+            contract_version: mcg_providers::CONTRACT_VERSION,
+            model: model.id.clone(),
+            client_request_id: Some("stream-mode-substitution-request".into()),
+            instructions: None,
+            messages: Vec::new(),
+            tools: Vec::new(),
+            tool_choice: None,
+            structured_output: None,
+            reasoning: None,
+            temperature: None,
+            top_p: None,
+            max_output_tokens: Some(10),
+            metadata: serde_json::Value::Null,
+        };
+        let runner_request = ProviderRunnerRequest {
+            protocol_version: PROVIDER_RUNNER_PROTOCOL_VERSION,
+            request_id: Uuid::new_v4(),
+            execution: ProviderRunnerExecution::Stream,
+            authorization: fixture_authorization(&connection, &model, &request, Utc::now()),
+            connection,
+            model,
+            request,
+        };
+        let Err(denied) = execute_stream_request_with_store(
+            &serde_json::to_vec(&runner_request).expect("stream substitution request"),
+            &MemoryProviderCredentialStore::default(),
+        )
+        .await
+        else {
+            panic!("buffered permit cannot authorize streaming");
+        };
+        assert_eq!(denied.outcome, ProviderRunnerOutcome::Denied);
+        assert_eq!(denied.error_code.as_deref(), Some("authority_mismatch"));
     }
 
     #[tokio::test]
@@ -1226,6 +1965,7 @@ mod tests {
         let runner_request = ProviderRunnerRequest {
             protocol_version: PROVIDER_RUNNER_PROTOCOL_VERSION,
             request_id: Uuid::new_v4(),
+            execution: ProviderRunnerExecution::Complete,
             authorization: fixture_authorization(&connection, &model, &request, Utc::now()),
             connection,
             model,

@@ -397,11 +397,13 @@ try {
         throw "Packaged provider runner qualification failed with exit code $LASTEXITCODE."
     }
     $providerQualification = $providerQualificationJson | ConvertFrom-Json
-    if ($providerQualification.protocol_version -ne 1 -or
+    if ($providerQualification.protocol_version -ne 2 -or
         $providerQualification.role -ne "provider_adapter" -or
         $providerQualification.storage_linked -ne $false -or
         $providerQualification.credential_store -ne "operating_system" -or
-        $providerQualification.physical_retry_attempts -ne 1) {
+        $providerQualification.physical_retry_attempts -ne 1 -or
+        $providerQualification.streaming -ne "length_prefixed_correlated_frames" -or
+        $providerQualification.stream_cancellation -ne "kill_on_drop_process_tree") {
         throw "Packaged provider runner qualification report is incomplete."
     }
     [IO.File]::WriteAllText((Join-Path $uatRoot "provider-runner.json"), $providerQualificationJson, [Text.UTF8Encoding]::new($false))

@@ -1,5 +1,7 @@
 use std::process::Command;
 
+use mcg_provider_runner::PROVIDER_RUNNER_PROTOCOL_VERSION;
+
 #[test]
 fn packaged_qualification_is_bounded_and_content_free() {
     let output = Command::new(env!("CARGO_BIN_EXE_mcg-provider-runner"))
@@ -10,11 +12,13 @@ fn packaged_qualification_is_bounded_and_content_free() {
     assert!(output.stderr.is_empty());
     let report: serde_json::Value =
         serde_json::from_slice(&output.stdout).expect("qualification JSON");
-    assert_eq!(report["protocol_version"], 1);
+    assert_eq!(report["protocol_version"], PROVIDER_RUNNER_PROTOCOL_VERSION);
     assert_eq!(report["role"], "provider_adapter");
     assert_eq!(report["storage_linked"], false);
     assert_eq!(report["credential_store"], "operating_system");
     assert_eq!(report["physical_retry_attempts"], 1);
+    assert_eq!(report["streaming"], "length_prefixed_correlated_frames");
+    assert_eq!(report["stream_cancellation"], "kill_on_drop_process_tree");
 }
 
 #[test]

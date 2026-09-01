@@ -306,8 +306,8 @@ for (const invariant of ["GOVERNED_ACTION_OPERATION_HASH_DOMAIN", "MetaCog.Actio
     requireText(actionRunner, invariant, "governed action runner contract");
   }
 }
-for (const invariant of ["PROVIDER_RUNNER_PROTOCOL_VERSION", "ProviderRunnerAuthorization", "env_clear", "ScopedCredentialStore", "max_attempts: 1", "--qualify-provider-runner"]) {
-  if (invariant === "--qualify-provider-runner") {
+for (const invariant of ["PROVIDER_RUNNER_PROTOCOL_VERSION", "ProviderRunnerAuthorization", "ProviderRunnerStreamFrame", "PROVIDER_RUNNER_STREAM_TOTAL_MAX_BYTES", "env_clear", "ScopedCredentialStore", "max_attempts: 1", "--qualify-provider-runner", "length_prefixed_correlated_frames", "kill_on_drop_process_tree"]) {
+  if (["--qualify-provider-runner", "length_prefixed_correlated_frames", "kill_on_drop_process_tree"].includes(invariant)) {
     requireText(windowsPackageHarness + linuxPackageHarness + macosPackageHarness, invariant, "packaged provider runner qualification");
   } else {
     requireText(providerRunner, invariant, "governed provider runner contract");

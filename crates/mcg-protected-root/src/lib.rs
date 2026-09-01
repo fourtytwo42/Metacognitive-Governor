@@ -15,10 +15,13 @@ use std::{
     fs,
     net::SocketAddr,
     path::{Path, PathBuf},
+    pin::Pin,
     sync::{Arc, Mutex, Weak},
 };
 
 use chrono::{Duration, Utc};
+use futures_core::Stream;
+use futures_util::StreamExt as _;
 use mcg_action_runner::{
     ActionRunnerClient, ActionRunnerClientError, ActionRunnerProtocolError, ActionRunnerRequest,
     ActionRunnerResponse, GOVERNED_ACTION_OPERATION_HASH_DOMAIN,
@@ -63,13 +66,14 @@ use mcg_platform::{
 };
 use mcg_provider_runner::{
     ProviderRunnerAuthorization, ProviderRunnerClient, ProviderRunnerClientError,
-    ProviderRunnerRequest, RunnerSecretHandleBinding, RunnerSecretSlot,
+    ProviderRunnerExecution, ProviderRunnerRequest, RunnerSecretHandleBinding, RunnerSecretSlot,
     model_provider_request_artifact as runner_request_artifact,
     model_provider_response_artifact as runner_response_artifact,
+    model_provider_stream_request_artifact as runner_stream_request_artifact,
 };
 use mcg_providers::{
-    CONTRACT_VERSION, ModelDescriptor, ModelRequest, ModelResponse, ProviderAuthMode,
-    ProviderConnection, ProviderError, ProviderKind,
+    CONTRACT_VERSION, ModelDescriptor, ModelRequest, ModelResponse, ModelStreamEvent,
+    ProviderAuthMode, ProviderConnection, ProviderError, ProviderKind, ProviderStream,
 };
 use mcg_runtime::{
     AppRuntime, ProtectedAgentModelDispatcher, ProtectedCompatibilityVerifier, RuntimeError,
@@ -87,9 +91,10 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::{
     io::{AsyncRead, AsyncWrite},
-    sync::{Semaphore, oneshot},
+    sync::{Semaphore, mpsc, oneshot},
     task::JoinHandle,
 };
+use tokio_stream::wrappers::UnboundedReceiverStream;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 use zeroize::Zeroize;
@@ -407,6 +412,16 @@ pub fn model_provider_request_artifact(
     runner_request_artifact(request).map_err(ProtectedRootError::Serialization)
 }
 
+/// Canonically binds streaming execution plus the exact provider request bytes authorized by Root.
+///
+/// # Errors
+/// Returns an error for non-canonical or oversized provider request content.
+pub fn model_provider_stream_request_artifact(
+    request: &ModelRequest,
+) -> Result<ArtifactRef, ProtectedRootError> {
+    runner_stream_request_artifact(request).map_err(ProtectedRootError::Serialization)
+}
+
 fn model_provider_response_artifact(
     response: &ModelResponse,
 ) -> Result<ArtifactRef, ProtectedRootError> {
@@ -420,6 +435,44 @@ pub trait GovernedModelProviderGateway: Send + Sync {
         authorization: &RuntimeModelEgressAuthorizationReceipt,
         request: &ModelRequest,
     ) -> Result<ModelResponse, GovernedModelProviderGatewayError>;
+
+    async fn stream(
+        &self,
+        _authorization: &RuntimeModelEgressAuthorizationReceipt,
+        _request: &ModelRequest,
+    ) -> Result<GovernedModelProviderStream, GovernedModelProviderGatewayError> {
+        Err(GovernedModelProviderGatewayError::new(
+            GovernedProviderFailureClass::FinalBeforeProviderContact,
+            ProviderError::Configuration("governed provider streaming is unavailable".into()),
+        ))
+    }
+}
+
+pub type GovernedModelProviderStream =
+    Pin<Box<dyn Stream<Item = Result<ModelStreamEvent, GovernedModelProviderGatewayError>> + Send>>;
+
+struct CancellableGovernedProviderStream {
+    receiver: UnboundedReceiverStream<Result<ModelStreamEvent, ProviderError>>,
+    cancel: Option<oneshot::Sender<()>>,
+}
+
+impl Stream for CancellableGovernedProviderStream {
+    type Item = Result<ModelStreamEvent, ProviderError>;
+
+    fn poll_next(
+        mut self: Pin<&mut Self>,
+        context: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        Pin::new(&mut self.receiver).poll_next(context)
+    }
+}
+
+impl Drop for CancellableGovernedProviderStream {
+    fn drop(&mut self) {
+        if let Some(cancel) = self.cancel.take() {
+            let _ = cancel.send(());
+        }
+    }
 }
 
 /// Root's conservative classification of a physical gateway failure.
@@ -496,6 +549,7 @@ impl GovernedModelProviderGateway for IsolatedProviderRunnerGateway {
             .invoke(&ProviderRunnerRequest {
                 protocol_version: mcg_provider_runner::PROVIDER_RUNNER_PROTOCOL_VERSION,
                 request_id: Uuid::new_v4(),
+                execution: mcg_provider_runner::ProviderRunnerExecution::Complete,
                 authorization: provider_runner_authorization(authorization),
                 connection: self.connection.clone(),
                 model: self.model.clone(),
@@ -503,6 +557,29 @@ impl GovernedModelProviderGateway for IsolatedProviderRunnerGateway {
             })
             .await
             .map_err(|error| classify_provider_runner_failure(&error))
+    }
+
+    async fn stream(
+        &self,
+        authorization: &RuntimeModelEgressAuthorizationReceipt,
+        request: &ModelRequest,
+    ) -> Result<GovernedModelProviderStream, GovernedModelProviderGatewayError> {
+        let stream = self
+            .client
+            .stream(&ProviderRunnerRequest {
+                protocol_version: mcg_provider_runner::PROVIDER_RUNNER_PROTOCOL_VERSION,
+                request_id: Uuid::new_v4(),
+                execution: ProviderRunnerExecution::Stream,
+                authorization: provider_runner_authorization(authorization),
+                connection: self.connection.clone(),
+                model: self.model.clone(),
+                request: request.clone(),
+            })
+            .await
+            .map_err(|error| classify_provider_runner_failure(&error))?;
+        Ok(Box::pin(stream.map(|event| {
+            event.map_err(|error| classify_provider_runner_failure(&error))
+        })))
     }
 }
 
@@ -582,6 +659,51 @@ impl ProtectedAgentModelDispatcher for RootAgentModelDispatcher {
         .map_err(protected_agent_provider_error)?;
         execute_compatibility_agent_model_invocation(
             &runtime,
+            &gateway,
+            &connection,
+            &model,
+            self.runtime_actor,
+            &self.runtime_identity,
+            lease_id,
+            target,
+            request,
+            Utc::now(),
+        )
+        .await
+        .map_err(protected_agent_provider_error)
+    }
+
+    async fn stream_response(
+        &self,
+        lease_id: AgentLeaseId,
+        target: &mcg_providers::ProviderModelRef,
+        request: ModelRequest,
+    ) -> Result<ProviderStream, ProviderError> {
+        let runtime = self.runtime.upgrade().ok_or_else(|| {
+            ProviderError::Configuration("Protected Root runtime is unavailable".into())
+        })?;
+        let (connection, catalog) = runtime
+            .model_egress_route_state(&target.provider_id)
+            .map_err(protected_agent_provider_error)?
+            .ok_or_else(|| ProviderError::Configuration("provider route is unavailable".into()))?;
+        let model = catalog
+            .models
+            .into_iter()
+            .find(|model| model.id == target.model_id)
+            .ok_or_else(|| ProviderError::Configuration("provider model is unavailable".into()))?;
+        if model.capabilities.streaming != Some(true) {
+            return Err(ProviderError::Configuration(
+                "the governed provider model does not declare streaming support".into(),
+            ));
+        }
+        let gateway = IsolatedProviderRunnerGateway::adjacent_to(
+            &self.root_executable,
+            connection.clone(),
+            model.clone(),
+        )
+        .map_err(protected_agent_provider_error)?;
+        execute_compatibility_agent_model_stream(
+            runtime,
             &gateway,
             &connection,
             &model,
@@ -1019,9 +1141,8 @@ pub async fn execute_compatibility_agent_model_invocation(
                 physical_attempt.saturating_sub(1),
             )))
             .ok_or_else(|| StorageError::InvalidData("provider retry time overflowed".into()))?;
-        match execute_compatibility_agent_model_attempt(
+        let prepared = prepare_compatibility_agent_model_attempt(
             runtime,
-            gateway,
             connection,
             model,
             runtime_actor,
@@ -1034,11 +1155,20 @@ pub async fn execute_compatibility_agent_model_invocation(
             physical_attempt,
             retry_of_invocation_id,
             invocation_id,
+            false,
+            attempt_now,
+        )?;
+        match execute_authorized_model_invocation(
+            runtime,
+            gateway,
+            &prepared.manifest,
+            prepared.model_run_id,
+            &prepared.request,
             attempt_now,
         )
         .await
         {
-            Ok(response) => return Ok(response),
+            Ok(receipt) => return Ok(receipt.response),
             Err(ProtectedRootError::RetryableProviderBeforeContact(_))
                 if physical_attempt < COMPATIBILITY_AGENT_PROVIDER_MAX_ATTEMPTS =>
             {
@@ -1059,10 +1189,98 @@ pub async fn execute_compatibility_agent_model_invocation(
     Err(StorageError::Conflict("provider retry policy exhausted without a result".into()).into())
 }
 
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-async fn execute_compatibility_agent_model_attempt(
-    runtime: &AppRuntime,
+/// Starts one compatibility-agent model stream through canonical workflow authority only.
+///
+/// A pre-contact transient may receive one fresh physical invocation before any stream is exposed.
+/// Once a stream is returned, every event belongs to that one attempt and no later failure or
+/// cancellation can trigger an automatic retry.
+///
+/// # Errors
+/// Returns a protected-root error for stale source/workflow/provider authority, invalid budgets,
+/// request substitution, pre-contact gateway failure, or durable planning/dispatch failure.
+#[allow(clippy::too_many_arguments)]
+pub async fn execute_compatibility_agent_model_stream(
+    runtime: Arc<AppRuntime>,
     gateway: &dyn GovernedModelProviderGateway,
+    connection: &ProviderConnection,
+    model: &ModelDescriptor,
+    runtime_actor: RuntimeActorId,
+    runtime_identity: &RuntimeIdentity,
+    lease_id: AgentLeaseId,
+    target: &mcg_providers::ProviderModelRef,
+    request: ModelRequest,
+    now: chrono::DateTime<Utc>,
+) -> Result<ProviderStream, ProtectedRootError> {
+    let logical_request_id = Uuid::new_v4();
+    let logical_request_hash = model_provider_stream_request_artifact(&request)?.content_hash;
+    let mut retry_of_invocation_id = None;
+    for physical_attempt in 1..=COMPATIBILITY_AGENT_PROVIDER_MAX_ATTEMPTS {
+        let invocation_id = InvocationId::new();
+        let attempt_now = now
+            .checked_add_signed(chrono::Duration::milliseconds(i64::from(
+                physical_attempt.saturating_sub(1),
+            )))
+            .ok_or_else(|| StorageError::InvalidData("provider retry time overflowed".into()))?;
+        let prepared = prepare_compatibility_agent_model_attempt(
+            &runtime,
+            connection,
+            model,
+            runtime_actor,
+            runtime_identity,
+            lease_id,
+            target,
+            request.clone(),
+            logical_request_id,
+            &logical_request_hash,
+            physical_attempt,
+            retry_of_invocation_id,
+            invocation_id,
+            true,
+            attempt_now,
+        )?;
+        match execute_authorized_model_stream(
+            runtime.clone(),
+            gateway,
+            &prepared.manifest,
+            prepared.model_run_id,
+            &prepared.request,
+            attempt_now,
+        )
+        .await
+        {
+            Ok(stream) => return Ok(stream),
+            Err(ProtectedRootError::RetryableProviderBeforeContact(_))
+                if physical_attempt < COMPATIBILITY_AGENT_PROVIDER_MAX_ATTEMPTS =>
+            {
+                retry_of_invocation_id = Some(invocation_id);
+            }
+            Err(ProtectedRootError::RetryableProviderBeforeContact(error)) => {
+                return Err(ProviderError::Request {
+                    message: format!(
+                        "Root provider stream retry policy exhausted after {physical_attempt} physical attempts: {error}"
+                    ),
+                    retriable: false,
+                }
+                .into());
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Err(
+        StorageError::Conflict("provider stream retry policy exhausted without a result".into())
+            .into(),
+    )
+}
+
+struct PreparedCompatibilityModelAttempt {
+    manifest: InvocationManifest,
+    request: ModelRequest,
+    model_run_id: ModelRunId,
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn prepare_compatibility_agent_model_attempt(
+    runtime: &AppRuntime,
     connection: &ProviderConnection,
     model: &ModelDescriptor,
     runtime_actor: RuntimeActorId,
@@ -1075,8 +1293,9 @@ async fn execute_compatibility_agent_model_attempt(
     physical_attempt: u32,
     retry_of_invocation_id: Option<InvocationId>,
     invocation_id: InvocationId,
+    streaming: bool,
     now: chrono::DateTime<Utc>,
-) -> Result<ModelResponse, ProtectedRootError> {
+) -> Result<PreparedCompatibilityModelAttempt, ProtectedRootError> {
     runtime_identity.validate()?;
     if connection.id != target.provider_id
         || model.id != target.model_id
@@ -1096,7 +1315,11 @@ async fn execute_compatibility_agent_model_attempt(
     )?;
     let attempt = &authority.workflow.attempt;
     request.client_request_id = Some(format!("mcg-governed-{invocation_id}"));
-    let request_artifact = model_provider_request_artifact(&request)?;
+    let request_artifact = if streaming {
+        model_provider_stream_request_artifact(&request)?
+    } else {
+        model_provider_request_artifact(&request)?
+    };
     let approximate_input_tokens = request_artifact.byte_length.saturating_add(3) / 4;
     let output_tokens = request
         .max_output_tokens
@@ -1171,7 +1394,11 @@ async fn execute_compatibility_agent_model_attempt(
         selection_policy: agent_provider_payload(
             "mcg.agent_model_context_selection.v1",
             &serde_json::json!({
-                "mode": "exact_compatibility_request",
+                "mode": if streaming {
+                    "exact_compatibility_stream_request"
+                } else {
+                    "exact_compatibility_request"
+                },
                 "source_snapshot_hash": context_source.content_hash,
                 "logical_request_id": logical_request_id,
                 "logical_request_hash": logical_request_hash,
@@ -1299,16 +1526,11 @@ async fn execute_compatibility_agent_model_attempt(
         request_hash: request_artifact.content_hash,
         response_hash: None,
     };
-    let receipt = execute_authorized_model_invocation(
-        runtime,
-        gateway,
-        &manifest,
-        ModelRunId::new(),
-        &request,
-        now,
-    )
-    .await?;
-    Ok(receipt.response)
+    Ok(PreparedCompatibilityModelAttempt {
+        manifest,
+        request,
+        model_run_id: ModelRunId::new(),
+    })
 }
 
 fn provider_runner_authorization(
@@ -1488,7 +1710,7 @@ pub async fn execute_authorized_model_invocation(
         .ok_or_else(|| {
             StorageError::Conflict("model egress authorization does not exist".into())
         })?;
-    validate_governed_provider_request(&authorization, manifest, request, now)?;
+    validate_governed_provider_request(&authorization, manifest, request, false, now)?;
     runtime.plan_governed_provider_invocation(manifest, model_run_id, now)?;
     let provider_request_id = request.client_request_id.as_deref().ok_or_else(|| {
         StorageError::InvalidData(
@@ -1559,13 +1781,400 @@ pub async fn execute_authorized_model_invocation(
     })
 }
 
+async fn open_governed_stream_while_authorized(
+    runtime: &AppRuntime,
+    gateway: &dyn GovernedModelProviderGateway,
+    authorization: &RuntimeModelEgressAuthorizationReceipt,
+    request: &ModelRequest,
+) -> Option<Result<GovernedModelProviderStream, GovernedModelProviderGatewayError>> {
+    let mut stream_call = Box::pin(gateway.stream(authorization, request));
+    let mut authority_poll = tokio::time::interval(std::time::Duration::from_millis(
+        GOVERNED_PROVIDER_AUTHORITY_POLL_MILLISECONDS,
+    ));
+    authority_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            result = &mut stream_call => return Some(result),
+            _ = authority_poll.tick() => {
+                if !governed_provider_authorization_is_current(runtime, authorization) {
+                    return None;
+                }
+            }
+        }
+    }
+}
+
+fn governed_provider_authorization_is_current(
+    runtime: &AppRuntime,
+    authorization: &RuntimeModelEgressAuthorizationReceipt,
+) -> bool {
+    matches!(
+        runtime.active_model_egress_authorization(
+            authorization.proposal.invocation_id,
+            Utc::now(),
+        ),
+        Ok(Some(current)) if current == *authorization
+    )
+}
+
+/// Starts one exact true-streaming provider request under an active Root-issued permit.
+///
+/// Planning and dispatch are durable before the stream is opened. Intermediate events are
+/// bounded, correlated by the isolated runner, and provisional: only a validated terminal
+/// `Completed` response can settle the `ModelRun`. Dropping the returned stream or losing exact
+/// authority tears down the child and settles the possible-contact run `OutcomeUnknown`.
+///
+/// # Errors
+/// Returns an error for stale/substituted authority, pre-contact gateway failure, or durable
+/// planning/dispatch failure. Failures after a stream is returned appear as a terminal stream item.
+pub async fn execute_authorized_model_stream(
+    runtime: Arc<AppRuntime>,
+    gateway: &dyn GovernedModelProviderGateway,
+    manifest: &InvocationManifest,
+    model_run_id: ModelRunId,
+    request: &ModelRequest,
+    now: chrono::DateTime<Utc>,
+) -> Result<ProviderStream, ProtectedRootError> {
+    let authorization = runtime
+        .active_model_egress_authorization(manifest.id, now)?
+        .ok_or_else(|| {
+            StorageError::Conflict("model egress authorization does not exist".into())
+        })?;
+    validate_governed_provider_request(&authorization, manifest, request, true, now)?;
+    runtime.plan_governed_provider_invocation(manifest, model_run_id, now)?;
+    let provider_request_id = request.client_request_id.as_deref().ok_or_else(|| {
+        StorageError::InvalidData(
+            "governed provider request requires a stable client request id".into(),
+        )
+    })?;
+    runtime.dispatch_governed_provider_invocation(
+        manifest.id,
+        model_run_id,
+        provider_request_id,
+        now,
+    )?;
+    let Some(stream_result) =
+        open_governed_stream_while_authorized(&runtime, gateway, &authorization, request).await
+    else {
+        return Err(settle_governed_provider_authority_loss(
+            &runtime,
+            manifest.id,
+            model_run_id,
+        )?);
+    };
+    let stream = match stream_result {
+        Ok(stream) => stream,
+        Err(error) => {
+            let class = error.class();
+            let provider_error = error.into_provider_error();
+            match class {
+                GovernedProviderFailureClass::RetryableBeforeProviderContact
+                | GovernedProviderFailureClass::FinalBeforeProviderContact => {
+                    runtime.fail_governed_provider_invocation_before_contact(
+                        manifest.id,
+                        model_run_id,
+                        Utc::now(),
+                    )?;
+                    if class == GovernedProviderFailureClass::RetryableBeforeProviderContact {
+                        return Err(ProtectedRootError::RetryableProviderBeforeContact(
+                            provider_error,
+                        ));
+                    }
+                }
+                GovernedProviderFailureClass::OutcomeUnknown => {
+                    runtime.settle_governed_provider_invocation_unknown(
+                        manifest.id,
+                        model_run_id,
+                        Utc::now(),
+                    )?;
+                }
+            }
+            return Err(provider_error.into());
+        }
+    };
+    let (sender, receiver) = mpsc::unbounded_channel();
+    let (cancel_sender, cancel_receiver) = oneshot::channel();
+    tokio::spawn(run_authorized_model_stream(
+        runtime,
+        authorization,
+        manifest.id,
+        model_run_id,
+        stream,
+        cancel_receiver,
+        sender,
+    ));
+    Ok(Box::pin(CancellableGovernedProviderStream {
+        receiver: UnboundedReceiverStream::new(receiver),
+        cancel: Some(cancel_sender),
+    }))
+}
+
+async fn run_authorized_model_stream(
+    runtime: Arc<AppRuntime>,
+    authorization: RuntimeModelEgressAuthorizationReceipt,
+    invocation_id: InvocationId,
+    model_run_id: ModelRunId,
+    mut stream: GovernedModelProviderStream,
+    mut cancel: oneshot::Receiver<()>,
+    sender: mpsc::UnboundedSender<Result<ModelStreamEvent, ProviderError>>,
+) {
+    let mut authority_poll = tokio::time::interval(std::time::Duration::from_millis(
+        GOVERNED_PROVIDER_AUTHORITY_POLL_MILLISECONDS,
+    ));
+    authority_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut validation = GovernedStreamValidation::default();
+    loop {
+        let next = tokio::select! {
+            _ = &mut cancel => {
+                settle_dropped_governed_stream(&runtime, invocation_id, model_run_id);
+                return;
+            }
+            _ = authority_poll.tick() => {
+                if governed_provider_authorization_is_current(&runtime, &authorization) {
+                    continue;
+                }
+                settle_authority_lost_governed_stream(
+                    &runtime,
+                    invocation_id,
+                    model_run_id,
+                    &sender,
+                );
+                return;
+            }
+            event = stream.next() => event,
+        };
+        let Some(event) = next else {
+            settle_incomplete_governed_stream(
+                &runtime,
+                invocation_id,
+                model_run_id,
+                &sender,
+                "governed provider stream ended without a completed response",
+            );
+            return;
+        };
+        let Ok(event) = event else {
+            settle_incomplete_governed_stream(
+                &runtime,
+                invocation_id,
+                model_run_id,
+                &sender,
+                "governed provider stream failed after dispatch",
+            );
+            return;
+        };
+        if validation.observe(&authorization, &event).is_err() {
+            settle_incomplete_governed_stream(
+                &runtime,
+                invocation_id,
+                model_run_id,
+                &sender,
+                "governed provider stream event failed Root validation",
+            );
+            return;
+        }
+        if let ModelStreamEvent::Completed { response } = &event {
+            let completed_at = Utc::now();
+            let completion = model_provider_response_artifact(response).and_then(|artifact| {
+                runtime
+                    .complete_governed_provider_invocation(
+                        invocation_id,
+                        model_run_id,
+                        artifact,
+                        ModelUsage {
+                            input_tokens: response.usage.input_tokens,
+                            output_tokens: response.usage.output_tokens,
+                            cached_input_tokens: response.usage.cached_input_tokens,
+                            reasoning_tokens: response.usage.reasoning_tokens,
+                        },
+                        completed_at,
+                    )
+                    .map_err(ProtectedRootError::from)
+            });
+            if completion.is_err() {
+                settle_incomplete_governed_stream(
+                    &runtime,
+                    invocation_id,
+                    model_run_id,
+                    &sender,
+                    "governed provider stream completion failed durable settlement",
+                );
+                return;
+            }
+            let _ = sender.send(Ok(event));
+            return;
+        }
+        if sender.send(Ok(event)).is_err() {
+            settle_dropped_governed_stream(&runtime, invocation_id, model_run_id);
+            return;
+        }
+    }
+}
+
+fn settle_dropped_governed_stream(
+    runtime: &AppRuntime,
+    invocation_id: InvocationId,
+    model_run_id: ModelRunId,
+) {
+    let _ = runtime.settle_governed_provider_invocation_unknown(
+        invocation_id,
+        model_run_id,
+        Utc::now(),
+    );
+}
+
+fn settle_authority_lost_governed_stream(
+    runtime: &AppRuntime,
+    invocation_id: InvocationId,
+    model_run_id: ModelRunId,
+    sender: &mpsc::UnboundedSender<Result<ModelStreamEvent, ProviderError>>,
+) {
+    let settlement = runtime.settle_governed_provider_invocation_unknown(
+        invocation_id,
+        model_run_id,
+        Utc::now(),
+    );
+    let error = settlement.map_or_else(
+        |_| {
+            ProviderError::Configuration(
+                "governed provider stream authority-loss settlement failed".into(),
+            )
+        },
+        |_| ProviderError::Request {
+            message: "governed provider stream was cancelled or lost current authority".into(),
+            retriable: false,
+        },
+    );
+    let _ = sender.send(Err(error));
+}
+
+#[derive(Default)]
+struct GovernedStreamValidation {
+    response_id: Option<String>,
+    total_bytes: usize,
+}
+
+impl GovernedStreamValidation {
+    fn observe(
+        &mut self,
+        authorization: &RuntimeModelEgressAuthorizationReceipt,
+        event: &ModelStreamEvent,
+    ) -> Result<(), ProtectedRootError> {
+        let event_bytes = serde_json::to_vec(event)?;
+        self.total_bytes = self.total_bytes.saturating_add(event_bytes.len());
+        if event_bytes.is_empty()
+            || self.total_bytes > mcg_provider_runner::PROVIDER_RUNNER_STREAM_TOTAL_MAX_BYTES
+        {
+            return Err(ProviderError::Incompatible(
+                "provider stream exceeded its Root output bound".into(),
+            )
+            .into());
+        }
+        match event {
+            ModelStreamEvent::ResponseCreated { id, model } => {
+                if self.response_id.is_some()
+                    || !valid_stream_identifier(id, true)
+                    || model.as_ref().is_some_and(|model| {
+                        model != &authorization.proposal.route.model_id
+                            || !valid_stream_identifier(model, true)
+                    })
+                {
+                    return Err(ProviderError::Incompatible(
+                        "provider stream created identity is invalid".into(),
+                    )
+                    .into());
+                }
+                self.response_id = Some(id.clone());
+            }
+            ModelStreamEvent::OutputTextDelta { item_id, delta } => {
+                if self.response_id.is_none()
+                    || item_id
+                        .as_ref()
+                        .is_some_and(|item_id| !valid_stream_identifier(item_id, false))
+                    || delta.chars().any(|character| character == '\0')
+                {
+                    return Err(ProviderError::Incompatible(
+                        "provider text stream event is invalid".into(),
+                    )
+                    .into());
+                }
+            }
+            ModelStreamEvent::ToolArgumentsDelta { item_id, delta } => {
+                if self.response_id.is_none()
+                    || !valid_stream_identifier(item_id, true)
+                    || delta.chars().any(|character| character == '\0')
+                {
+                    return Err(ProviderError::Incompatible(
+                        "provider tool stream event is invalid".into(),
+                    )
+                    .into());
+                }
+            }
+            ModelStreamEvent::OutputItemAdded { .. } => {
+                if self.response_id.is_none() {
+                    return Err(ProviderError::Incompatible(
+                        "provider output item preceded stream creation".into(),
+                    )
+                    .into());
+                }
+            }
+            ModelStreamEvent::Completed { response } => {
+                validate_governed_provider_response(authorization, response)?;
+                if self.response_id.as_deref() != Some(response.id.as_str()) {
+                    return Err(ProviderError::Incompatible(
+                        "provider stream completion identity changed".into(),
+                    )
+                    .into());
+                }
+            }
+            ModelStreamEvent::ProviderEvent { event_type, .. } => {
+                if !valid_stream_identifier(event_type, true) {
+                    return Err(ProviderError::Incompatible(
+                        "provider stream event type is invalid".into(),
+                    )
+                    .into());
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+fn valid_stream_identifier(value: &str, required: bool) -> bool {
+    (!required || !value.is_empty()) && value.len() <= 4_096 && !value.chars().any(char::is_control)
+}
+
+fn settle_incomplete_governed_stream(
+    runtime: &AppRuntime,
+    invocation_id: InvocationId,
+    model_run_id: ModelRunId,
+    sender: &mpsc::UnboundedSender<Result<ModelStreamEvent, ProviderError>>,
+    detail: &str,
+) {
+    let settlement = runtime.settle_governed_provider_invocation_unknown(
+        invocation_id,
+        model_run_id,
+        Utc::now(),
+    );
+    let error = settlement.map_or_else(
+        |_| ProviderError::Configuration("governed provider stream settlement failed".into()),
+        |_| ProviderError::Incompatible(detail.into()),
+    );
+    let _ = sender.send(Err(error));
+}
+
 fn validate_governed_provider_request(
     authorization: &RuntimeModelEgressAuthorizationReceipt,
     manifest: &InvocationManifest,
     request: &ModelRequest,
+    streaming: bool,
     now: chrono::DateTime<Utc>,
 ) -> Result<(), ProtectedRootError> {
-    let request_artifact = model_provider_request_artifact(request)?;
+    let request_artifact = if streaming {
+        model_provider_stream_request_artifact(request)?
+    } else {
+        model_provider_request_artifact(request)?
+    };
     if now < authorization.permit.issued_at
         || now >= authorization.permit.expires_at
         || authorization.proposal.invocation_id != manifest.id
@@ -3727,6 +4336,7 @@ mod tests {
             context_window: Some(8_192),
             capabilities: ModelCapabilities {
                 responses: Some(true),
+                streaming: Some(true),
                 ..ModelCapabilities::default()
             },
             price: None,
@@ -3867,6 +4477,73 @@ mod tests {
                 })
                 .expect("cancel provider workflow");
             std::future::pending().await
+        }
+    }
+
+    struct ControlledStreamingGateway {
+        calls: Mutex<Vec<(RuntimeModelEgressAuthorizationReceipt, ModelRequest)>>,
+        response: ModelResponse,
+        release_completion: Arc<tokio::sync::Notify>,
+        retry_first: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl GovernedModelProviderGateway for ControlledStreamingGateway {
+        async fn invoke(
+            &self,
+            _authorization: &RuntimeModelEgressAuthorizationReceipt,
+            _request: &ModelRequest,
+        ) -> Result<ModelResponse, GovernedModelProviderGatewayError> {
+            Err(GovernedModelProviderGatewayError::new(
+                GovernedProviderFailureClass::FinalBeforeProviderContact,
+                ProviderError::Configuration("buffered invocation is not expected".into()),
+            ))
+        }
+
+        async fn stream(
+            &self,
+            authorization: &RuntimeModelEgressAuthorizationReceipt,
+            request: &ModelRequest,
+        ) -> Result<GovernedModelProviderStream, GovernedModelProviderGatewayError> {
+            let call_number = {
+                let mut calls = self.calls.lock().expect("streaming gateway calls");
+                calls.push((authorization.clone(), request.clone()));
+                calls.len()
+            };
+            if self.retry_first && call_number == 1 {
+                return Err(GovernedModelProviderGatewayError::new(
+                    GovernedProviderFailureClass::RetryableBeforeProviderContact,
+                    ProviderError::Request {
+                        message: "stream runner was unavailable before provider contact".into(),
+                        retriable: true,
+                    },
+                ));
+            }
+            let response = self.response.clone();
+            let release = self.release_completion.clone();
+            Ok(Box::pin(futures_util::stream::unfold(
+                (0_u8, response, release),
+                |(step, response, release)| async move {
+                    let event = match step {
+                        0 => ModelStreamEvent::ResponseCreated {
+                            id: response.id.clone(),
+                            model: Some(response.model.clone()),
+                        },
+                        1 => ModelStreamEvent::OutputTextDelta {
+                            item_id: Some("stream-message".into()),
+                            delta: "incremental".into(),
+                        },
+                        2 => {
+                            release.notified().await;
+                            ModelStreamEvent::Completed {
+                                response: response.clone(),
+                            }
+                        }
+                        _ => return None,
+                    };
+                    Some((Ok(event), (step.saturating_add(1), response, release)))
+                },
+            )))
         }
     }
 
@@ -4702,6 +5379,362 @@ mod tests {
                 .state,
             ModelRunState::OutcomeUnknown
         );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn compatibility_provider_stream_is_incremental_and_commits_only_at_completion()
+    -> Result<(), ProtectedRootError> {
+        let temporary = tempfile::tempdir().expect("temporary provider stream directory");
+        let config = AppConfig::default().with_data_directory(temporary.path());
+        let at = Utc::now();
+        let runtime = open(config.clone()).expect("open provider stream Root");
+        let (lease, connection, model) = {
+            let mut store =
+                SqliteEventStore::open(config.database_path()).expect("provider stream store");
+            seed_compatibility_agent_provider(&mut store, at)
+        };
+        let identity = current_runtime_identity().expect("runtime identity");
+        let actor = RuntimeActorId(identity.instance_id.0);
+        let target = mcg_providers::ProviderModelRef {
+            provider_id: connection.id.clone(),
+            model_id: model.id.clone(),
+        };
+        let request = ModelRequest {
+            contract_version: CONTRACT_VERSION,
+            model: model.id.clone(),
+            client_request_id: None,
+            instructions: Some("Stream under exact Root authority.".into()),
+            messages: vec![Message {
+                role: MessageRole::User,
+                content: vec![ContentPart::Text {
+                    text: "Return an incremental response.".into(),
+                }],
+                name: None,
+            }],
+            tools: Vec::new(),
+            tool_choice: None,
+            structured_output: None,
+            reasoning: None,
+            temperature: None,
+            top_p: None,
+            max_output_tokens: Some(64),
+            metadata: serde_json::json!({"agent_lease_id": lease.id}),
+        };
+        let release_completion = Arc::new(tokio::sync::Notify::new());
+        let gateway = ControlledStreamingGateway {
+            calls: Mutex::new(Vec::new()),
+            response: ModelResponse {
+                contract_version: CONTRACT_VERSION,
+                id: "governed-stream-response".into(),
+                model: model.id.clone(),
+                status: Some("completed".into()),
+                output: vec![OutputItem::Message {
+                    role: MessageRole::Assistant,
+                    content: vec![ContentPart::Text {
+                        text: "incremental".into(),
+                    }],
+                }],
+                usage: Usage {
+                    input_tokens: 16,
+                    output_tokens: 1,
+                    total_tokens: 17,
+                    ..Usage::default()
+                },
+                provider_metadata: serde_json::Value::Null,
+            },
+            release_completion: release_completion.clone(),
+            retry_first: true,
+        };
+        let mut stream = execute_compatibility_agent_model_stream(
+            runtime.clone(),
+            &gateway,
+            &connection,
+            &model,
+            actor,
+            &identity,
+            lease.id,
+            &target,
+            request,
+            at,
+        )
+        .await
+        .expect("governed provider stream");
+        let calls = gateway.calls.lock().expect("streaming gateway calls");
+        assert_eq!(calls.len(), 2, "one proved pre-contact stream retry");
+        let (authorization, dispatched_request) = calls[1].clone();
+        let first_invocation_id = calls[0].0.proposal.invocation_id;
+        drop(calls);
+        assert_eq!(
+            authorization.proposal.request_hash,
+            model_provider_stream_request_artifact(&dispatched_request)
+                .expect("stream request artifact")
+                .content_hash
+        );
+        assert_ne!(
+            authorization.proposal.request_hash,
+            model_provider_request_artifact(&dispatched_request)
+                .expect("buffered request artifact")
+                .content_hash
+        );
+        let first_attempt = runtime
+            .runtime_invocation(first_invocation_id, 10)?
+            .expect("first stream attempt");
+        assert_eq!(
+            first_attempt
+                .model_runs
+                .last()
+                .expect("failed first stream model run")
+                .run
+                .state,
+            ModelRunState::Failed
+        );
+        let first_lineage: serde_json::Value = decode_canonical_cbor_v1(
+            &first_attempt.context_manifest.selected_sources[0]
+                .influence
+                .bytes,
+        )?;
+        let second_before_completion = runtime
+            .runtime_invocation(authorization.proposal.invocation_id, 10)?
+            .expect("second stream attempt");
+        let second_lineage: serde_json::Value = decode_canonical_cbor_v1(
+            &second_before_completion.context_manifest.selected_sources[0]
+                .influence
+                .bytes,
+        )?;
+        assert_eq!(
+            first_lineage["logical_request_id"],
+            second_lineage["logical_request_id"]
+        );
+        assert_eq!(
+            first_lineage["logical_request_hash"],
+            second_lineage["logical_request_hash"]
+        );
+        assert_eq!(
+            second_lineage["retry_of_invocation_id"],
+            first_invocation_id.to_string()
+        );
+        assert!(matches!(
+            stream.next().await.expect("response-created stream item")?,
+            ModelStreamEvent::ResponseCreated { ref id, .. } if id == "governed-stream-response"
+        ));
+        assert!(matches!(
+            stream.next().await.expect("delta stream item")?,
+            ModelStreamEvent::OutputTextDelta { ref delta, .. } if delta == "incremental"
+        ));
+        let before_completion = runtime
+            .runtime_invocation(authorization.proposal.invocation_id, 10)
+            .expect("stream invocation inspection")
+            .expect("stream invocation exists");
+        assert_eq!(
+            before_completion
+                .model_runs
+                .last()
+                .expect("dispatched stream model run")
+                .run
+                .state,
+            ModelRunState::Dispatched
+        );
+        release_completion.notify_one();
+        assert!(matches!(
+            stream.next().await.expect("completed stream item")?,
+            ModelStreamEvent::Completed { ref response }
+                if response.id == "governed-stream-response"
+        ));
+        assert!(stream.next().await.is_none());
+        let invocation_id = authorization.proposal.invocation_id;
+        let completed = runtime
+            .runtime_invocation(invocation_id, 10)
+            .expect("completed stream invocation")
+            .expect("completed stream invocation exists");
+        assert_eq!(
+            completed
+                .model_runs
+                .last()
+                .expect("completed stream model run")
+                .run
+                .state,
+            ModelRunState::Completed
+        );
+        drop(stream);
+        drop(gateway);
+        drop(runtime);
+
+        let reopened = open(config).expect("reopen completed stream Root");
+        let completed = reopened
+            .runtime_invocation(invocation_id, 10)
+            .expect("reopened stream invocation")
+            .expect("persisted stream invocation");
+        assert_eq!(
+            completed
+                .model_runs
+                .last()
+                .expect("persisted completed stream model run")
+                .run
+                .state,
+            ModelRunState::Completed
+        );
+        Ok::<(), ProtectedRootError>(())
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn compatibility_provider_stream_cancellation_is_unknown_and_never_retried()
+    -> Result<(), ProtectedRootError> {
+        let temporary = tempfile::tempdir().expect("temporary stream cancellation directory");
+        let config = AppConfig::default().with_data_directory(temporary.path());
+        let at = Utc::now();
+        let runtime = open(config.clone()).expect("open stream cancellation Root");
+        let (lease, connection, model) = {
+            let mut store =
+                SqliteEventStore::open(config.database_path()).expect("stream cancellation store");
+            seed_compatibility_agent_provider(&mut store, at)
+        };
+        let identity = current_runtime_identity().expect("runtime identity");
+        let actor = RuntimeActorId(identity.instance_id.0);
+        let target = mcg_providers::ProviderModelRef {
+            provider_id: connection.id.clone(),
+            model_id: model.id.clone(),
+        };
+        let request = ModelRequest {
+            contract_version: CONTRACT_VERSION,
+            model: model.id.clone(),
+            client_request_id: None,
+            instructions: Some("Cancel the governed stream after one delta.".into()),
+            messages: vec![Message {
+                role: MessageRole::User,
+                content: vec![ContentPart::Text {
+                    text: "Do not commit late stream output.".into(),
+                }],
+                name: None,
+            }],
+            tools: Vec::new(),
+            tool_choice: None,
+            structured_output: None,
+            reasoning: None,
+            temperature: None,
+            top_p: None,
+            max_output_tokens: Some(64),
+            metadata: serde_json::json!({"agent_lease_id": lease.id}),
+        };
+        let release_completion = Arc::new(tokio::sync::Notify::new());
+        let gateway = ControlledStreamingGateway {
+            calls: Mutex::new(Vec::new()),
+            response: ModelResponse {
+                contract_version: CONTRACT_VERSION,
+                id: "cancelled-stream-response".into(),
+                model: model.id.clone(),
+                status: Some("completed".into()),
+                output: vec![OutputItem::Message {
+                    role: MessageRole::Assistant,
+                    content: vec![ContentPart::Text {
+                        text: "must not commit".into(),
+                    }],
+                }],
+                usage: Usage {
+                    input_tokens: 16,
+                    output_tokens: 3,
+                    total_tokens: 19,
+                    ..Usage::default()
+                },
+                provider_metadata: serde_json::Value::Null,
+            },
+            release_completion: release_completion.clone(),
+            retry_first: false,
+        };
+        let mut stream = execute_compatibility_agent_model_stream(
+            runtime.clone(),
+            &gateway,
+            &connection,
+            &model,
+            actor,
+            &identity,
+            lease.id,
+            &target,
+            request,
+            at,
+        )
+        .await?;
+        assert!(matches!(
+            stream.next().await.expect("created stream event")?,
+            ModelStreamEvent::ResponseCreated { .. }
+        ));
+        assert!(matches!(
+            stream.next().await.expect("delta stream event")?,
+            ModelStreamEvent::OutputTextDelta { .. }
+        ));
+        let authorization = gateway
+            .calls
+            .lock()
+            .expect("stream cancellation calls")
+            .first()
+            .expect("stream cancellation call")
+            .0
+            .clone();
+        runtime.cancel_canonical_workflow(&WorkflowCancelRequest {
+            attempt_id: authorization.proposal.attempt_id,
+            expected_revision: authorization.proposal.attempt_revision,
+            expected_generation: authorization.proposal.lease_generation,
+            idempotency_key: format!(
+                "cancel-provider-stream-{}",
+                authorization.proposal.invocation_id
+            ),
+        })?;
+        let cancelled = tokio::time::timeout(std::time::Duration::from_secs(2), stream.next())
+            .await
+            .expect("stream cancellation deadline")
+            .expect("stream cancellation item");
+        assert!(cancelled.is_err());
+        assert!(stream.next().await.is_none());
+        assert_eq!(
+            gateway
+                .calls
+                .lock()
+                .expect("stream cancellation calls")
+                .len(),
+            1,
+            "a possible-contact stream must never retry"
+        );
+        let invocation_id = authorization.proposal.invocation_id;
+        let inspection = runtime
+            .runtime_invocation(invocation_id, 10)?
+            .expect("cancelled stream invocation");
+        assert_eq!(
+            inspection
+                .model_runs
+                .last()
+                .expect("cancelled stream model run")
+                .run
+                .state,
+            ModelRunState::OutcomeUnknown
+        );
+        assert_eq!(
+            runtime
+                .canonical_workflows()?
+                .pop()
+                .expect("cancelled stream workflow")
+                .state,
+            WorkflowState::CancelRequested
+        );
+        release_completion.notify_one();
+        drop(stream);
+        drop(gateway);
+        drop(runtime);
+
+        let reopened = open(config).expect("reopen cancelled stream Root");
+        let inspection = reopened
+            .runtime_invocation(invocation_id, 10)?
+            .expect("persisted cancelled stream invocation");
+        assert_eq!(
+            inspection
+                .model_runs
+                .last()
+                .expect("persisted cancelled stream model run")
+                .run
+                .state,
+            ModelRunState::OutcomeUnknown
+        );
+        Ok(())
     }
 
     #[tokio::test]

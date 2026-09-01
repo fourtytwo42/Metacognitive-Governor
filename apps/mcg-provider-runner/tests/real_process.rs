@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use chrono::{Duration as ChronoDuration, Utc};
+use futures_util::StreamExt as _;
 use mcg_contracts::{
     AttemptId, ContentHash, HashAlgorithm, InvocationId, InvocationRole, ModelBudget,
     ModelDataClassification, ModelDestinationClass, ModelDisclosureManifest, ModelEgressRoute,
@@ -10,11 +11,12 @@ use mcg_contracts::{
 };
 use mcg_provider_runner::{
     PROVIDER_RUNNER_PROTOCOL_VERSION, ProviderRunnerAuthorization, ProviderRunnerClient,
-    ProviderRunnerRequest, model_provider_request_artifact,
+    ProviderRunnerExecution, ProviderRunnerRequest, model_provider_request_artifact,
+    model_provider_stream_request_artifact,
 };
 use mcg_providers::{
     CONTRACT_VERSION, ContentPart, Message, MessageRole, ModelCapabilities, ModelDescriptor,
-    ModelRequest, ProviderAuthMode, ProviderConnection, ProviderKind,
+    ModelRequest, ModelStreamEvent, ProviderAuthMode, ProviderConnection, ProviderKind,
 };
 use sha2::{Digest as _, Sha256};
 use tokio::{
@@ -53,8 +55,27 @@ fn authorization(
     model: &ModelDescriptor,
     request: &ModelRequest,
 ) -> ProviderRunnerAuthorization {
+    authorization_for_execution(
+        connection,
+        model,
+        request,
+        ProviderRunnerExecution::Complete,
+    )
+}
+
+#[allow(clippy::too_many_lines)]
+fn authorization_for_execution(
+    connection: &ProviderConnection,
+    model: &ModelDescriptor,
+    request: &ModelRequest,
+    execution: ProviderRunnerExecution,
+) -> ProviderRunnerAuthorization {
     let at = Utc::now();
-    let artifact = model_provider_request_artifact(request).expect("request artifact");
+    let artifact = match execution {
+        ProviderRunnerExecution::Complete => model_provider_request_artifact(request),
+        ProviderRunnerExecution::Stream => model_provider_stream_request_artifact(request),
+    }
+    .expect("request artifact");
     let policy_payload = VersionedPayload::canonical_v1(
         StableTypeId::parse("test.real_provider_runner_policy.v1").expect("policy type"),
         &serde_json::json!({"network": "loopback"}),
@@ -252,6 +273,7 @@ async fn fixed_child_executes_one_real_loopback_provider_request() {
     let request = ProviderRunnerRequest {
         protocol_version: PROVIDER_RUNNER_PROTOCOL_VERSION,
         request_id: Uuid::new_v4(),
+        execution: mcg_provider_runner::ProviderRunnerExecution::Complete,
         authorization: authorization(&connection, &model, &model_request),
         connection,
         model,
@@ -271,6 +293,290 @@ async fn fixed_child_executes_one_real_loopback_provider_request() {
     let observed = provider.await.expect("provider fixture");
     assert!(observed.contains("POST /v1/responses HTTP/1.1"));
     assert!(!observed.to_ascii_lowercase().contains("authorization:"));
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn fixed_child_streams_before_the_provider_completes() {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("stream provider listener");
+    let address = listener.local_addr().expect("stream provider address");
+    let (release_sender, release_receiver) = oneshot::channel();
+    let provider = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.expect("stream provider connection");
+        let mut request = vec![0_u8; 64 * 1024];
+        let read = stream
+            .read(&mut request)
+            .await
+            .expect("stream provider request");
+        request.truncate(read);
+        let request = String::from_utf8(request).expect("stream provider request text");
+        assert!(request.contains("POST /v1/responses HTTP/1.1"));
+        assert!(request.contains("\"stream\":true"));
+        stream
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\nevent: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"stream-response\",\"model\":\"stream-model\"}}\n\nevent: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"item_id\":\"message-1\",\"delta\":\"first\"}\n\n",
+            )
+            .await
+            .expect("initial stream events");
+        stream.flush().await.expect("flush initial stream events");
+        release_receiver
+            .await
+            .expect("release completed stream event");
+        let completed = serde_json::json!({
+            "type": "response.completed",
+            "response": {
+                "id": "stream-response",
+                "model": "stream-model",
+                "status": "completed",
+                "output": [{
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "first"}]
+                }],
+                "usage": {"input_tokens": 3, "output_tokens": 1, "total_tokens": 4}
+            }
+        });
+        stream
+            .write_all(
+                format!("event: response.completed\ndata: {completed}\n\ndata: [DONE]\n\n")
+                    .as_bytes(),
+            )
+            .await
+            .expect("completed stream event");
+    });
+    let connection = ProviderConnection {
+        contract_version: CONTRACT_VERSION,
+        id: "stream-provider".into(),
+        display_name: "Stream provider".into(),
+        kind: ProviderKind::OpenAiCompatible,
+        base_url: format!("http://{address}/v1"),
+        auth_mode: ProviderAuthMode::None,
+        organization: None,
+        project: None,
+    };
+    let model = ModelDescriptor {
+        id: "stream-model".into(),
+        display_name: "Stream model".into(),
+        owned_by: Some("fixture".into()),
+        context_window: Some(1_024),
+        capabilities: ModelCapabilities {
+            responses: Some(true),
+            streaming: Some(true),
+            ..ModelCapabilities::default()
+        },
+        price: None,
+        metadata: serde_json::Value::Null,
+    };
+    let model_request = ModelRequest {
+        contract_version: CONTRACT_VERSION,
+        model: model.id.clone(),
+        client_request_id: Some("stream-client-request".into()),
+        instructions: None,
+        messages: vec![Message {
+            role: MessageRole::User,
+            content: vec![ContentPart::Text {
+                text: "stream incrementally".into(),
+            }],
+            name: None,
+        }],
+        tools: Vec::new(),
+        tool_choice: None,
+        structured_output: None,
+        reasoning: None,
+        temperature: Some(0.0),
+        top_p: None,
+        max_output_tokens: Some(32),
+        metadata: serde_json::Value::Null,
+    };
+    let request = ProviderRunnerRequest {
+        protocol_version: PROVIDER_RUNNER_PROTOCOL_VERSION,
+        request_id: Uuid::new_v4(),
+        execution: ProviderRunnerExecution::Stream,
+        authorization: authorization_for_execution(
+            &connection,
+            &model,
+            &model_request,
+            ProviderRunnerExecution::Stream,
+        ),
+        connection,
+        model,
+        request: model_request,
+    };
+    let client = ProviderRunnerClient::with_executable(
+        env!("CARGO_BIN_EXE_mcg-provider-runner"),
+        Duration::from_secs(10),
+    )
+    .expect("streaming provider runner client");
+    let mut events = client.stream(&request).await.expect("provider stream");
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(5), events.next())
+            .await
+            .expect("response-created deadline")
+            .expect("response-created event")
+            .expect("valid response-created event"),
+        ModelStreamEvent::ResponseCreated { ref id, .. } if id == "stream-response"
+    ));
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(5), events.next())
+            .await
+            .expect("delta deadline")
+            .expect("delta event")
+            .expect("valid delta event"),
+        ModelStreamEvent::OutputTextDelta { ref delta, .. } if delta == "first"
+    ));
+    release_sender
+        .send(())
+        .expect("release provider completion");
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(5), events.next())
+            .await
+            .expect("completed deadline")
+            .expect("completed event")
+            .expect("valid completed event"),
+        ModelStreamEvent::Completed { ref response } if response.id == "stream-response"
+    ));
+    assert!(events.next().await.is_none());
+    provider.await.expect("stream provider fixture");
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn dropping_an_active_stream_kills_the_child_and_closes_provider_transport() {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("stream cancellation provider listener");
+    let address = listener
+        .local_addr()
+        .expect("stream cancellation provider address");
+    let provider = tokio::spawn(async move {
+        let (mut stream, _) = listener
+            .accept()
+            .await
+            .expect("stream cancellation provider connection");
+        let mut request = vec![0_u8; 64 * 1024];
+        let read = stream
+            .read(&mut request)
+            .await
+            .expect("stream cancellation provider request");
+        assert!(read > 0);
+        stream
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\nevent: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"cancelled-stream\",\"model\":\"cancelled-stream-model\"}}\n\nevent: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"item_id\":\"message-1\",\"delta\":\"provisional\"}\n\n",
+            )
+            .await
+            .expect("stream cancellation events");
+        stream
+            .flush()
+            .await
+            .expect("flush stream cancellation events");
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match stream.read(&mut request).await {
+                    Ok(0) => break,
+                    Ok(_) => {}
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            std::io::ErrorKind::ConnectionReset
+                                | std::io::ErrorKind::ConnectionAborted
+                                | std::io::ErrorKind::BrokenPipe
+                        ) =>
+                    {
+                        break;
+                    }
+                    Err(error) => panic!("stream cancellation transport close failed: {error}"),
+                }
+            }
+        })
+        .await
+        .expect("cancelled stream closes provider transport");
+    });
+    let connection = ProviderConnection {
+        contract_version: CONTRACT_VERSION,
+        id: "cancelled-stream-provider".into(),
+        display_name: "Cancelled stream provider".into(),
+        kind: ProviderKind::OpenAiCompatible,
+        base_url: format!("http://{address}/v1"),
+        auth_mode: ProviderAuthMode::None,
+        organization: None,
+        project: None,
+    };
+    let model = ModelDescriptor {
+        id: "cancelled-stream-model".into(),
+        display_name: "Cancelled stream model".into(),
+        owned_by: Some("fixture".into()),
+        context_window: Some(1_024),
+        capabilities: ModelCapabilities {
+            responses: Some(true),
+            streaming: Some(true),
+            ..ModelCapabilities::default()
+        },
+        price: None,
+        metadata: serde_json::Value::Null,
+    };
+    let model_request = ModelRequest {
+        contract_version: CONTRACT_VERSION,
+        model: model.id.clone(),
+        client_request_id: Some("cancelled-stream-client-request".into()),
+        instructions: None,
+        messages: vec![Message {
+            role: MessageRole::User,
+            content: vec![ContentPart::Text {
+                text: "cancel after a provisional delta".into(),
+            }],
+            name: None,
+        }],
+        tools: Vec::new(),
+        tool_choice: None,
+        structured_output: None,
+        reasoning: None,
+        temperature: Some(0.0),
+        top_p: None,
+        max_output_tokens: Some(32),
+        metadata: serde_json::Value::Null,
+    };
+    let request = ProviderRunnerRequest {
+        protocol_version: PROVIDER_RUNNER_PROTOCOL_VERSION,
+        request_id: Uuid::new_v4(),
+        execution: ProviderRunnerExecution::Stream,
+        authorization: authorization_for_execution(
+            &connection,
+            &model,
+            &model_request,
+            ProviderRunnerExecution::Stream,
+        ),
+        connection,
+        model,
+        request: model_request,
+    };
+    let client = ProviderRunnerClient::with_executable(
+        env!("CARGO_BIN_EXE_mcg-provider-runner"),
+        Duration::from_secs(30),
+    )
+    .expect("cancellable stream runner client");
+    let mut events = client.stream(&request).await.expect("cancellable stream");
+    assert!(matches!(
+        events
+            .next()
+            .await
+            .expect("created event")
+            .expect("valid created event"),
+        ModelStreamEvent::ResponseCreated { .. }
+    ));
+    assert!(matches!(
+        events
+            .next()
+            .await
+            .expect("delta event")
+            .expect("valid delta event"),
+        ModelStreamEvent::OutputTextDelta { .. }
+    ));
+    drop(events);
+    provider
+        .await
+        .expect("stream cancellation provider fixture");
 }
 
 #[tokio::test]
@@ -363,6 +669,7 @@ async fn dropping_an_inflight_call_kills_the_child_and_closes_provider_transport
     let request = ProviderRunnerRequest {
         protocol_version: PROVIDER_RUNNER_PROTOCOL_VERSION,
         request_id: Uuid::new_v4(),
+        execution: mcg_provider_runner::ProviderRunnerExecution::Complete,
         authorization: authorization(&connection, &model, &model_request),
         connection,
         model,

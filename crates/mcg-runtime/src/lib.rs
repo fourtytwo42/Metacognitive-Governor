@@ -1471,6 +1471,13 @@ pub trait ProtectedAgentModelDispatcher: Send + Sync {
         target: &ProviderModelRef,
         request: ModelRequest,
     ) -> Result<ModelResponse, ProviderError>;
+
+    async fn stream_response(
+        &self,
+        lease_id: AgentLeaseId,
+        target: &ProviderModelRef,
+        request: ModelRequest,
+    ) -> Result<mcg_providers::ProviderStream, ProviderError>;
 }
 
 /// Root-installed independent verification boundary for compatibility-agent Work.
@@ -1502,10 +1509,8 @@ impl RuntimeProviderGateway {
         target: &ProviderModelRef,
         request: ModelRequest,
     ) -> Result<mcg_providers::ProviderStream, ProviderError> {
-        if self.protected.is_some() {
-            return Err(ProviderError::Configuration(
-                "governed agent streaming requires a separately authorized invocation".into(),
-            ));
+        if let Some((lease_id, dispatcher)) = &self.protected {
+            return dispatcher.stream_response(*lease_id, target, request).await;
         }
         let initial = self
             .registry
@@ -29402,6 +29407,8 @@ mod tests {
         },
     };
 
+    use futures_util::StreamExt as _;
+
     use super::*;
 
     struct RecordingProtectedAgentModels {
@@ -29430,6 +29437,22 @@ mod tests {
                 usage: mcg_providers::Usage::default(),
                 provider_metadata: serde_json::Value::Null,
             })
+        }
+
+        async fn stream_response(
+            &self,
+            lease_id: AgentLeaseId,
+            target: &ProviderModelRef,
+            request: ModelRequest,
+        ) -> Result<mcg_providers::ProviderStream, ProviderError> {
+            let response = self.create_response(lease_id, target, request).await?;
+            Ok(Box::pin(futures_util::stream::iter([
+                Ok(mcg_providers::ModelStreamEvent::ResponseCreated {
+                    id: response.id.clone(),
+                    model: Some(response.model.clone()),
+                }),
+                Ok(mcg_providers::ModelStreamEvent::Completed { response }),
+            ])))
         }
     }
 
@@ -29479,9 +29502,33 @@ mod tests {
             .await
             .expect("governed response");
         assert_eq!(response.id, "protected-response");
+        let mut stream = gateway
+            .stream_response(&target, request.clone())
+            .await
+            .expect("governed stream");
+        assert!(matches!(
+            stream
+                .next()
+                .await
+                .expect("governed created event")
+                .expect("valid governed created event"),
+            mcg_providers::ModelStreamEvent::ResponseCreated { .. }
+        ));
+        assert!(matches!(
+            stream
+                .next()
+                .await
+                .expect("governed completed event")
+                .expect("valid governed completed event"),
+            mcg_providers::ModelStreamEvent::Completed { .. }
+        ));
+        assert!(stream.next().await.is_none());
         assert_eq!(
             calls.lock().expect("protected calls").as_slice(),
-            &[(lease_id, target, request)]
+            &[
+                (lease_id, target.clone(), request.clone()),
+                (lease_id, target, request),
+            ]
         );
     }
 

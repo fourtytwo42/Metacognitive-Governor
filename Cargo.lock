@@ -4297,6 +4297,8 @@ version = "0.4.67"
 dependencies = [
  "async-trait",
  "chrono",
+ "futures-core",
+ "futures-util",
  "mcg-action-runner",
  "mcg-agents",
  "mcg-api",
@@ -4314,6 +4316,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
+ "tokio-stream",
  "tracing",
  "url",
  "uuid",
@@ -4343,6 +4346,8 @@ version = "0.4.67"
 dependencies = [
  "async-trait",
  "chrono",
+ "futures-core",
+ "futures-util",
  "mcg-contracts",
  "mcg-providers",
  "process-wrap",
@@ -4352,6 +4357,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
+ "tokio-stream",
  "uuid",
  "zeroize",
 ]
@@ -4389,6 +4395,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "ed25519-dalek",
+ "futures-util",
  "image 0.25.10",
  "mcg-agents",
  "mcg-codex-app-server",
