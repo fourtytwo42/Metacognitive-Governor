@@ -29,23 +29,25 @@ use mcg_action_runner::{
     governed_filesystem_authority_binding, request_from_authorized_action,
     request_from_reconciliation_job, validate_governed_filesystem_envelope,
 };
+use mcg_agents::{EvaluationOutcome, EvaluationReport};
 use mcg_config::AppConfig;
 use mcg_contracts::{
     ActionCompensationReceipt, ActionEnvelope, ActionExecution, ActionExecutionId,
     ActionExecutionState, ActionId, ActionOrigin, ActionReceipt, ActionReceiptId, ArtifactRef,
-    AuthenticatedRpcRequest, ContentHash, ContextManifest, ContextManifestId, ContextSelection,
-    ContractError, CorrelationId, EffectClass, EffectOutcome, HashAlgorithm, InvocationId,
-    InvocationManifest, InvocationRole, ModelBudget, ModelDataClassification,
-    ModelDestinationClass, ModelDisclosureManifest, ModelEgressPolicy, ModelEgressRoute,
-    ModelInvocationPermit, ModelInvocationProposal, ModelRunId, ModelUsage,
-    OwnerActionCompensationRequest, PROTOCOL_V1, PermitId, PolicyBinding, ReconciliationJob,
-    ReconciliationJobId, ReconciliationObservation, RequestId, RootStatus, RpcEnvelope,
-    RuntimeActorId, RuntimeIdentity, RuntimeInstanceId, RuntimeInvocationRequest,
-    RuntimeInvocationResult, SecretHandleId, SourceRef, StableTypeId, VersionedPayload,
-    WorkflowAttempt, WorkflowCancelRequest, WorkflowId, WorkflowState, canonical_contract_hash,
-    decode_canonical_cbor_v1,
+    AuthenticatedRpcRequest, CompletionCertificate, CompletionCertificateId, CompletionVerdict,
+    ContentHash, ContextManifest, ContextManifestId, ContextSelection, ContractError,
+    CorrelationId, DeterministicCriterionEvidence, DeterministicVerifyInput, EffectClass,
+    EffectOutcome, HashAlgorithm, InvocationId, InvocationManifest, InvocationRole, ModelBudget,
+    ModelDataClassification, ModelDestinationClass, ModelDisclosureManifest, ModelEgressPolicy,
+    ModelEgressRoute, ModelInvocationPermit, ModelInvocationProposal, ModelRunId, ModelUsage,
+    OwnerActionCompensationRequest, PROTOCOL_V1, PermitId, PolicyBinding,
+    RUNTIME_INVOCATION_REQUEST_HASH_DOMAIN, ReconciliationJob, ReconciliationJobId,
+    ReconciliationObservation, RequestId, RootStatus, RpcEnvelope, RuntimeActorId, RuntimeIdentity,
+    RuntimeInstanceId, RuntimeInvocationRequest, RuntimeInvocationResult, SecretHandleId,
+    SourceRef, StableTypeId, VersionedPayload, WorkflowAttempt, WorkflowCancelRequest, WorkflowId,
+    WorkflowState, canonical_contract_hash, decode_canonical_cbor_v1,
 };
-use mcg_domain::AgentLeaseId;
+use mcg_domain::{AgentLeaseId, EvaluationId};
 use mcg_platform::{
     MAX_ROOT_INVOCATION_MODEL_RUNS, MAX_ROOT_INVOCATION_SUMMARIES, MAX_ROOT_WORKFLOW_INVOCATIONS,
     PlatformError, ROOT_ACTION_COMPENSATE_REQUEST_TYPE, ROOT_ACTION_COMPENSATE_RESPONSE_TYPE,
@@ -69,11 +71,14 @@ use mcg_providers::{
     CONTRACT_VERSION, ModelDescriptor, ModelRequest, ModelResponse, ProviderAuthMode,
     ProviderConnection, ProviderError, ProviderKind,
 };
-use mcg_runtime::{AppRuntime, ProtectedAgentModelDispatcher, RuntimeError};
+use mcg_runtime::{
+    AppRuntime, ProtectedAgentModelDispatcher, ProtectedCompatibilityVerifier, RuntimeError,
+};
 use mcg_storage::{
-    AgentTurnWorkflowAttachment, ModelEgressAuthorizationReceipt, ModelSecretHandleBinding,
-    ModelSecretSlot, ReconciliationResolutionReceipt, RootMigrationReceipt, STORAGE_SCHEMA_VERSION,
-    StorageError, acquire_data_directory_lock, create_backup_bundle_from_snapshot,
+    AgentTurnVerificationTarget, AgentTurnWorkflowAttachment, ConsumerEvaluationCompletion,
+    ModelEgressAuthorizationReceipt, ModelSecretHandleBinding, ModelSecretSlot,
+    ReconciliationResolutionReceipt, RootMigrationReceipt, STORAGE_SCHEMA_VERSION, StorageError,
+    acquire_data_directory_lock, create_backup_bundle_from_snapshot, evaluation_report_source_ref,
     inspect_database_before_root, model_descriptor_source_ref, model_destination_source_ref,
     model_disclosure_hash, model_egress_policy_binding, model_egress_route_payload,
     model_proposal_hash, model_provider_source_ref, snapshot_database_before_root,
@@ -477,6 +482,12 @@ struct RootAgentModelDispatcher {
     runtime_identity: RuntimeIdentity,
 }
 
+struct RootCompatibilityVerifier {
+    runtime: Weak<AppRuntime>,
+    root_executable: PathBuf,
+    data_directory: PathBuf,
+}
+
 #[async_trait::async_trait]
 impl ProtectedAgentModelDispatcher for RootAgentModelDispatcher {
     async fn create_response(
@@ -517,6 +528,331 @@ impl ProtectedAgentModelDispatcher for RootAgentModelDispatcher {
         )
         .await
         .map_err(protected_agent_provider_error)
+    }
+}
+
+#[async_trait::async_trait]
+impl ProtectedCompatibilityVerifier for RootCompatibilityVerifier {
+    async fn verify_consumer_evaluation(
+        &self,
+        evaluation_id: EvaluationId,
+    ) -> Result<Vec<ConsumerEvaluationCompletion>, String> {
+        let runtime = self
+            .runtime
+            .upgrade()
+            .ok_or_else(|| "Protected Root runtime is unavailable".to_owned())?;
+        let report = runtime
+            .root_prepared_consumer_evaluation(evaluation_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "prepared evaluation report is unavailable".to_owned())?;
+        let targets = runtime
+            .root_agent_turn_verification_targets(report.run_id)
+            .map_err(|error| error.to_string())?;
+        verify_compatibility_consumer_evaluation(
+            &runtime,
+            &self.root_executable,
+            &self.data_directory,
+            &report,
+            &targets,
+        )
+        .await
+        .map_err(|error| error.to_string())
+    }
+}
+
+fn compatibility_verify_payload(
+    type_id: &str,
+    value: &serde_json::Value,
+) -> Result<VersionedPayload, ProtectedRootError> {
+    Ok(VersionedPayload::canonical_v1(
+        StableTypeId::parse(type_id)?,
+        value,
+    )?)
+}
+
+fn compatibility_verify_hash(domain: &str, value: &[u8]) -> ContentHash {
+    let mut hasher = Sha256::new();
+    hasher.update(b"MetaCog.CompatibilityIndependentVerify:v1\0");
+    hasher.update(domain.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(value);
+    ContentHash {
+        algorithm: HashAlgorithm::Sha256,
+        domain: domain.into(),
+        digest_hex: format!("{:x}", hasher.finalize()),
+    }
+}
+
+fn compatibility_verify_source(
+    type_id: &str,
+    locator: impl Into<String>,
+    domain: &str,
+    value: &[u8],
+) -> Result<SourceRef, ProtectedRootError> {
+    Ok(SourceRef {
+        source_type: StableTypeId::parse(type_id)?,
+        locator: locator.into(),
+        content_hash: compatibility_verify_hash(domain, value),
+    })
+}
+
+#[allow(clippy::too_many_lines)] // Keep one complete immutable Verify manifest auditable.
+fn compatibility_verify_request(
+    client: &RuntimeWorkerClient,
+    target: &AgentTurnVerificationTarget,
+    report: &EvaluationReport,
+    report_source: &SourceRef,
+) -> Result<RuntimeInvocationRequest, ProtectedRootError> {
+    let criteria = target
+        .task_contract
+        .acceptance_criteria
+        .iter()
+        .enumerate()
+        .map(|(index, clause)| {
+            let passed = target
+                .success_conditions
+                .get(index)
+                .and_then(|condition| {
+                    report
+                        .conditions
+                        .iter()
+                        .find(|result| result.condition == *condition)
+                })
+                .is_some_and(|result| result.passed);
+            DeterministicCriterionEvidence {
+                clause_id: clause.clause_id.clone(),
+                passed,
+                evidence_refs: vec![report_source.clone()],
+            }
+        })
+        .collect::<Vec<_>>();
+    let verify_input = DeterministicVerifyInput {
+        work_response_hash: target.work_response_hash.clone(),
+        criteria,
+    };
+    verify_input.validate()?;
+    let input = compatibility_verify_payload(
+        DeterministicVerifyInput::TYPE_ID,
+        &serde_json::to_value(&verify_input)?,
+    )?;
+    let influence = compatibility_verify_payload(
+        "mcg.compatibility_verify_influence.v1",
+        &serde_json::json!({"influence": "objective_evaluation"}),
+    )?;
+    let selection_policy = compatibility_verify_payload(
+        "mcg.compatibility_verify_context_policy.v1",
+        &serde_json::json!({"mode": "exact_prepared_evaluation_only"}),
+    )?;
+    let context_manifest = ContextManifest {
+        id: ContextManifestId::new(),
+        attempt_id: target.attempt.attempt_id,
+        selected_sources: vec![ContextSelection {
+            source: report_source.clone(),
+            perspective: None,
+            influence,
+            transformations: Vec::new(),
+            placement: 0,
+            approximate_tokens: 1,
+        }],
+        selection_policy,
+        expansion_steps: Vec::new(),
+        approximate_tokens: 1,
+    };
+    let context_hash = canonical_contract_hash(
+        ContextManifest::TYPE_ID,
+        "MetaCog.ContextManifest",
+        &context_manifest,
+    )?;
+    let route = compatibility_verify_payload(
+        "mcg.compatibility_verify_route.v1",
+        &serde_json::json!({"provider": "deterministic", "role": "verify"}),
+    )?;
+    let sampling = compatibility_verify_payload(
+        "mcg.compatibility_verify_sampling.v1",
+        &serde_json::json!({"temperature_basis_points": 0}),
+    )?;
+    let task_contract_locator = format!(
+        "{}@{}",
+        target.task_contract.id, target.task_contract.version
+    );
+    let invocation_manifest = InvocationManifest {
+        id: InvocationId::new(),
+        role: InvocationRole::Verify,
+        attempt_id: target.attempt.attempt_id,
+        task_contract: target.attempt.task_contract.clone(),
+        runtime_identity: client.hello().runtime_identity.clone(),
+        cognitive_configuration: compatibility_verify_hash(
+            "MetaCog.CompatibilityVerifyConfiguration",
+            b"deterministic-v1",
+        ),
+        role_manifest: compatibility_verify_hash(
+            "MetaCog.CompatibilityVerifyRole",
+            b"independent-verify-v1",
+        ),
+        prompt_bundle: compatibility_verify_hash(
+            "MetaCog.CompatibilityVerifyPrompt",
+            b"evaluate-exact-objective-evidence-v1",
+        ),
+        context_manifest: context_hash,
+        model_route: route,
+        resolved_provider: compatibility_verify_source(
+            "mcg.deterministic_provider.v1",
+            "protected-root",
+            "MetaCog.CompatibilityVerifyProvider",
+            b"protected-root-deterministic-provider-v1",
+        )?,
+        resolved_model: compatibility_verify_source(
+            "mcg.deterministic_model.v1",
+            "independent-verify-v1",
+            "MetaCog.CompatibilityVerifyModel",
+            b"independent-verify-v1",
+        )?,
+        observed_model_fingerprint: Some("mcg-runtime-worker:deterministic-verify-v1".into()),
+        sampling,
+        reasoning: None,
+        available_tool_manifests: Vec::new(),
+        selected_skill_manifests: Vec::new(),
+        authority_envelope: report_source.clone(),
+        egress_permit: None,
+        repository_revision: None,
+        environment: SourceRef {
+            source_type: StableTypeId::parse("mcg.task_contract_environment.v1")?,
+            locator: task_contract_locator,
+            content_hash: target.task_contract.environment.content_hash.clone(),
+        },
+        runtime_build: client.hello().executable_hash.clone(),
+        request_hash: input.content_hash(RUNTIME_INVOCATION_REQUEST_HASH_DOMAIN)?,
+        response_hash: None,
+    };
+    let request = RuntimeInvocationRequest {
+        worker_generation: client.worker_generation(),
+        attempt_revision: target.attempt.revision,
+        lease_generation: target.attempt.lease_generation,
+        context_manifest,
+        invocation_manifest,
+        model_run_id: ModelRunId::new(),
+        input,
+    };
+    request.validate()?;
+    Ok(request)
+}
+
+fn validate_compatibility_verify_result(
+    request: &RuntimeInvocationRequest,
+    receipt: &RuntimeInvocationDispatchReceipt,
+    report_source: &SourceRef,
+) -> Result<(), ProtectedRootError> {
+    let input: DeterministicVerifyInput =
+        serde_json::from_value(decode_canonical_cbor_v1(&request.input.bytes)?)?;
+    let expected_verdict = if input.criteria.iter().all(|criterion| criterion.passed) {
+        CompletionVerdict::Satisfied
+    } else {
+        CompletionVerdict::NotSatisfied
+    };
+    let exact_criteria = receipt.result.criterion_results.len() == input.criteria.len()
+        && receipt
+            .result
+            .criterion_results
+            .iter()
+            .zip(&input.criteria)
+            .all(|(actual, expected)| {
+                actual.clause_id == expected.clause_id
+                    && actual.passed == expected.passed
+                    && actual.evidence_refs == expected.evidence_refs
+                    && actual.evidence_refs.contains(report_source)
+            });
+    if !exact_criteria || receipt.result.verdict != Some(expected_verdict) {
+        return Err(StorageError::Conflict(
+            "independent Verify response substituted objective criteria or verdict".into(),
+        )
+        .into());
+    }
+    Ok(())
+}
+
+/// Executes independent deterministic Verify for every completed attached compatibility Work
+/// target and returns Root-owned completion certificates. Verify is observational and may be
+/// safely repeated after a crash before the final atomic settlement; every attempt remains in
+/// immutable invocation history.
+///
+/// # Errors
+/// Returns an error for stale canonical authority, malformed report/target evidence, worker
+/// authentication or execution failure, or a substituted Verify response.
+pub async fn verify_compatibility_consumer_evaluation(
+    runtime: &AppRuntime,
+    root_executable: impl AsRef<Path>,
+    data_directory: impl AsRef<Path>,
+    report: &EvaluationReport,
+    targets: &[AgentTurnVerificationTarget],
+) -> Result<Vec<ConsumerEvaluationCompletion>, ProtectedRootError> {
+    if targets.is_empty() {
+        return Ok(Vec::new());
+    }
+    let report_source = evaluation_report_source_ref(report)?;
+    let mut client = launch_runtime_worker(runtime, root_executable, data_directory).await?;
+    let execution = async {
+        let mut completions = Vec::with_capacity(targets.len());
+        for target in targets {
+            let request = compatibility_verify_request(&client, target, report, &report_source)?;
+            let receipt =
+                execute_runtime_invocation(runtime, &mut client, &request, Utc::now()).await?;
+            validate_compatibility_verify_result(&request, &receipt, &report_source)?;
+            let mut artifacts = target.work_artifacts.clone();
+            let verify_artifact = ArtifactRef {
+                content_hash: receipt.response_artifact.response_hash.clone(),
+                media_type: "application/vnd.metacog.runtime-response+cbor".into(),
+                byte_length: u64::try_from(receipt.response_artifact.response.bytes.len())
+                    .map_err(|_| {
+                        StorageError::InvalidData(
+                            "Verify response artifact length exceeds its wire range".into(),
+                        )
+                    })?,
+            };
+            if !artifacts.contains(&verify_artifact) {
+                artifacts.push(verify_artifact);
+            }
+            let verdict = match report.outcome {
+                EvaluationOutcome::Passed => CompletionVerdict::Satisfied,
+                EvaluationOutcome::Failed => CompletionVerdict::NotSatisfied,
+                EvaluationOutcome::Inconclusive => CompletionVerdict::Inconclusive,
+            };
+            let certificate = CompletionCertificate {
+                id: CompletionCertificateId::new(),
+                workflow_id: target.attempt.workflow_id,
+                attempt_id: target.attempt.attempt_id,
+                task_contract: target.attempt.task_contract.clone(),
+                work_invocations: target.work_invocations.clone(),
+                verify_invocations: vec![request.invocation_manifest.id],
+                criterion_results: receipt.result.criterion_results.clone(),
+                evidence_refs: vec![report_source.clone()],
+                tests_run: vec![report_source.clone()],
+                artifacts,
+                known_untested_paths: Vec::new(),
+                unresolved_assumptions: Vec::new(),
+                remaining_risks: Vec::new(),
+                verdict,
+                issued_at: Utc::now(),
+            };
+            certificate.validate()?;
+            completions.push(ConsumerEvaluationCompletion {
+                lease_id: target.lease_id,
+                certificate,
+                expected_revision: target.attempt.revision,
+                expected_generation: target.attempt.lease_generation,
+            });
+        }
+        Ok(completions)
+    }
+    .await;
+    match execution {
+        Ok(completions) => {
+            client.shutdown().await?;
+            Ok(completions)
+        }
+        Err(error) => {
+            let _ = client.terminate().await;
+            Err(error)
+        }
     }
 }
 
@@ -2229,6 +2565,8 @@ pub fn open(config: AppConfig) -> Result<Arc<AppRuntime>, ProtectedRootError> {
     fs::create_dir_all(&config.data_directory)?;
     let data_lock = acquire_data_directory_lock(&config.data_directory)?;
     let migration_receipt = prepare_root_migration(&config)?;
+    let data_directory = config.data_directory.clone();
+    let root_executable = std::env::current_exe()?;
     let runtime = Arc::new(AppRuntime::open_with_data_directory_lock(
         config, data_lock,
     )?);
@@ -2236,9 +2574,14 @@ pub fn open(config: AppConfig) -> Result<Arc<AppRuntime>, ProtectedRootError> {
     runtime.initialize_root_ownership(identity.clone(), migration_receipt)?;
     runtime.install_protected_agent_model_dispatcher(Arc::new(RootAgentModelDispatcher {
         runtime: Arc::downgrade(&runtime),
-        root_executable: std::env::current_exe()?,
+        root_executable: root_executable.clone(),
         runtime_actor: RuntimeActorId(identity.instance_id.0),
         runtime_identity: identity,
+    }))?;
+    runtime.install_protected_compatibility_verifier(Arc::new(RootCompatibilityVerifier {
+        runtime: Arc::downgrade(&runtime),
+        root_executable,
+        data_directory,
     }))?;
     let recovered_at = Utc::now();
     let reconciliation_recovery = runtime.recover_action_reconciliations(recovered_at)?;

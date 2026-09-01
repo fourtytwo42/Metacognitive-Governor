@@ -16825,6 +16825,14 @@ form.addEventListener('submit', (event) => {
         assert_eq!(completed_checkpoint.run_id, run_id);
         assert_eq!(completed_checkpoint.project_snapshot_id, project.id);
         assert_eq!(
+            completed_checkpoint.prepared_evaluation_id,
+            Some(resumed.run.evaluations[0].id)
+        );
+        assert_eq!(
+            completed_checkpoint.prepared_evaluated_at,
+            Some(resumed.run.evaluations[0].evaluated_at)
+        );
+        assert_eq!(
             reopened
                 .tool_audit(task.id)
                 .expect("objective audit")

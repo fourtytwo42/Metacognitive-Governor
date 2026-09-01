@@ -1,16 +1,17 @@
 use chrono::{DateTime, Utc};
 use mcg_agents::{
-    AgentInstance, AgentLease, AgentLeaseState, AgentRun, AgentRunState, AgentState, WorkItem,
-    WorkPlan,
+    AgentInstance, AgentLease, AgentLeaseState, AgentRun, AgentRunState, AgentState,
+    SuccessCondition, WorkItem, WorkPlan,
 };
 use mcg_contracts::{
-    AttemptId, ConfigurationId, ContentHash, ContractClause, CorrelationId, EventId, PolicyBinding,
+    ArtifactRef, AttemptId, ConfigurationId, ContentHash, ContractClause, CorrelationId, EventId,
+    InvocationId, InvocationManifest, InvocationRole, ModelRun, ModelRunState, PolicyBinding,
     RetryPolicy, RuntimeActorId, SourceRef, StableTypeId, TaskContract, TaskContractId,
     TaskContractStatus, VersionedPayload, VersionedRef, WORKFLOW_SOURCE_SNAPSHOT_HASH_DOMAIN,
     WaitReason, WorkflowAttempt, WorkflowEvent, WorkflowId, WorkflowSourceAttachment,
     WorkflowState, decode_canonical_cbor_v1,
 };
-use mcg_domain::{AgentLeaseId, TaskEnvelope, TaskState};
+use mcg_domain::{AgentLeaseId, RunId, TaskEnvelope, TaskState, WorkItemId};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use sha2::{Digest, Sha256};
 
@@ -62,6 +63,19 @@ pub struct AgentTurnWorkflowAttachment {
 pub struct AgentTurnWorkflowAuthority {
     pub workflow: AgentTurnWorkflowAttachment,
     pub legacy_lease: AgentLease,
+}
+
+/// Exact completed compatibility Work evidence awaiting independent Verify.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentTurnVerificationTarget {
+    pub lease_id: AgentLeaseId,
+    pub work_item_id: WorkItemId,
+    pub success_conditions: Vec<SuccessCondition>,
+    pub task_contract: TaskContract,
+    pub attempt: WorkflowAttempt,
+    pub work_invocations: Vec<InvocationId>,
+    pub work_artifacts: Vec<ArtifactRef>,
+    pub work_response_hash: ContentHash,
 }
 
 /// Canonical state proposed by the compatibility-agent transaction that owns the
@@ -327,6 +341,147 @@ impl SqliteEventStore {
             legacy_lease: source.lease,
         })
     }
+
+    /// Lists every completed compatibility lease in one run that is durably attached to an exact
+    /// Verifying workflow, including its objectively mappable planned conditions and completed
+    /// Work invocation lineage.
+    ///
+    /// Legacy-only leases without a canonical source attachment are omitted. A present attachment
+    /// is authoritative and therefore fails closed on stale state, changed lineage, or missing
+    /// completed response evidence.
+    ///
+    /// # Errors
+    /// Returns a storage error for malformed legacy/canonical rows, a non-Verifying attachment,
+    /// substituted invocation lineage, or absent completed Work response evidence.
+    pub fn agent_turn_verification_targets(
+        &self,
+        run_id: RunId,
+    ) -> Result<Vec<AgentTurnVerificationTarget>, StorageError> {
+        let leases: Vec<AgentLease> = self.read_json_rows(
+            "SELECT agent_leases.lease_json FROM agent_leases
+             INNER JOIN agent_instances
+                ON agent_instances.instance_id = agent_leases.instance_id
+             WHERE agent_instances.run_id = ?1 AND agent_leases.state = 'completed'
+             ORDER BY agent_leases.acquired_at, agent_leases.lease_id",
+            &run_id.to_string(),
+        )?;
+        let plan: WorkPlan = self
+            .connection
+            .query_row(
+                "SELECT plan_json FROM work_plans WHERE run_id = ?1",
+                [run_id.to_string()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .map(|json| serde_json::from_str(&json))
+            .transpose()?
+            .ok_or_else(|| StorageError::InvalidData("verification run has no work plan".into()))?;
+        let source_type = stable_type_id("mcg.agent_turn_source.v1")?;
+        let mut targets = Vec::new();
+        for lease in leases {
+            let Some(attachment) = load_workflow_source_attachment_by_source(
+                &self.connection,
+                source_type.as_str(),
+                &lease.id.to_string(),
+            )?
+            else {
+                continue;
+            };
+            let workflow = load_agent_turn_workflow_attachment(&self.connection, attachment)?;
+            if workflow.attempt.state != WorkflowState::Verifying {
+                return Err(StorageError::Conflict(
+                    "attached completed agent turn is not awaiting independent verification".into(),
+                ));
+            }
+            let item = plan
+                .items
+                .iter()
+                .find(|item| item.id == lease.work_item_id)
+                .ok_or_else(|| {
+                    StorageError::Conflict(
+                        "completed compatibility lease no longer matches its planned work item"
+                            .into(),
+                    )
+                })?;
+            let completed = completed_work_invocations(&self.connection, &workflow.attempt)?;
+            let work_response_hash = completed
+                .last()
+                .map(|(_, artifact)| artifact.content_hash.clone())
+                .ok_or_else(|| {
+                    StorageError::Conflict(
+                        "attached completed agent turn has no completed Work response".into(),
+                    )
+                })?;
+            targets.push(AgentTurnVerificationTarget {
+                lease_id: lease.id,
+                work_item_id: lease.work_item_id,
+                success_conditions: item.success_conditions.clone(),
+                task_contract: workflow.task_contract,
+                attempt: workflow.attempt,
+                work_invocations: completed
+                    .iter()
+                    .map(|(invocation_id, _)| *invocation_id)
+                    .collect(),
+                work_artifacts: completed
+                    .into_iter()
+                    .map(|(_, artifact)| artifact)
+                    .collect(),
+                work_response_hash,
+            });
+        }
+        Ok(targets)
+    }
+}
+
+fn completed_work_invocations(
+    connection: &Connection,
+    attempt: &WorkflowAttempt,
+) -> Result<Vec<(InvocationId, ArtifactRef)>, StorageError> {
+    let mut statement = connection.prepare(
+        "SELECT invocation.manifest_json, version.run_json
+         FROM invocation_manifests AS invocation
+         JOIN model_run_heads AS head
+           ON head.invocation_id = invocation.invocation_id
+         JOIN model_run_versions AS version
+           ON version.model_run_id = head.model_run_id
+          AND version.revision = head.current_revision
+         WHERE invocation.workflow_attempt_id = ?1
+           AND invocation.role = 'work'
+           AND version.state = 'completed'
+         ORDER BY invocation.persisted_at, invocation.invocation_id",
+    )?;
+    let rows = statement.query_map([attempt.attempt_id.to_string()], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut completed = Vec::new();
+    for row in rows {
+        let (manifest_json, run_json) = row?;
+        let manifest: InvocationManifest = serde_json::from_str(&manifest_json)?;
+        let run: ModelRun = serde_json::from_str(&run_json)?;
+        manifest
+            .validate()
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        run.validate()
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        if manifest.role != InvocationRole::Work
+            || manifest.attempt_id != attempt.attempt_id
+            || manifest.task_contract != attempt.task_contract
+            || run.invocation_id != manifest.id
+            || run.role != InvocationRole::Work
+            || run.state != ModelRunState::Completed
+        {
+            return Err(StorageError::Conflict(
+                "completed compatibility Work invocation lineage was substituted".into(),
+            ));
+        }
+        let response_artifact = run.response_artifact.ok_or_else(|| {
+            StorageError::InvalidData(
+                "completed compatibility Work invocation has no response artifact".into(),
+            )
+        })?;
+        completed.push((manifest.id, response_artifact));
+    }
+    Ok(completed)
 }
 
 fn attach_active_agent_lease_workflow_in_transaction(
@@ -1870,14 +2025,14 @@ fn insert_or_replay_workflow_source_attachment(
 }
 
 fn load_agent_turn_workflow_attachment(
-    transaction: &Transaction<'_>,
+    connection: &Connection,
     attachment: WorkflowSourceAttachment,
 ) -> Result<AgentTurnWorkflowAttachment, StorageError> {
-    let attempt = load_attempt(transaction, attachment.attempt_id)?.ok_or_else(|| {
+    let attempt = load_attempt(connection, attachment.attempt_id)?.ok_or_else(|| {
         StorageError::InvalidData("workflow source attachment references a missing attempt".into())
     })?;
     let task_contract = load_task_contract(
-        transaction,
+        connection,
         attachment.task_contract.id,
         attachment.task_contract.version,
     )?
@@ -1888,7 +2043,7 @@ fn load_agent_turn_workflow_attachment(
     })?;
     validate_workflow_source_attachment(&task_contract, &attempt, &attachment)?;
     let creation_event =
-        load_event_by_idempotency(transaction, attempt.workflow_id, &attempt.idempotency_key)?
+        load_event_by_idempotency(connection, attempt.workflow_id, &attempt.idempotency_key)?
             .ok_or_else(|| {
                 StorageError::InvalidData(
                     "workflow source attachment references a missing creation event".into(),
@@ -2535,8 +2690,10 @@ mod tests {
         PlanningRequest, RoleKind, SuccessCondition, TaskComplexity,
     };
     use mcg_contracts::{
-        ConfigurationId, ContractClause, HashAlgorithm, PolicyBinding, RetryPolicy, SourceRef,
-        VersionedRef, WORKFLOW_SOURCE_SNAPSHOT_HASH_DOMAIN, WaitReason,
+        ConfigurationId, ContextManifest, ContextManifestId, ContextSelection, ContractClause,
+        HashAlgorithm, InvocationManifest, ModelRun, ModelRunId, ModelRunState, PolicyBinding,
+        RetryPolicy, RuntimeIdentity, RuntimeInstanceId, SourceRef, VersionedRef,
+        WORKFLOW_SOURCE_SNAPSHOT_HASH_DOMAIN, WaitReason,
     };
     use mcg_domain::{AgentInstanceId, RunId};
     use mcg_providers::{
@@ -3131,6 +3288,138 @@ mod tests {
             store.workflow_events(verifying.workflow_id).unwrap().len(),
             6
         );
+        assert!(matches!(
+            store.agent_turn_verification_targets(run.id),
+            Err(StorageError::Conflict(_))
+        ));
+
+        let evidence_source = SourceRef {
+            source_type: StableTypeId::parse("test.compatibility_work_source.v1").unwrap(),
+            locator: lease.id.to_string(),
+            content_hash: hash("compatibility-work-source"),
+        };
+        let context = ContextManifest {
+            id: ContextManifestId::new(),
+            attempt_id: verifying.attempt_id,
+            selected_sources: vec![ContextSelection {
+                source: evidence_source.clone(),
+                perspective: None,
+                influence: VersionedPayload::canonical_v1(
+                    StableTypeId::parse("test.compatibility_influence.v1").unwrap(),
+                    &serde_json::json!({"influence": "trusted"}),
+                )
+                .unwrap(),
+                transformations: Vec::new(),
+                placement: 0,
+                approximate_tokens: 1,
+            }],
+            selection_policy: VersionedPayload::canonical_v1(
+                StableTypeId::parse("test.compatibility_context_policy.v1").unwrap(),
+                &serde_json::json!({"maximum_tokens": 1}),
+            )
+            .unwrap(),
+            expansion_steps: Vec::new(),
+            approximate_tokens: 1,
+        };
+        let context_hash = store
+            .persist_context_manifest(&context, observed_at)
+            .expect("persist compatibility context");
+        let runtime_build = hash("compatibility-runtime-build");
+        let invocation = InvocationManifest {
+            id: InvocationId::new(),
+            role: InvocationRole::Work,
+            attempt_id: verifying.attempt_id,
+            task_contract: verifying.task_contract.clone(),
+            runtime_identity: RuntimeIdentity {
+                instance_id: RuntimeInstanceId::new(),
+                build_hash: runtime_build.clone(),
+                protocol_version: mcg_contracts::PROTOCOL_V1,
+                started_at: observed_at,
+            },
+            cognitive_configuration: hash("compatibility-cognition"),
+            role_manifest: hash("compatibility-work-role"),
+            prompt_bundle: hash("compatibility-prompt"),
+            context_manifest: context_hash,
+            model_route: VersionedPayload::canonical_v1(
+                StableTypeId::parse("test.compatibility_model_route.v1").unwrap(),
+                &serde_json::json!({"route": "fixture"}),
+            )
+            .unwrap(),
+            resolved_provider: evidence_source.clone(),
+            resolved_model: evidence_source.clone(),
+            observed_model_fingerprint: Some("fixture-v1".into()),
+            sampling: VersionedPayload::canonical_v1(
+                StableTypeId::parse("test.compatibility_sampling.v1").unwrap(),
+                &serde_json::json!({"temperature": 0}),
+            )
+            .unwrap(),
+            reasoning: None,
+            available_tool_manifests: Vec::new(),
+            selected_skill_manifests: Vec::new(),
+            authority_envelope: evidence_source.clone(),
+            egress_permit: None,
+            repository_revision: None,
+            environment: evidence_source,
+            runtime_build,
+            request_hash: hash("compatibility-request"),
+            response_hash: None,
+        };
+        store
+            .persist_invocation_manifest(&invocation, observed_at)
+            .expect("persist compatibility Work invocation");
+        let planned_run = ModelRun {
+            id: ModelRunId::new(),
+            invocation_id: invocation.id,
+            role: InvocationRole::Work,
+            state: ModelRunState::Planned,
+            provider_request_id: None,
+            response_artifact: None,
+            usage: None,
+            started_at: observed_at,
+            finished_at: None,
+        };
+        store
+            .create_model_run(&planned_run, observed_at)
+            .expect("plan compatibility Work invocation");
+        let mut dispatched_run = planned_run.clone();
+        dispatched_run.state = ModelRunState::Dispatched;
+        dispatched_run.provider_request_id = Some("fixture-request".into());
+        store
+            .transition_model_run(&dispatched_run, 1, observed_at)
+            .expect("dispatch compatibility Work invocation");
+        let work_response_hash = hash("compatibility-response");
+        let mut completed_run = dispatched_run;
+        completed_run.state = ModelRunState::Completed;
+        completed_run.response_artifact = Some(ArtifactRef {
+            content_hash: work_response_hash.clone(),
+            media_type: "application/json".into(),
+            byte_length: 32,
+        });
+        completed_run.finished_at = Some(observed_at + chrono::Duration::seconds(5));
+        store
+            .transition_model_run(
+                &completed_run,
+                2,
+                observed_at + chrono::Duration::seconds(5),
+            )
+            .expect("complete compatibility Work invocation");
+        let targets = store
+            .agent_turn_verification_targets(run.id)
+            .expect("load exact compatibility verification target");
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].lease_id, lease.id);
+        assert_eq!(targets[0].work_item_id, plan.items[0].id);
+        assert_eq!(
+            targets[0].success_conditions,
+            plan.items[0].success_conditions
+        );
+        assert_eq!(targets[0].attempt, verifying);
+        assert_eq!(targets[0].work_invocations, vec![invocation.id]);
+        assert_eq!(
+            targets[0].work_artifacts[0].content_hash,
+            work_response_hash
+        );
+        assert_eq!(targets[0].work_response_hash, work_response_hash);
 
         let stale_instance = AgentInstance {
             id: AgentInstanceId::new(),

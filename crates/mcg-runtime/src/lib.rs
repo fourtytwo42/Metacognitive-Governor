@@ -149,13 +149,15 @@ use mcg_providers::{
 };
 use mcg_storage::{
     ActionAuthorizationReceipt, ActionExecutionRecoveryReport, AgentRecoveryReport,
-    AgentTurnDisposition, AgentTurnWorkflowAttachment, AgentTurnWorkflowAuthority, BackupMcpSecret,
-    BackupProviderSecret, BackupSecretSnapshot, DataDirectoryLock, ModelEgressAuthorizationReceipt,
+    AgentTurnDisposition, AgentTurnVerificationTarget, AgentTurnWorkflowAttachment,
+    AgentTurnWorkflowAuthority, BackupMcpSecret, BackupProviderSecret, BackupSecretSnapshot,
+    ConsumerEvaluationCompletion, DataDirectoryLock, ModelEgressAuthorizationReceipt,
     ModelSecretHandleBinding, ReconciliationClaimReceipt, ReconciliationRecoveryReport,
     ReconciliationResolutionReceipt, RecoveryReport, RootMigrationReceipt, RootOwnership,
     RuntimeResponseArtifact, STORAGE_SCHEMA_VERSION, SqliteEventStore, StorageError,
     WorkflowRecoveryReport, acquire_data_directory_lock,
     create_encrypted_backup_bundle_from_snapshot, decrypt_backup_bundle_secrets,
+    evaluation_report_source_ref,
 };
 pub use mcg_storage::{
     AgentTurnCommit, AutomaticExperimentDisposition, AutomaticExperimentOutcome,
@@ -1469,6 +1471,18 @@ pub trait ProtectedAgentModelDispatcher: Send + Sync {
         target: &ProviderModelRef,
         request: ModelRequest,
     ) -> Result<ModelResponse, ProviderError>;
+}
+
+/// Root-installed independent verification boundary for compatibility-agent Work.
+///
+/// Runtime supplies only a prepared immutable evaluation report and exact completed Work targets.
+/// Protected Root owns the Verify process, invocation evidence, and certificate construction.
+#[async_trait]
+pub trait ProtectedCompatibilityVerifier: Send + Sync {
+    async fn verify_consumer_evaluation(
+        &self,
+        evaluation_id: EvaluationId,
+    ) -> Result<Vec<ConsumerEvaluationCompletion>, String>;
 }
 
 enum ProtectedProviderCredentialSnapshot {
@@ -3430,6 +3444,7 @@ pub struct AppRuntime {
     plugin_runner: Option<Arc<dyn PluginRunnerGateway>>,
     plugin_trust: Arc<PluginTrustStore>,
     protected_agent_models: Arc<RwLock<Option<Arc<dyn ProtectedAgentModelDispatcher>>>>,
+    protected_compatibility_verifier: Arc<RwLock<Option<Arc<dyn ProtectedCompatibilityVerifier>>>>,
     _ephemeral_data_directory: Option<tempfile::TempDir>,
 }
 
@@ -4029,6 +4044,61 @@ impl AppRuntime {
             maximum_lease_seconds,
             now,
         )?)
+    }
+
+    /// Root-only load of exact completed compatibility Work evidence awaiting Verify.
+    ///
+    /// # Errors
+    /// Returns a runtime error for malformed or stale attachment, plan, invocation, or response
+    /// evidence.
+    pub fn root_agent_turn_verification_targets(
+        &self,
+        run_id: RunId,
+    ) -> Result<Vec<AgentTurnVerificationTarget>, RuntimeError> {
+        Ok(self.store()?.agent_turn_verification_targets(run_id)?)
+    }
+
+    /// Computes the canonical immutable reference for a prepared evaluation report.
+    ///
+    /// # Errors
+    /// Returns a runtime error when the report cannot be canonically encoded.
+    pub fn root_evaluation_report_source_ref(
+        &self,
+        report: &EvaluationReport,
+    ) -> Result<SourceRef, RuntimeError> {
+        Ok(evaluation_report_source_ref(report)?)
+    }
+
+    /// Root-only load of one immutable prepared objective-evaluation report.
+    ///
+    /// # Errors
+    /// Returns a runtime error when durable report evidence cannot be read.
+    pub fn root_prepared_consumer_evaluation(
+        &self,
+        evaluation_id: EvaluationId,
+    ) -> Result<Option<EvaluationReport>, RuntimeError> {
+        let store = self.store()?;
+        let Some(report) = store.evaluation(evaluation_id)? else {
+            return Ok(None);
+        };
+        let checkpoint = store
+            .consumer_evaluation_checkpoint(report.task_id)?
+            .ok_or_else(|| {
+                StorageError::Conflict(
+                    "prepared evaluation report has no durable checkpoint".into(),
+                )
+            })?;
+        if checkpoint.state != ConsumerEvaluationCheckpointState::Verifying
+            || checkpoint.prepared_evaluation_id != Some(report.id)
+            || checkpoint.prepared_evaluated_at != Some(report.evaluated_at)
+            || checkpoint.run_id != report.run_id
+        {
+            return Err(StorageError::Conflict(
+                "evaluation report is not the exact current prepared Verify evidence".into(),
+            )
+            .into());
+        }
+        Ok(Some(report))
     }
 
     /// Loads one canonical workflow with its exact TaskContract and ordered event history.
@@ -4877,6 +4947,7 @@ impl AppRuntime {
             plugin_runner: package_plugin_runner(),
             plugin_trust: Arc::new(plugin_trust),
             protected_agent_models: Arc::new(RwLock::new(None)),
+            protected_compatibility_verifier: Arc::new(RwLock::new(None)),
             _ephemeral_data_directory: ephemeral_data_directory,
         };
         runtime.reconcile_cloud_diff_apply_recovery()?;
@@ -20630,6 +20701,28 @@ impl AppRuntime {
         Ok(())
     }
 
+    /// Installs the sole Protected Root independent verifier for compatibility-agent Work.
+    ///
+    /// # Errors
+    /// Returns a conflict when a verifier was already installed or the lock is poisoned.
+    pub fn install_protected_compatibility_verifier(
+        &self,
+        verifier: Arc<dyn ProtectedCompatibilityVerifier>,
+    ) -> Result<(), RuntimeError> {
+        let mut slot = self
+            .protected_compatibility_verifier
+            .write()
+            .map_err(|_| RuntimeError::StorageLock)?;
+        if slot.is_some() {
+            return Err(StorageError::Conflict(
+                "Protected Root compatibility verifier is already installed".into(),
+            )
+            .into());
+        }
+        *slot = Some(verifier);
+        Ok(())
+    }
+
     fn agent_provider_gateway(
         &self,
         lease_id: AgentLeaseId,
@@ -23000,6 +23093,8 @@ impl AppRuntime {
                 next_condition_index: 0,
                 attempt: 0,
                 request_id: None,
+                prepared_evaluation_id: None,
+                prepared_evaluated_at: None,
                 batch_approved: false,
                 results: Vec::new(),
                 evidence: Vec::new(),
@@ -23009,9 +23104,19 @@ impl AppRuntime {
                 executed: 0,
                 updated_at: Utc::now(),
             });
+        let checkpoint_is_evaluating = matches!(
+            checkpoint.state,
+            ConsumerEvaluationCheckpointState::Running
+                | ConsumerEvaluationCheckpointState::Verifying
+        );
+        let prepared_identity_valid = checkpoint.state
+            != ConsumerEvaluationCheckpointState::Verifying
+            || (checkpoint.prepared_evaluation_id.is_some()
+                && checkpoint.prepared_evaluated_at.is_some());
         if checkpoint.run_id != run_id
             || checkpoint.project_snapshot_id != project.id
-            || checkpoint.state != ConsumerEvaluationCheckpointState::Running
+            || !checkpoint_is_evaluating
+            || !prepared_identity_valid
             || checkpoint.next_condition_index > conditions.len()
         {
             return Err(StorageError::Conflict(
@@ -23702,9 +23807,18 @@ impl AppRuntime {
             checkpoint.executed,
         )
         .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        if checkpoint.state == ConsumerEvaluationCheckpointState::Running {
+            let prepared_at = Utc::now();
+            checkpoint.state = ConsumerEvaluationCheckpointState::Verifying;
+            checkpoint.prepared_evaluation_id = Some(mcg_domain::EvaluationId::new());
+            checkpoint.prepared_evaluated_at = Some(prepared_at);
+            checkpoint.updated_at = prepared_at;
+        }
         let report = EvaluationReport {
             schema_version: AGENT_RUN_SCHEMA_VERSION,
-            id: mcg_domain::EvaluationId::new(),
+            id: checkpoint.prepared_evaluation_id.ok_or_else(|| {
+                StorageError::Conflict("prepared evaluation identity is missing".into())
+            })?,
             run_id,
             task_id,
             evaluator_instance_id: Some(evaluator_instance_id),
@@ -23713,11 +23827,45 @@ impl AppRuntime {
             confidence,
             regressions: checkpoint.regressions.clone(),
             evidence: checkpoint.evidence.clone(),
-            evaluated_at: Utc::now(),
+            evaluated_at: checkpoint.prepared_evaluated_at.ok_or_else(|| {
+                StorageError::Conflict("prepared evaluation timestamp is missing".into())
+            })?,
         };
-        let events = self
+        let prepared_events = self
             .store()?
-            .settle_consumer_evaluation(&report, &checkpoint)?;
+            .prepare_consumer_evaluation(&report, &checkpoint)?;
+        for event in prepared_events {
+            let _ = self.event_sender.send(event);
+        }
+        let verification_targets = self.root_agent_turn_verification_targets(run_id)?;
+        let completions = if verification_targets.is_empty() {
+            Vec::new()
+        } else {
+            let verifier = self
+                .protected_compatibility_verifier
+                .read()
+                .map_err(|_| RuntimeError::StorageLock)?
+                .clone()
+                .ok_or_else(|| {
+                    StorageError::Conflict(
+                        "Protected Root compatibility verifier is unavailable; canonical Work cannot settle without independent Verify"
+                            .into(),
+                    )
+                })?;
+            verifier
+                .verify_consumer_evaluation(report.id)
+                .await
+                .map_err(|error| {
+                    StorageError::Conflict(format!(
+                        "Protected Root compatibility verification failed: {error}"
+                    ))
+                })?
+        };
+        let events = self.store()?.settle_consumer_evaluation_with_completions(
+            &report,
+            &checkpoint,
+            &completions,
+        )?;
         for event in events {
             let _ = self.event_sender.send(event);
         }
@@ -33146,6 +33294,8 @@ mod tests {
             next_condition_index: 1,
             attempt: 0,
             request_id: None,
+            prepared_evaluation_id: None,
+            prepared_evaluated_at: None,
             batch_approved: false,
             results: vec![result],
             evidence: Vec::new(),
@@ -33160,11 +33310,53 @@ mod tests {
             .expect("store")
             .save_consumer_evaluation_checkpoint(&checkpoint)
             .expect("checkpoint");
-        runtime
-            .store()
-            .expect("store")
-            .settle_consumer_evaluation(&report, &checkpoint)
-            .expect("settle");
+        let mut prepared = checkpoint;
+        prepared.state = ConsumerEvaluationCheckpointState::Verifying;
+        prepared.prepared_evaluation_id = Some(report.id);
+        prepared.prepared_evaluated_at = Some(report.evaluated_at);
+        let report_source = runtime
+            .root_evaluation_report_source_ref(&report)
+            .expect("canonical evaluation source");
+        assert_eq!(
+            report_source.source_type.as_str(),
+            "mcg.evaluation_report.v1"
+        );
+        assert_eq!(report_source.locator, report.id.to_string());
+        let mut store = runtime.store().expect("store");
+        let prepared_events = store
+            .prepare_consumer_evaluation(&report, &prepared)
+            .expect("prepare immutable evaluation");
+        assert_eq!(prepared_events.len(), 2);
+        assert!(
+            store
+                .prepare_consumer_evaluation(&report, &prepared)
+                .expect("exact preparation replay")
+                .is_empty()
+        );
+        drop(store);
+        assert_eq!(
+            runtime
+                .root_prepared_consumer_evaluation(report.id)
+                .expect("load exact prepared report"),
+            Some(report.clone())
+        );
+        let mut store = runtime.store().expect("store");
+        store
+            .settle_consumer_evaluation(&report, &prepared)
+            .expect("settle prepared evaluation");
+        drop(store);
+        assert!(
+            runtime
+                .root_prepared_consumer_evaluation(report.id)
+                .is_err(),
+            "terminal settlement fences stale Verify dispatch"
+        );
+        assert_eq!(
+            runtime
+                .root_evaluation_report_source_ref(&report)
+                .expect("stable evaluation source"),
+            report_source
+        );
 
         std::fs::write(root.path().join("pnpm-lock.yaml"), "lockfileVersion: '9.0'")
             .expect("new lockfile");

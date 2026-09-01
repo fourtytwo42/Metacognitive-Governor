@@ -704,51 +704,16 @@ impl SqliteEventStore {
         expected_generation: u64,
         persisted_at: DateTime<Utc>,
     ) -> Result<(ContentHash, WorkflowAttempt), StorageError> {
-        certificate
-            .validate()
-            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
         let transaction = self.connection.transaction()?;
-        let attempt = load_attempt(&transaction, certificate.attempt_id)?.ok_or(
-            StorageError::WorkflowAttemptNotFound(certificate.attempt_id),
-        )?;
-        let next_state = match certificate.verdict {
-            CompletionVerdict::Satisfied => WorkflowState::Succeeded,
-            CompletionVerdict::NotSatisfied | CompletionVerdict::Inconclusive => {
-                WorkflowState::Failed
-            }
-            CompletionVerdict::Cancelled => {
-                return Err(StorageError::Conflict(
-                    "a cancelled certificate cannot bypass cancellation settlement".into(),
-                ));
-            }
-        };
-        let current_verifying_authority = attempt.revision == expected_revision
-            && attempt.lease_generation == expected_generation
-            && attempt.state == WorkflowState::Verifying;
-        let exact_terminal_replay = attempt.state == next_state;
-        if attempt.workflow_id != certificate.workflow_id
-            || attempt.task_contract != certificate.task_contract
-            || (!current_verifying_authority && !exact_terminal_replay)
-        {
-            return Err(StorageError::Conflict(
-                "completion certificate does not bind the current verifying workflow or its exact terminal replay"
-                    .into(),
-            ));
-        }
-        let hash =
-            persist_completion_certificate_in_transaction(&transaction, certificate, persisted_at)?;
-        let settled = transition_workflow_attempt_in_transaction(
+        let result = commit_completion_certificate_in_transaction(
             &transaction,
-            certificate.attempt_id,
+            certificate,
             expected_revision,
             expected_generation,
-            next_state,
-            CorrelationId::new(),
-            &format!("runtime-completion:{}", certificate.id),
             persisted_at,
         )?;
         transaction.commit()?;
-        Ok((hash, settled))
+        Ok(result)
     }
 
     /// Loads one exact immutable completion certificate.
@@ -770,6 +735,56 @@ impl SqliteEventStore {
             .map(|json| Ok(serde_json::from_str(&json)?))
             .transpose()
     }
+}
+
+pub(crate) fn commit_completion_certificate_in_transaction(
+    transaction: &Transaction<'_>,
+    certificate: &CompletionCertificate,
+    expected_revision: u64,
+    expected_generation: u64,
+    persisted_at: DateTime<Utc>,
+) -> Result<(ContentHash, WorkflowAttempt), StorageError> {
+    certificate
+        .validate()
+        .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+    let attempt = load_attempt(transaction, certificate.attempt_id)?.ok_or(
+        StorageError::WorkflowAttemptNotFound(certificate.attempt_id),
+    )?;
+    let next_state = match certificate.verdict {
+        CompletionVerdict::Satisfied => WorkflowState::Succeeded,
+        CompletionVerdict::NotSatisfied | CompletionVerdict::Inconclusive => WorkflowState::Failed,
+        CompletionVerdict::Cancelled => {
+            return Err(StorageError::Conflict(
+                "a cancelled certificate cannot bypass cancellation settlement".into(),
+            ));
+        }
+    };
+    let current_verifying_authority = attempt.revision == expected_revision
+        && attempt.lease_generation == expected_generation
+        && attempt.state == WorkflowState::Verifying;
+    let exact_terminal_replay = attempt.state == next_state;
+    if attempt.workflow_id != certificate.workflow_id
+        || attempt.task_contract != certificate.task_contract
+        || (!current_verifying_authority && !exact_terminal_replay)
+    {
+        return Err(StorageError::Conflict(
+            "completion certificate does not bind the current verifying workflow or its exact terminal replay"
+                .into(),
+        ));
+    }
+    let hash =
+        persist_completion_certificate_in_transaction(transaction, certificate, persisted_at)?;
+    let settled = transition_workflow_attempt_in_transaction(
+        transaction,
+        certificate.attempt_id,
+        expected_revision,
+        expected_generation,
+        next_state,
+        CorrelationId::new(),
+        &format!("runtime-completion:{}", certificate.id),
+        persisted_at,
+    )?;
+    Ok((hash, settled))
 }
 
 fn persist_completion_certificate_in_transaction(

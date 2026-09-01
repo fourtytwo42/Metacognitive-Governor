@@ -8,6 +8,9 @@ use mcg_agents::{
     OrganizationAssignments, OrganizationGenome, OrganizationalMetrics, ShadowWorkspaceState,
     UsageKind, WorkPlan,
 };
+use mcg_contracts::{
+    CompletionCertificate, CompletionVerdict, SourceRef, StableTypeId, VersionedPayload,
+};
 use mcg_domain::{
     AgentInstanceId, AgentLeaseId, ExperimentId, OrganizationId, OrganizationRevisionId,
     ProjectSnapshotId, RunId, TaskEnvelope, TaskId, TaskState, ToolRequestId,
@@ -19,8 +22,33 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     SqliteEventStore, StorageError,
-    workflows::{AgentTurnWorkflowSettlement, settle_attached_agent_turn_workflow_in_transaction},
+    invocations::commit_completion_certificate_in_transaction,
+    workflows::{
+        AgentTurnVerificationTarget, AgentTurnWorkflowSettlement,
+        settle_attached_agent_turn_workflow_in_transaction,
+    },
 };
+
+const EVALUATION_REPORT_HASH_DOMAIN: &str = "MetaCog.EvaluationReport";
+
+/// Produces the immutable content-addressed reference consumed by independent Verify.
+///
+/// # Errors
+/// Returns an error when the report cannot be represented by canonical v1 evidence.
+pub fn evaluation_report_source_ref(report: &EvaluationReport) -> Result<SourceRef, StorageError> {
+    let source_type = StableTypeId::parse("mcg.evaluation_report.v1")
+        .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+    let payload =
+        VersionedPayload::canonical_v1(source_type.clone(), &serde_json::to_value(report)?)
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+    Ok(SourceRef {
+        source_type,
+        locator: report.id.to_string(),
+        content_hash: payload
+            .content_hash(EVALUATION_REPORT_HASH_DOMAIN)
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?,
+    })
+}
 
 fn ensure_assignable_organization(
     store: &SqliteEventStore,
@@ -99,6 +127,7 @@ pub struct AgentResumeReceipt {
 pub enum ConsumerEvaluationCheckpointState {
     Running,
     WaitingForApproval,
+    Verifying,
     Blocked,
     Completed,
 }
@@ -114,6 +143,10 @@ pub struct ConsumerEvaluationCheckpoint {
     pub attempt: u16,
     pub request_id: Option<ToolRequestId>,
     #[serde(default)]
+    pub prepared_evaluation_id: Option<mcg_domain::EvaluationId>,
+    #[serde(default)]
+    pub prepared_evaluated_at: Option<DateTime<Utc>>,
+    #[serde(default)]
     pub batch_approved: bool,
     pub results: Vec<mcg_agents::ConditionResult>,
     pub evidence: Vec<mcg_agents::EvaluationEvidence>,
@@ -123,6 +156,15 @@ pub struct ConsumerEvaluationCheckpoint {
     pub unsupported: u32,
     pub executed: u32,
     pub updated_at: DateTime<Utc>,
+}
+
+/// Root-produced independent verification certificate bound to one compatibility lease fence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConsumerEvaluationCompletion {
+    pub lease_id: AgentLeaseId,
+    pub certificate: CompletionCertificate,
+    pub expected_revision: u64,
+    pub expected_generation: u64,
 }
 
 impl SqliteEventStore {
@@ -152,6 +194,8 @@ impl SqliteEventStore {
     ) -> Result<EventEnvelope, StorageError> {
         if checkpoint.schema_version != AGENT_RUN_SCHEMA_VERSION
             || checkpoint.state != ConsumerEvaluationCheckpointState::Running
+            || checkpoint.prepared_evaluation_id.is_some()
+            || checkpoint.prepared_evaluated_at.is_some()
             || self.task_launch_run_id(checkpoint.task_id)? != Some(checkpoint.run_id)
         {
             return Err(StorageError::InvalidData(
@@ -293,6 +337,8 @@ impl SqliteEventStore {
         task.updated_at = at;
         checkpoint.state = ConsumerEvaluationCheckpointState::Running;
         checkpoint.request_id = None;
+        checkpoint.prepared_evaluation_id = None;
+        checkpoint.prepared_evaluated_at = None;
         checkpoint.batch_approved = true;
         checkpoint.updated_at = at;
         let previous_run = run.state;
@@ -383,6 +429,8 @@ impl SqliteEventStore {
         task.updated_at = at;
         checkpoint.state = ConsumerEvaluationCheckpointState::Running;
         checkpoint.request_id = None;
+        checkpoint.prepared_evaluation_id = None;
+        checkpoint.prepared_evaluated_at = None;
         checkpoint.batch_approved = false;
         checkpoint.updated_at = at;
         let previous_run = run.state;
@@ -3345,6 +3393,119 @@ impl SqliteEventStore {
         )
     }
 
+    /// Atomically freezes the stable objective report and its resumable Verifying checkpoint
+    /// before any independent verifier can consume that evidence.
+    ///
+    /// # Errors
+    /// Returns an error for incomplete work, stale task/run/checkpoint state, report identity
+    /// substitution, an existing different report, or transaction failure.
+    #[allow(clippy::too_many_lines)] // Keep the report/checkpoint evidence fence auditable.
+    pub fn prepare_consumer_evaluation(
+        &mut self,
+        report: &EvaluationReport,
+        checkpoint: &ConsumerEvaluationCheckpoint,
+    ) -> Result<Vec<EventEnvelope>, StorageError> {
+        let (run, plan) = self.validate_evaluation_report(report)?;
+        if checkpoint.task_id != report.task_id
+            || checkpoint.run_id != report.run_id
+            || checkpoint.state != ConsumerEvaluationCheckpointState::Verifying
+            || checkpoint.prepared_evaluation_id != Some(report.id)
+            || checkpoint.prepared_evaluated_at != Some(report.evaluated_at)
+            || checkpoint.request_id.is_some()
+        {
+            return Err(StorageError::Conflict(
+                "prepared evaluation report does not match its Verifying checkpoint".into(),
+            ));
+        }
+        if self.task_launch_run_id(report.task_id)? != Some(run.id) {
+            return Err(StorageError::Conflict(
+                "prepared evaluation run is not the task's consumer launch".into(),
+            ));
+        }
+        let task = self
+            .load_task(report.task_id)?
+            .ok_or(StorageError::TaskNotFound(report.task_id))?;
+        if task.state != TaskState::Active || run.state != AgentRunState::Running {
+            return Err(StorageError::Conflict(
+                "prepared evaluation requires an active task and running run".into(),
+            ));
+        }
+        let completed_work = self
+            .read_json_rows::<AgentLease>(
+                "SELECT agent_leases.lease_json FROM agent_leases
+                 INNER JOIN agent_instances
+                    ON agent_instances.instance_id = agent_leases.instance_id
+                 WHERE agent_instances.run_id = ?1 AND agent_leases.state = 'completed'",
+                &run.id.to_string(),
+            )?
+            .into_iter()
+            .map(|lease| lease.work_item_id)
+            .collect::<std::collections::BTreeSet<_>>();
+        if !plan
+            .items
+            .iter()
+            .all(|item| completed_work.contains(&item.id))
+        {
+            return Err(StorageError::Conflict(
+                "consumer evaluation cannot be prepared before every planned turn completes".into(),
+            ));
+        }
+        let current = self
+            .consumer_evaluation_checkpoint(report.task_id)?
+            .ok_or_else(|| StorageError::Conflict("consumer checkpoint is missing".into()))?;
+        let exact_replay = current == *checkpoint;
+        let mut expected_running = checkpoint.clone();
+        expected_running.state = ConsumerEvaluationCheckpointState::Running;
+        expected_running.prepared_evaluation_id = None;
+        expected_running.prepared_evaluated_at = None;
+        expected_running.updated_at = current.updated_at;
+        if exact_replay {
+            let existing = self.evaluation(report.id)?.ok_or_else(|| {
+                StorageError::Conflict("prepared evaluation report disappeared".into())
+            })?;
+            if existing != *report {
+                return Err(StorageError::Conflict(
+                    "prepared evaluation identity was replayed with different content".into(),
+                ));
+            }
+            return Ok(Vec::new());
+        }
+        if current != expected_running {
+            return Err(StorageError::Conflict(
+                "consumer evaluation checkpoint changed before report preparation".into(),
+            ));
+        }
+        if self.evaluation(report.id)?.is_some() {
+            return Err(StorageError::Conflict(
+                "prepared evaluation identity already belongs to a different checkpoint".into(),
+            ));
+        }
+
+        let transaction = self.connection.transaction()?;
+        let inserted = insert_or_validate_evaluation(&transaction, report)?;
+        upsert_consumer_evaluation_checkpoint(&transaction, checkpoint)?;
+        let mut events = vec![Self::insert_event(
+            &transaction,
+            &EventEnvelope::new(
+                EventKind::EvaluationCheckpointed,
+                Some(report.task_id),
+                serde_json::to_value(checkpoint)?,
+            ),
+        )?];
+        if inserted {
+            events.push(Self::insert_event(
+                &transaction,
+                &EventEnvelope::new(
+                    EventKind::EvaluationRecorded,
+                    Some(report.task_id),
+                    serde_json::to_value(report)?,
+                ),
+            )?);
+        }
+        transaction.commit()?;
+        Ok(events)
+    }
+
     /// Atomically records objective evaluation evidence and settles the
     /// consumer task/run projection from that evidence.
     ///
@@ -3355,16 +3516,34 @@ impl SqliteEventStore {
     ///
     /// Returns an error unless this is a running launched task whose every
     /// planned work item has completed durable agent authority.
-    #[allow(clippy::too_many_lines)] // Evidence and all terminal projections are one transaction.
     pub fn settle_consumer_evaluation(
         &mut self,
         report: &EvaluationReport,
         checkpoint: &ConsumerEvaluationCheckpoint,
     ) -> Result<Vec<EventEnvelope>, StorageError> {
+        self.settle_consumer_evaluation_with_completions(report, checkpoint, &[])
+    }
+
+    /// Atomically settles objective evaluation together with every attached compatibility
+    /// workflow certificate and terminal transition.
+    ///
+    /// # Errors
+    /// Returns an error for missing, duplicate, stale, substituted, or report-inconsistent
+    /// completion evidence, or any ordinary consumer evaluation settlement failure.
+    #[allow(clippy::too_many_lines)] // Evidence and all terminal projections are one transaction.
+    pub fn settle_consumer_evaluation_with_completions(
+        &mut self,
+        report: &EvaluationReport,
+        checkpoint: &ConsumerEvaluationCheckpoint,
+        completions: &[ConsumerEvaluationCompletion],
+    ) -> Result<Vec<EventEnvelope>, StorageError> {
         let (mut run, plan) = self.validate_evaluation_report(report)?;
+        let prepared_matches = checkpoint.state == ConsumerEvaluationCheckpointState::Verifying
+            && checkpoint.prepared_evaluation_id == Some(report.id)
+            && checkpoint.prepared_evaluated_at == Some(report.evaluated_at);
         if checkpoint.task_id != report.task_id
             || checkpoint.run_id != report.run_id
-            || checkpoint.state != ConsumerEvaluationCheckpointState::Running
+            || (checkpoint.state != ConsumerEvaluationCheckpointState::Running && !prepared_matches)
         {
             return Err(StorageError::Conflict(
                 "evaluation report does not match its running checkpoint".into(),
@@ -3404,7 +3583,13 @@ impl SqliteEventStore {
                 "consumer evaluation cannot settle before every planned turn completes".into(),
             ));
         }
-        let at = report.evaluated_at;
+        let verification_targets = self.agent_turn_verification_targets(run.id)?;
+        validate_consumer_evaluation_completions(report, &verification_targets, completions)?;
+        let at = completions
+            .iter()
+            .map(|completion| completion.certificate.issued_at)
+            .max()
+            .unwrap_or(report.evaluated_at);
         let previous_run = run.state;
         let next_task = match report.outcome {
             mcg_agents::EvaluationOutcome::Passed => {
@@ -3423,18 +3608,16 @@ impl SqliteEventStore {
         task.transition_to(next_task)?;
         task.updated_at = at;
         let transaction = self.connection.transaction()?;
-        transaction.execute(
-            "INSERT INTO evaluations(
-                evaluation_id, run_id, task_id, evaluation_json, evaluated_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![
-                report.id.to_string(),
-                report.run_id.to_string(),
-                report.task_id.to_string(),
-                serde_json::to_string(report)?,
-                at.to_rfc3339(),
-            ],
-        )?;
+        for completion in completions {
+            commit_completion_certificate_in_transaction(
+                &transaction,
+                &completion.certificate,
+                completion.expected_revision,
+                completion.expected_generation,
+                at,
+            )?;
+        }
+        let evaluation_inserted = insert_or_validate_evaluation(&transaction, report)?;
         let mut events = Vec::new();
         if report.outcome == mcg_agents::EvaluationOutcome::Inconclusive {
             let mut blocked = checkpoint.clone();
@@ -3458,14 +3641,16 @@ impl SqliteEventStore {
             completed.updated_at = at;
             upsert_consumer_evaluation_checkpoint(&transaction, &completed)?;
         }
-        events.push(Self::insert_event(
-            &transaction,
-            &EventEnvelope::new(
-                EventKind::EvaluationRecorded,
-                Some(report.task_id),
-                serde_json::to_value(report)?,
-            ),
-        )?);
+        if evaluation_inserted {
+            events.push(Self::insert_event(
+                &transaction,
+                &EventEnvelope::new(
+                    EventKind::EvaluationRecorded,
+                    Some(report.task_id),
+                    serde_json::to_value(report)?,
+                ),
+            )?);
+        }
         if run.state != previous_run {
             let changed = transaction.execute(
                 "UPDATE agent_runs SET state = ?1, run_json = ?2, updated_at = ?3,
@@ -3960,12 +4145,131 @@ fn upsert_consumer_evaluation_checkpoint(
     Ok(())
 }
 
+fn insert_or_validate_evaluation(
+    transaction: &Transaction<'_>,
+    report: &EvaluationReport,
+) -> Result<bool, StorageError> {
+    if let Some(existing_json) = transaction
+        .query_row(
+            "SELECT evaluation_json FROM evaluations WHERE evaluation_id = ?1",
+            [report.id.to_string()],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+    {
+        let existing: EvaluationReport = serde_json::from_str(&existing_json)?;
+        if existing != *report {
+            return Err(StorageError::Conflict(
+                "evaluation identity was replayed with different content".into(),
+            ));
+        }
+        return Ok(false);
+    }
+    transaction.execute(
+        "INSERT INTO evaluations(
+            evaluation_id, run_id, task_id, evaluation_json, evaluated_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![
+            report.id.to_string(),
+            report.run_id.to_string(),
+            report.task_id.to_string(),
+            serde_json::to_string(report)?,
+            report.evaluated_at.to_rfc3339(),
+        ],
+    )?;
+    Ok(true)
+}
+
+fn validate_consumer_evaluation_completions(
+    report: &EvaluationReport,
+    targets: &[AgentTurnVerificationTarget],
+    completions: &[ConsumerEvaluationCompletion],
+) -> Result<(), StorageError> {
+    if targets.len() != completions.len() {
+        return Err(StorageError::Conflict(
+            "consumer evaluation does not contain one certificate for every attached completed turn"
+                .into(),
+        ));
+    }
+    let report_source = evaluation_report_source_ref(report)?;
+    let expected_verdict = match report.outcome {
+        mcg_agents::EvaluationOutcome::Passed => CompletionVerdict::Satisfied,
+        mcg_agents::EvaluationOutcome::Failed => CompletionVerdict::NotSatisfied,
+        mcg_agents::EvaluationOutcome::Inconclusive => CompletionVerdict::Inconclusive,
+    };
+    let mut seen = std::collections::BTreeSet::new();
+    for completion in completions {
+        if !seen.insert(completion.lease_id) {
+            return Err(StorageError::Conflict(
+                "consumer evaluation contains a duplicate compatibility certificate".into(),
+            ));
+        }
+        let target = targets
+            .iter()
+            .find(|target| target.lease_id == completion.lease_id)
+            .ok_or_else(|| {
+                StorageError::Conflict(
+                    "consumer evaluation certificate does not match an attached completed turn"
+                        .into(),
+                )
+            })?;
+        let certificate = &completion.certificate;
+        if completion.expected_revision != target.attempt.revision
+            || completion.expected_generation != target.attempt.lease_generation
+            || certificate.issued_at < report.evaluated_at
+            || certificate.workflow_id != target.attempt.workflow_id
+            || certificate.attempt_id != target.attempt.attempt_id
+            || certificate.task_contract != target.attempt.task_contract
+            || certificate.work_invocations != target.work_invocations
+            || certificate.verdict != expected_verdict
+            || !certificate.evidence_refs.contains(&report_source)
+        {
+            return Err(StorageError::Conflict(
+                "consumer evaluation certificate substituted target, lineage, verdict, or report evidence"
+                    .into(),
+            ));
+        }
+        let expected_criteria = target
+            .task_contract
+            .acceptance_criteria
+            .iter()
+            .enumerate()
+            .map(|(index, clause)| {
+                let passed = target
+                    .success_conditions
+                    .get(index)
+                    .and_then(|condition| {
+                        report
+                            .conditions
+                            .iter()
+                            .find(|result| result.condition == *condition)
+                    })
+                    .is_some_and(|result| result.passed);
+                (clause.clause_id.as_str(), passed)
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        if certificate.criterion_results.len() != expected_criteria.len()
+            || certificate.criterion_results.iter().any(|criterion| {
+                expected_criteria.get(criterion.clause_id.as_str()) != Some(&criterion.passed)
+                    || !criterion.evidence_refs.contains(&report_source)
+            })
+        {
+            return Err(StorageError::Conflict(
+                "consumer evaluation certificate criteria do not match objective report evidence"
+                    .into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 const fn consumer_evaluation_checkpoint_state_name(
     state: ConsumerEvaluationCheckpointState,
 ) -> &'static str {
     match state {
         ConsumerEvaluationCheckpointState::Running => "running",
         ConsumerEvaluationCheckpointState::WaitingForApproval => "waiting_for_approval",
+        ConsumerEvaluationCheckpointState::Verifying => "verifying",
         ConsumerEvaluationCheckpointState::Blocked => "blocked",
         ConsumerEvaluationCheckpointState::Completed => "completed",
     }
@@ -4091,10 +4395,17 @@ mod tests {
         SupervisionEvidence, SupervisionLoop, SupervisionObservation, SupervisionSignal,
         TaskComplexity, UsageKind,
     };
+    use mcg_contracts::{
+        ArtifactRef, CompletionCertificateId, ContentHash, ContextManifest, ContextManifestId,
+        ContextSelection, CorrelationId, CriterionResult, HashAlgorithm, InvocationId,
+        InvocationManifest, InvocationRole, ModelRun, ModelRunId, ModelRunState, RuntimeActorId,
+        RuntimeIdentity, RuntimeInstanceId, WorkflowState,
+    };
     use mcg_domain::{
         AgentInstanceId, AgentLeaseId, EvaluationId, RunId, SupervisionObservationId, TaskBudget,
         UsageRecordId,
     };
+    use sha2::Digest as _;
     use tempfile::tempdir;
 
     #[test]
@@ -4171,6 +4482,375 @@ mod tests {
                 .expect("run row")
                 .state,
             AgentRunState::Cancelled
+        );
+    }
+
+    #[test]
+    #[allow(clippy::similar_names, clippy::too_many_lines)] // Full compatibility authority/evidence chain proves atomic settlement.
+    fn compatibility_certificate_and_legacy_terminal_projection_settle_atomically() {
+        let mut store = SqliteEventStore::open_in_memory().expect("store");
+        let now = Utc::now();
+        let task = TaskEnvelope::new("complete one governed compatibility turn");
+        store.create_task(&task).expect("task");
+        let genome = OrganizationGenome::consumer_default(now);
+        let condition = SuccessCondition::Custom {
+            description: "return independently verified output".into(),
+        };
+        let request = PlanningRequest {
+            run_id: RunId::new(),
+            task: task.clone(),
+            complexity: TaskComplexity::Atomic,
+            work: vec![PlannedWork::atomic(
+                "complete governed Work",
+                RoleKind::Coder,
+                vec![condition.clone()],
+            )],
+            require_independent_evaluation: false,
+        };
+        let plan = ExecutivePlanner::default()
+            .plan(&genome, &request, now)
+            .expect("plan");
+        let run = AgentRun {
+            schema_version: AGENT_RUN_SCHEMA_VERSION,
+            id: request.run_id,
+            task_id: task.id,
+            organization_revision_id: genome.revision_id,
+            state: AgentRunState::Planned,
+            metrics: OrganizationalMetrics::default(),
+            created_at: now,
+            updated_at: now,
+            completed_at: None,
+        };
+        store
+            .launch_task_agent_run(task.id, &genome, &run, &plan)
+            .expect("launch");
+        let instance = AgentInstance {
+            schema_version: AGENT_RUN_SCHEMA_VERSION,
+            id: AgentInstanceId::new(),
+            role_id: plan.items[0].assigned_role,
+            run_id: run.id,
+            task_id: task.id,
+            state: AgentState::Created,
+            model: None,
+            context_fingerprint: "sha256:atomic-compatibility".into(),
+            confidence: ConfidenceEstimate::new(8_000, 0).expect("confidence"),
+            created_at: now,
+            updated_at: now,
+        };
+        let lease = AgentLease {
+            schema_version: AGENT_RUN_SCHEMA_VERSION,
+            id: AgentLeaseId::new(),
+            instance_id: instance.id,
+            work_item_id: plan.items[0].id,
+            goal: plan.items[0].goal.clone(),
+            budget: LeaseBudget {
+                limit: plan.items[0].budget.clone(),
+                consumed_tokens: 0,
+                consumed_cost_usd: 0.0,
+                elapsed_seconds: 0,
+            },
+            tool_permissions: Vec::new(),
+            reporting_interval_seconds: 30,
+            max_retries: 0,
+            escalation_conditions: Vec::new(),
+            state: AgentLeaseState::Active,
+            acquired_at: now,
+            expires_at: now + Duration::minutes(5),
+            heartbeat_at: now,
+        };
+        store
+            .dispatch_agent_work(&instance, &lease, now)
+            .expect("dispatch");
+        let authority = store
+            .claim_active_agent_lease_workflow(lease.id, RuntimeActorId::new(), 120, now)
+            .expect("claim canonical workflow");
+        store
+            .finish_agent_lease(
+                lease.id,
+                AgentLeaseState::Completed,
+                0,
+                0.0,
+                1,
+                now + Duration::seconds(1),
+            )
+            .expect("complete legacy lease");
+        let verifying = store
+            .transition_workflow_attempt(
+                authority.workflow.attempt.attempt_id,
+                authority.workflow.attempt.revision,
+                authority.workflow.attempt.lease_generation,
+                WorkflowState::Verifying,
+                CorrelationId::new(),
+                "compatibility-work-completed",
+                now + Duration::seconds(1),
+            )
+            .expect("begin Verify");
+        let report = EvaluationReport {
+            schema_version: AGENT_RUN_SCHEMA_VERSION,
+            id: EvaluationId::new(),
+            run_id: run.id,
+            task_id: task.id,
+            evaluator_instance_id: None,
+            conditions: vec![ConditionResult {
+                condition: condition.clone(),
+                passed: true,
+                detail: "objective evidence passed".into(),
+            }],
+            outcome: EvaluationOutcome::Passed,
+            confidence: ConfidenceEstimate::new(9_500, 1).expect("confidence"),
+            regressions: Vec::new(),
+            evidence: vec![EvaluationEvidence {
+                method: "fixture".into(),
+                artifact_sha256: Some("a".repeat(64)),
+                event_sequence: None,
+                detail: "immutable objective evidence".into(),
+            }],
+            evaluated_at: now + Duration::seconds(2),
+        };
+        let report_source = evaluation_report_source_ref(&report).expect("report source");
+        let checkpoint = ConsumerEvaluationCheckpoint {
+            schema_version: AGENT_RUN_SCHEMA_VERSION,
+            task_id: task.id,
+            run_id: run.id,
+            project_snapshot_id: ProjectSnapshotId::new(),
+            state: ConsumerEvaluationCheckpointState::Verifying,
+            next_condition_index: 1,
+            attempt: 0,
+            request_id: None,
+            prepared_evaluation_id: Some(report.id),
+            prepared_evaluated_at: Some(report.evaluated_at),
+            batch_approved: false,
+            results: report.conditions.clone(),
+            evidence: report.evidence.clone(),
+            regressions: Vec::new(),
+            objective_failures: 0,
+            unsupported: 0,
+            executed: 1,
+            updated_at: report.evaluated_at,
+        };
+        let mut running_checkpoint = checkpoint.clone();
+        running_checkpoint.state = ConsumerEvaluationCheckpointState::Running;
+        running_checkpoint.prepared_evaluation_id = None;
+        running_checkpoint.prepared_evaluated_at = None;
+        store
+            .save_consumer_evaluation_checkpoint(&running_checkpoint)
+            .expect("running evaluation checkpoint");
+        store
+            .prepare_consumer_evaluation(&report, &checkpoint)
+            .expect("prepare evaluation");
+
+        let content_hash = |label: &str| ContentHash {
+            algorithm: HashAlgorithm::Sha256,
+            domain: "test.compatibility.settlement".into(),
+            digest_hex: format!("{:x}", sha2::Sha256::digest(label.as_bytes())),
+        };
+        let runtime_build = content_hash("runtime-build");
+        let runtime_identity = RuntimeIdentity {
+            instance_id: RuntimeInstanceId::new(),
+            build_hash: runtime_build.clone(),
+            protocol_version: mcg_contracts::PROTOCOL_V1,
+            started_at: now,
+        };
+        let persist_completed = |store: &mut SqliteEventStore,
+                                 role: InvocationRole,
+                                 label: &str|
+         -> (InvocationId, ArtifactRef) {
+            let source = SourceRef {
+                source_type: StableTypeId::parse("test.compatibility_evidence.v1").unwrap(),
+                locator: label.into(),
+                content_hash: content_hash(label),
+            };
+            let context = ContextManifest {
+                id: ContextManifestId::new(),
+                attempt_id: verifying.attempt_id,
+                selected_sources: vec![ContextSelection {
+                    source: source.clone(),
+                    perspective: None,
+                    influence: VersionedPayload::canonical_v1(
+                        StableTypeId::parse("test.compatibility_influence.v1").unwrap(),
+                        &serde_json::json!({"label": label}),
+                    )
+                    .unwrap(),
+                    transformations: Vec::new(),
+                    placement: 0,
+                    approximate_tokens: 1,
+                }],
+                selection_policy: VersionedPayload::canonical_v1(
+                    StableTypeId::parse("test.compatibility_policy.v1").unwrap(),
+                    &serde_json::json!({"mode": "exact"}),
+                )
+                .unwrap(),
+                expansion_steps: Vec::new(),
+                approximate_tokens: 1,
+            };
+            let context_hash = store.persist_context_manifest(&context, now).unwrap();
+            let invocation = InvocationManifest {
+                id: InvocationId::new(),
+                role,
+                attempt_id: verifying.attempt_id,
+                task_contract: verifying.task_contract.clone(),
+                runtime_identity: runtime_identity.clone(),
+                cognitive_configuration: content_hash("configuration"),
+                role_manifest: content_hash(label),
+                prompt_bundle: content_hash("prompt"),
+                context_manifest: context_hash,
+                model_route: VersionedPayload::canonical_v1(
+                    StableTypeId::parse("test.compatibility_route.v1").unwrap(),
+                    &serde_json::json!({"provider": "fixture"}),
+                )
+                .unwrap(),
+                resolved_provider: source.clone(),
+                resolved_model: source.clone(),
+                observed_model_fingerprint: Some("fixture-v1".into()),
+                sampling: VersionedPayload::canonical_v1(
+                    StableTypeId::parse("test.compatibility_sampling.v1").unwrap(),
+                    &serde_json::json!({"temperature": 0}),
+                )
+                .unwrap(),
+                reasoning: None,
+                available_tool_manifests: Vec::new(),
+                selected_skill_manifests: Vec::new(),
+                authority_envelope: source.clone(),
+                egress_permit: None,
+                repository_revision: None,
+                environment: source,
+                runtime_build: runtime_build.clone(),
+                request_hash: content_hash("request"),
+                response_hash: None,
+            };
+            store.persist_invocation_manifest(&invocation, now).unwrap();
+            let planned = ModelRun {
+                id: ModelRunId::new(),
+                invocation_id: invocation.id,
+                role,
+                state: ModelRunState::Planned,
+                provider_request_id: None,
+                response_artifact: None,
+                usage: None,
+                started_at: now,
+                finished_at: None,
+            };
+            store.create_model_run(&planned, now).unwrap();
+            let mut dispatched = planned.clone();
+            dispatched.state = ModelRunState::Dispatched;
+            dispatched.provider_request_id = Some(format!("{label}-request"));
+            store.transition_model_run(&dispatched, 1, now).unwrap();
+            let artifact = ArtifactRef {
+                content_hash: content_hash(&format!("{label}-response")),
+                media_type: "application/json".into(),
+                byte_length: 32,
+            };
+            let mut completed = dispatched;
+            completed.state = ModelRunState::Completed;
+            completed.response_artifact = Some(artifact.clone());
+            completed.finished_at = Some(report.evaluated_at);
+            store
+                .transition_model_run(&completed, 2, report.evaluated_at)
+                .unwrap();
+            (invocation.id, artifact)
+        };
+        let (work_invocation, work_artifact) =
+            persist_completed(&mut store, InvocationRole::Work, "work");
+        let (verify_invocation, verify_artifact) =
+            persist_completed(&mut store, InvocationRole::Verify, "verify");
+        let certificate = CompletionCertificate {
+            id: CompletionCertificateId::new(),
+            workflow_id: verifying.workflow_id,
+            attempt_id: verifying.attempt_id,
+            task_contract: verifying.task_contract.clone(),
+            work_invocations: vec![work_invocation],
+            verify_invocations: vec![verify_invocation],
+            criterion_results: vec![CriterionResult {
+                clause_id: "legacy-work-condition-1".into(),
+                passed: true,
+                evidence_refs: vec![report_source.clone()],
+                detail_hash: content_hash("criterion-detail"),
+            }],
+            evidence_refs: vec![report_source.clone()],
+            tests_run: vec![report_source],
+            artifacts: vec![work_artifact, verify_artifact],
+            known_untested_paths: Vec::new(),
+            unresolved_assumptions: Vec::new(),
+            remaining_risks: Vec::new(),
+            verdict: CompletionVerdict::Satisfied,
+            issued_at: report.evaluated_at + Duration::seconds(1),
+        };
+        let completion = ConsumerEvaluationCompletion {
+            lease_id: lease.id,
+            certificate: certificate.clone(),
+            expected_revision: verifying.revision,
+            expected_generation: verifying.lease_generation,
+        };
+
+        store
+            .connection
+            .execute_batch(
+                "CREATE TEMP TRIGGER fail_compatibility_task_settlement
+                 BEFORE UPDATE ON tasks
+                 BEGIN SELECT RAISE(ABORT, 'injected terminal projection failure'); END;",
+            )
+            .expect("failure trigger");
+        assert!(
+            store
+                .settle_consumer_evaluation_with_completions(
+                    &report,
+                    &checkpoint,
+                    std::slice::from_ref(&completion),
+                )
+                .is_err()
+        );
+        assert_eq!(
+            store
+                .workflow_attempt(verifying.attempt_id)
+                .unwrap()
+                .unwrap()
+                .state,
+            WorkflowState::Verifying
+        );
+        assert_eq!(store.completion_certificate(certificate.id).unwrap(), None);
+        assert_eq!(
+            store.load_task(task.id).unwrap().unwrap().state,
+            TaskState::Active
+        );
+        store
+            .connection
+            .execute_batch("DROP TRIGGER fail_compatibility_task_settlement;")
+            .expect("drop trigger");
+
+        store
+            .settle_consumer_evaluation_with_completions(
+                &report,
+                &checkpoint,
+                std::slice::from_ref(&completion),
+            )
+            .expect("atomic compatibility settlement");
+        assert_eq!(
+            store
+                .workflow_attempt(verifying.attempt_id)
+                .unwrap()
+                .unwrap()
+                .state,
+            WorkflowState::Succeeded
+        );
+        assert_eq!(
+            store.completion_certificate(certificate.id).unwrap(),
+            Some(certificate)
+        );
+        assert_eq!(
+            store.load_task(task.id).unwrap().unwrap().state,
+            TaskState::Completed
+        );
+        assert_eq!(
+            store.agent_run(run.id).unwrap().unwrap().state,
+            AgentRunState::Completed
+        );
+        assert_eq!(
+            store
+                .consumer_evaluation_checkpoint(task.id)
+                .unwrap()
+                .unwrap()
+                .state,
+            ConsumerEvaluationCheckpointState::Completed
         );
     }
 

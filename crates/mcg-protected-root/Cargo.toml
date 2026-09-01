@@ -8,6 +8,7 @@ rust-version.workspace = true
 [dependencies]
 async-trait.workspace = true
 chrono.workspace = true
+mcg-agents = { path = "../mcg-agents" }
 mcg-api = { path = "../mcg-api" }
 mcg-action-runner = { path = "../../apps/mcg-action-runner", default-features = false }
 mcg-provider-runner = { path = "../../apps/mcg-provider-runner", default-features = false }
@@ -29,7 +30,6 @@ url.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
-mcg-agents = { path = "../mcg-agents" }
 tempfile.workspace = true
 
 [[bin]]

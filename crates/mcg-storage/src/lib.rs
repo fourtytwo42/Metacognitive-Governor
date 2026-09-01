@@ -75,7 +75,8 @@ pub use actions::{
 };
 pub use agents::{
     AgentRecoveryReport, AgentTurnCommit, AgentTurnDisposition, ConsumerEvaluationCheckpoint,
-    ConsumerEvaluationCheckpointState, InterfaceRunReceipt,
+    ConsumerEvaluationCheckpointState, ConsumerEvaluationCompletion, InterfaceRunReceipt,
+    evaluation_report_source_ref,
 };
 pub use egress::{
     ModelEgressAuthorizationReceipt, ModelSecretHandleBinding, ModelSecretSlot,
@@ -92,8 +93,8 @@ pub use plugins::PluginRecoveryReport;
 pub use scheduler::{ScheduleClaim, ScheduleWakeMutation};
 pub use shadow_workspaces::ShadowWorkspaceMutation;
 pub use workflows::{
-    AgentTurnWorkflowAttachment, AgentTurnWorkflowAuthority, TaskContractHead,
-    WorkflowRecoveryReport, task_contract_content_hash,
+    AgentTurnVerificationTarget, AgentTurnWorkflowAttachment, AgentTurnWorkflowAuthority,
+    TaskContractHead, WorkflowRecoveryReport, task_contract_content_hash,
 };
 
 type EventRow = (i64, String, i64, String, Option<String>, String, String);

@@ -1,20 +1,25 @@
 use std::process::Stdio;
 
 use chrono::{Duration, Utc};
+use mcg_agents::{
+    AGENT_RUN_SCHEMA_VERSION, ConditionResult, ConfidenceEstimate, EvaluationOutcome,
+    EvaluationReport, SuccessCondition,
+};
 use mcg_config::AppConfig;
 use mcg_contracts::{
     AuthenticatedRpcRequest, CompletionCertificate, CompletionCertificateId, CompletionVerdict,
     ConfigurationId, ContentHash, ContextManifest, ContextManifestId, ContextSelection,
     ContractClause, CorrelationId, DeterministicCriterionEvidence, DeterministicVerifyInput,
-    HashAlgorithm, InvocationId, InvocationManifest, InvocationRole, ModelRunId, PROTOCOL_V1,
-    PolicyBinding, RUNTIME_INVOCATION_REQUEST_HASH_DOMAIN, RUNTIME_INVOCATION_RESPONSE_HASH_DOMAIN,
-    RUNTIME_WORKER_ACK_MESSAGE_TYPE, RUNTIME_WORKER_HELLO_MESSAGE_TYPE,
-    RUNTIME_WORKER_INVOKE_MESSAGE_TYPE, RUNTIME_WORKER_RESULT_MESSAGE_TYPE,
-    RUNTIME_WORKER_SHUTDOWN_MESSAGE_TYPE, RequestId, RetryPolicy, RpcEnvelope, RuntimeActorId,
-    RuntimeInstanceId, RuntimeInvocationRequest, RuntimeInvocationResult, RuntimeWorkerControl,
-    RuntimeWorkerHello, SourceRef, StableTypeId, TaskContract, TaskContractId, TaskContractStatus,
-    VersionedPayload, VersionedRef, WorkflowAttempt, WorkflowCancelRequest, WorkflowId,
-    WorkflowState, canonical_contract_hash, decode_canonical_cbor_v1,
+    HashAlgorithm, InvocationId, InvocationManifest, InvocationRole, ModelRunId, ModelRunState,
+    PROTOCOL_V1, PolicyBinding, RUNTIME_INVOCATION_REQUEST_HASH_DOMAIN,
+    RUNTIME_INVOCATION_RESPONSE_HASH_DOMAIN, RUNTIME_WORKER_ACK_MESSAGE_TYPE,
+    RUNTIME_WORKER_HELLO_MESSAGE_TYPE, RUNTIME_WORKER_INVOKE_MESSAGE_TYPE,
+    RUNTIME_WORKER_RESULT_MESSAGE_TYPE, RUNTIME_WORKER_SHUTDOWN_MESSAGE_TYPE, RequestId,
+    RetryPolicy, RpcEnvelope, RuntimeActorId, RuntimeInstanceId, RuntimeInvocationRequest,
+    RuntimeInvocationResult, RuntimeWorkerControl, RuntimeWorkerHello, SourceRef, StableTypeId,
+    TaskContract, TaskContractId, TaskContractStatus, VersionedPayload, VersionedRef,
+    WorkflowAttempt, WorkflowCancelRequest, WorkflowId, WorkflowState, canonical_contract_hash,
+    decode_canonical_cbor_v1,
 };
 use mcg_platform::{
     LocalIpcStream, RuntimeWorkerListener, RuntimeWorkerSession, create_runtime_worker_session,
@@ -24,9 +29,10 @@ use mcg_protected_root::{
     RuntimeInvocationExecutionReceipt, RuntimeWorkerClient, RuntimeWorkerReplacementReason,
     execute_runtime_invocation, execute_runtime_invocation_with_cancellation,
     launch_runtime_worker, open as open_protected_root, replace_idle_runtime_worker_if_needed,
+    verify_compatibility_consumer_evaluation,
 };
 use mcg_runtime::AppRuntime;
-use mcg_storage::{SqliteEventStore, task_contract_content_hash};
+use mcg_storage::{AgentTurnVerificationTarget, SqliteEventStore, task_contract_content_hash};
 use tempfile::TempDir;
 use tokio::{process::Child, time::timeout};
 
@@ -758,6 +764,199 @@ async fn protected_root_commits_real_work_verify_completion_certificate() {
             .state,
         mcg_contracts::ModelRunState::Completed
     );
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)] // One real-process matrix proves both terminal verdicts.
+async fn protected_root_independently_verifies_compatibility_work_and_builds_certificates() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = AppConfig {
+        data_directory: directory.path().join("compatibility-verification-profile"),
+        ..AppConfig::default()
+    };
+    std::fs::create_dir_all(&config.data_directory).unwrap();
+    let now = Utc::now();
+    let mut fixtures = Vec::new();
+    {
+        let mut store = SqliteEventStore::open(config.database_path()).unwrap();
+        for (index, passed) in [true, false].into_iter().enumerate() {
+            let (contract, mut ready) =
+                workflow_fixture(now + Duration::seconds(i64::try_from(index).unwrap()));
+            ready.idempotency_key = format!("compatibility-verify-{index}");
+            store
+                .create_workflow(&contract, &ready, CorrelationId::new(), now)
+                .unwrap();
+            let running = store
+                .claim_workflow_attempt(
+                    ready.attempt_id,
+                    ready.revision,
+                    ready.lease_generation,
+                    RuntimeActorId::new(),
+                    now + Duration::minutes(5),
+                    CorrelationId::new(),
+                    &format!("compatibility-verify-claim-{index}"),
+                    now,
+                )
+                .unwrap();
+            fixtures.push((contract, running, passed));
+        }
+    }
+    let runtime = AppRuntime::open(config).unwrap();
+    let executable = env!("CARGO_BIN_EXE_mcg-runtime-worker");
+    let mut work_client = launch_runtime_worker(&runtime, executable, directory.path())
+        .await
+        .unwrap();
+    let mut cases = Vec::new();
+    for (contract, running, passed) in fixtures {
+        let work_input = VersionedPayload::canonical_v1(
+            StableTypeId::parse("test.compatibility_work_input.v1").unwrap(),
+            &serde_json::json!({"task": "compatibility-work"}),
+        )
+        .unwrap();
+        let work_request = invocation_request_for(
+            work_client.hello(),
+            work_client.worker_generation(),
+            InvocationRole::Work,
+            work_input,
+            running.attempt_id,
+            running.task_contract.clone(),
+            running.revision,
+            running.lease_generation,
+        );
+        let work =
+            execute_runtime_invocation(&runtime, &mut work_client, &work_request, Utc::now())
+                .await
+                .unwrap();
+        let verifying = runtime
+            .begin_runtime_verification(
+                running.attempt_id,
+                running.revision,
+                running.lease_generation,
+                &format!("compatibility-independent-verify-{passed}"),
+                Utc::now(),
+            )
+            .unwrap();
+        let condition = SuccessCondition::Custom {
+            description: "deterministic Runtime result is retained".into(),
+        };
+        let report = EvaluationReport {
+            schema_version: AGENT_RUN_SCHEMA_VERSION,
+            id: mcg_domain::EvaluationId::new(),
+            run_id: mcg_domain::RunId::new(),
+            task_id: mcg_domain::TaskId::new(),
+            evaluator_instance_id: None,
+            conditions: vec![ConditionResult {
+                condition: condition.clone(),
+                passed,
+                detail: if passed {
+                    "objective evidence passed".into()
+                } else {
+                    "objective evidence failed".into()
+                },
+            }],
+            outcome: if passed {
+                EvaluationOutcome::Passed
+            } else {
+                EvaluationOutcome::Failed
+            },
+            confidence: ConfidenceEstimate::new(9_500, 1).unwrap(),
+            regressions: if passed {
+                Vec::new()
+            } else {
+                vec!["objective evidence failed".into()]
+            },
+            evidence: Vec::new(),
+            evaluated_at: Utc::now(),
+        };
+        let target = AgentTurnVerificationTarget {
+            lease_id: mcg_domain::AgentLeaseId::new(),
+            work_item_id: mcg_domain::WorkItemId::new(),
+            success_conditions: vec![condition],
+            task_contract: contract,
+            attempt: verifying,
+            work_invocations: vec![work_request.invocation_manifest.id],
+            work_artifacts: vec![work.completed_run.run.response_artifact.clone().unwrap()],
+            work_response_hash: work.result.response_hash,
+        };
+        cases.push((report, target, passed));
+    }
+    work_client.shutdown().await.unwrap();
+
+    for (report, target, passed) in cases {
+        let first_attempt = verify_compatibility_consumer_evaluation(
+            &runtime,
+            executable,
+            directory.path(),
+            &report,
+            std::slice::from_ref(&target),
+        )
+        .await
+        .unwrap();
+        let completions = verify_compatibility_consumer_evaluation(
+            &runtime,
+            executable,
+            directory.path(),
+            &report,
+            std::slice::from_ref(&target),
+        )
+        .await
+        .unwrap();
+        assert_ne!(
+            first_attempt[0].certificate.verify_invocations,
+            completions[0].certificate.verify_invocations,
+            "a crash before settlement may repeat observational Verify but never reuses substituted process identity"
+        );
+        assert_eq!(
+            first_attempt[0].certificate.criterion_results,
+            completions[0].certificate.criterion_results,
+            "repeated Verify consumes the same immutable report and Work evidence"
+        );
+        assert_eq!(
+            runtime
+                .runtime_invocation(first_attempt[0].certificate.verify_invocations[0], 10,)
+                .unwrap()
+                .unwrap()
+                .model_runs
+                .last()
+                .unwrap()
+                .run
+                .state,
+            ModelRunState::Completed
+        );
+        assert_eq!(completions.len(), 1);
+        let completion = &completions[0];
+        assert_eq!(completion.lease_id, target.lease_id);
+        assert_eq!(
+            completion.certificate.work_invocations,
+            target.work_invocations
+        );
+        assert_eq!(completion.certificate.verify_invocations.len(), 1);
+        assert_eq!(completion.certificate.criterion_results[0].passed, passed);
+        assert_eq!(
+            completion.certificate.verdict,
+            if passed {
+                CompletionVerdict::Satisfied
+            } else {
+                CompletionVerdict::NotSatisfied
+            }
+        );
+        let (_, terminal) = runtime
+            .commit_runtime_completion(
+                &completion.certificate,
+                completion.expected_revision,
+                completion.expected_generation,
+                completion.certificate.issued_at,
+            )
+            .unwrap();
+        assert_eq!(
+            terminal.state,
+            if passed {
+                WorkflowState::Succeeded
+            } else {
+                WorkflowState::Failed
+            }
+        );
+    }
 }
 
 #[tokio::test]
