@@ -6,8 +6,9 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::{
-    McpAuthMode, McpConnection, McpCredential, McpError, McpProtocolMode, McpServerInfo,
-    McpToolCatalog, McpToolDescriptor, McpToolResult, McpTransport,
+    DEFAULT_MCP_RESPONSE_MAX_BYTES, McpAuthMode, McpConnection, McpCredential, McpError,
+    McpProtocolMode, McpServerInfo, McpToolCatalog, McpToolDescriptor, McpToolResult, McpTransport,
+    bounded_response_body,
 };
 
 pub const LEGACY_MCP_PROTOCOL_VERSION: &str = "2025-11-25";
@@ -17,6 +18,7 @@ pub struct LegacyHttpMcpClient {
     http: reqwest::Client,
     connection: McpConnection,
     credential: Option<McpCredential>,
+    max_response_bytes: usize,
 }
 
 impl LegacyHttpMcpClient {
@@ -47,10 +49,38 @@ impl LegacyHttpMcpClient {
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|error| McpError::Transport(error.to_string()))?;
+        Self::new_with_http(connection, credential, http, DEFAULT_MCP_RESPONSE_MAX_BYTES)
+    }
+
+    /// Creates a legacy client with caller-supplied transport confinement and response limit.
+    ///
+    /// # Errors
+    /// Returns configuration errors for invalid metadata, transport, auth shape, or byte limit.
+    pub fn new_with_http(
+        connection: McpConnection,
+        credential: Option<McpCredential>,
+        http: reqwest::Client,
+        max_response_bytes: usize,
+    ) -> Result<Self, McpError> {
+        connection.validate()?;
+        if !matches!(connection.transport, McpTransport::StreamableHttp { .. })
+            || connection.protocol_mode != McpProtocolMode::Legacy
+            || max_response_bytes == 0
+        {
+            return Err(McpError::Configuration(
+                "legacy HTTP client authority is invalid".into(),
+            ));
+        }
+        if (connection.auth_mode == McpAuthMode::BearerToken) != credential.is_some() {
+            return Err(McpError::Configuration(
+                "MCP credential shape does not match the explicit authentication mode".into(),
+            ));
+        }
         Ok(Self {
             http,
             connection,
             credential,
+            max_response_bytes,
         })
     }
 
@@ -183,9 +213,8 @@ impl LegacyHttpMcpClient {
             .and_then(|value| value.to_str().ok())
             .unwrap_or_default()
             .to_owned();
-        let text = response
-            .text()
-            .await
+        let bytes = bounded_response_body(response, self.max_response_bytes).await?;
+        let text = String::from_utf8(bytes)
             .map_err(|error| McpError::InvalidResponse(error.to_string()))?;
         let value = decode_legacy_body(&content_type, &text)?;
         let envelope: RpcEnvelope = serde_json::from_value(value)

@@ -649,6 +649,13 @@ fn valid_plugin_scope(capability: PluginCapability, scope: &PluginCapabilityScop
         (PluginCapability::Credentials, PluginCapabilityScope::Credential { provider, key }) => {
             valid_credential_component(provider) && valid_credential_component(key)
         }
+        (
+            PluginCapability::Mcp,
+            PluginCapabilityScope::McpTool {
+                connection_id,
+                tool_name,
+            },
+        ) => bounded_scope_text(connection_id, 128) && bounded_scope_text(tool_name, 1_024),
         _ => false,
     }
 }
@@ -1187,5 +1194,22 @@ mod tests {
                 .expect("installed"),
             disabled
         );
+    }
+
+    #[test]
+    fn mcp_grants_bind_one_exact_connection_and_tool() {
+        let scope = PluginCapabilityScope::McpTool {
+            connection_id: "fixture_connection".into(),
+            tool_name: "lookup".into(),
+        };
+        assert!(valid_plugin_scope(PluginCapability::Mcp, &scope));
+        assert!(!valid_plugin_scope(PluginCapability::Network, &scope));
+        assert!(!valid_plugin_scope(
+            PluginCapability::Mcp,
+            &PluginCapabilityScope::McpTool {
+                connection_id: "fixture_connection".into(),
+                tool_name: "\0substituted".into(),
+            }
+        ));
     }
 }

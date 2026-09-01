@@ -22,6 +22,7 @@ pub enum PluginCapability {
     Network,
     Process,
     Credentials,
+    Mcp,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -82,6 +83,12 @@ pub enum PluginCapabilityOperation {
         env: Vec<PluginEnvironmentVariable>,
         stdin: Option<String>,
     },
+    McpCall {
+        connection_id: String,
+        tool_name: String,
+        arguments: Value,
+        max_response_bytes: u64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -127,6 +134,7 @@ impl PluginCapabilityOperation {
             Self::FilesystemWrite { .. } => PluginCapability::FilesystemWrite,
             Self::HttpRequest { .. } => PluginCapability::Network,
             Self::ProcessExec { .. } => PluginCapability::Process,
+            Self::McpCall { .. } => PluginCapability::Mcp,
         }];
         let uses_credentials = match self {
             Self::HttpRequest { headers, .. } => headers
@@ -135,7 +143,9 @@ impl PluginCapabilityOperation {
             Self::ProcessExec { env, .. } => env
                 .iter()
                 .any(|variable| matches!(variable.value, PluginValueSource::Credential(_))),
-            Self::FilesystemRead { .. } | Self::FilesystemWrite { .. } => false,
+            Self::FilesystemRead { .. } | Self::FilesystemWrite { .. } | Self::McpCall { .. } => {
+                false
+            }
         };
         if uses_credentials {
             capabilities.push(PluginCapability::Credentials);
@@ -230,9 +240,37 @@ impl PluginCapabilityOperation {
                     validate_value_source(&variable.value)?;
                 }
             }
+            Self::McpCall {
+                connection_id,
+                tool_name,
+                arguments,
+                max_response_bytes,
+            } => validate_mcp_call(connection_id, tool_name, arguments, *max_response_bytes)?,
         }
         Ok(())
     }
+}
+
+fn validate_mcp_call(
+    connection_id: &str,
+    tool_name: &str,
+    arguments: &Value,
+    max_response_bytes: u64,
+) -> Result<(), PluginError> {
+    bounded_text(connection_id, 128)?;
+    bounded_text(tool_name, 1_024)?;
+    let argument_bytes = serde_json::to_vec(arguments)
+        .map_err(|_| PluginError::Manifest("plugin MCP arguments are not serializable".into()))?;
+    if !arguments.is_object()
+        || argument_bytes.len() > 1_024 * 1_024
+        || max_response_bytes == 0
+        || max_response_bytes > 8 * 1_024 * 1_024
+    {
+        return Err(PluginError::Manifest(
+            "plugin MCP call shape is invalid".into(),
+        ));
+    }
+    Ok(())
 }
 
 impl PluginCapabilityRequest {
@@ -617,5 +655,49 @@ mod tests {
             outcomes: vec![outcome.clone(), outcome],
         };
         assert!(duplicate.validate().is_err());
+    }
+
+    #[test]
+    fn mcp_calls_require_a_declared_capability_and_bounded_object_arguments() {
+        let manifest = PluginManifest {
+            schema_version: PLUGIN_SCHEMA_VERSION,
+            id: "example.mcp".into(),
+            display_name: "MCP example".into(),
+            version: "1.0.0".into(),
+            class: PluginClass::SandboxedWasi,
+            requested_capabilities: vec![PluginCapability::Mcp],
+        };
+        let mut request = PluginCapabilityRequest {
+            schema_version: PLUGIN_SCHEMA_VERSION,
+            id: "lookup".into(),
+            operation: PluginCapabilityOperation::McpCall {
+                connection_id: "fixture_connection".into(),
+                tool_name: "lookup".into(),
+                arguments: serde_json::json!({"query": "bounded"}),
+                max_response_bytes: 64 * 1_024,
+            },
+        };
+        assert!(request.validate(&manifest).is_ok());
+        assert_eq!(
+            request.operation.required_capabilities(),
+            vec![PluginCapability::Mcp]
+        );
+
+        let missing = PluginManifest {
+            requested_capabilities: Vec::new(),
+            ..manifest.clone()
+        };
+        assert!(matches!(
+            request.validate(&missing),
+            Err(PluginError::CapabilityDenied(_))
+        ));
+        let PluginCapabilityOperation::McpCall { arguments, .. } = &mut request.operation else {
+            unreachable!("MCP fixture operation")
+        };
+        *arguments = serde_json::json!(["not", "an", "object"]);
+        assert!(matches!(
+            request.validate(&manifest),
+            Err(PluginError::Manifest(_))
+        ));
     }
 }

@@ -1894,6 +1894,9 @@ fn plugin_tool_kind(
                 },
             })
         }
+        PluginCapabilityOperation::McpCall { .. } => Err(ToolError::Denied(
+            "plugin MCP calls require the Protected Root permit-consuming MCP gateway".into(),
+        )),
     }
 }
 

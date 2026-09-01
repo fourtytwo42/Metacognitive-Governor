@@ -1100,9 +1100,20 @@ pub struct PluginRevision {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PluginCapabilityScope {
     TaskProject,
-    NetworkOrigin { origin: String },
-    Executable { executable: String },
-    Credential { provider: String, key: String },
+    NetworkOrigin {
+        origin: String,
+    },
+    Executable {
+        executable: String,
+    },
+    Credential {
+        provider: String,
+        key: String,
+    },
+    McpTool {
+        connection_id: String,
+        tool_name: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

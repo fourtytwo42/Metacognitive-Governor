@@ -1,6 +1,7 @@
 use std::fmt;
 
 use chrono::{DateTime, Utc};
+use futures_util::StreamExt as _;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
@@ -9,6 +10,34 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 
 pub const MCP_CONNECTION_CONTRACT_VERSION: u16 = 1;
 pub const MCP_PROTOCOL_VERSION: &str = "2026-07-28";
+pub const DEFAULT_MCP_RESPONSE_MAX_BYTES: usize = 4 * 1_024 * 1_024;
+
+pub(crate) async fn bounded_response_body(
+    response: reqwest::Response,
+    maximum_bytes: usize,
+) -> Result<Vec<u8>, McpError> {
+    if maximum_bytes == 0
+        || response
+            .content_length()
+            .is_some_and(|length| length > u64::try_from(maximum_bytes).unwrap_or(u64::MAX))
+    {
+        return Err(McpError::InvalidResponse(
+            "MCP response exceeded its authorized byte limit".into(),
+        ));
+    }
+    let mut body = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|error| McpError::InvalidResponse(error.to_string()))?;
+        if body.len().saturating_add(chunk.len()) > maximum_bytes {
+            return Err(McpError::InvalidResponse(
+                "MCP response exceeded its authorized byte limit".into(),
+            ));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

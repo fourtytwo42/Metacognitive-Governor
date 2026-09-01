@@ -254,6 +254,7 @@ pub fn plugin_signing_payload(
             PluginCapability::Network => 2,
             PluginCapability::Process => 3,
             PluginCapability::Credentials => 4,
+            PluginCapability::Mcp => 5,
         });
     }
     push_text(&mut payload, &revision.module_sha256)?;

@@ -8,6 +8,7 @@ use crate::{
 pub struct NegotiatingHttpMcpClient {
     connection: McpConnection,
     credential: Option<McpCredential>,
+    confined_http: Option<(reqwest::Client, usize)>,
 }
 
 impl NegotiatingHttpMcpClient {
@@ -24,6 +25,30 @@ impl NegotiatingHttpMcpClient {
         Ok(Self {
             connection,
             credential,
+            confined_http: None,
+        })
+    }
+
+    /// Creates a negotiating client with caller-supplied transport confinement and response limit.
+    ///
+    /// # Errors
+    /// Returns connection, authentication-shape, or byte-limit validation failures.
+    pub fn new_with_http(
+        connection: McpConnection,
+        credential: Option<McpCredential>,
+        http: reqwest::Client,
+        max_response_bytes: usize,
+    ) -> Result<Self, McpError> {
+        connection.validate()?;
+        if max_response_bytes == 0 {
+            return Err(McpError::Configuration(
+                "MCP response byte authority is invalid".into(),
+            ));
+        }
+        Ok(Self {
+            connection,
+            credential,
+            confined_http: Some((http, max_response_bytes)),
         })
     }
 
@@ -66,13 +91,31 @@ impl NegotiatingHttpMcpClient {
     fn modern(&self) -> Result<ModernHttpMcpClient, McpError> {
         let mut connection = self.connection.clone();
         connection.protocol_mode = McpProtocolMode::Modern20260728;
-        ModernHttpMcpClient::new(connection, self.credential.clone())
+        if let Some((http, maximum)) = &self.confined_http {
+            ModernHttpMcpClient::new_with_http(
+                connection,
+                self.credential.clone(),
+                http.clone(),
+                *maximum,
+            )
+        } else {
+            ModernHttpMcpClient::new(connection, self.credential.clone())
+        }
     }
 
     fn legacy(&self) -> Result<LegacyHttpMcpClient, McpError> {
         let mut connection = self.connection.clone();
         connection.protocol_mode = McpProtocolMode::Legacy;
-        LegacyHttpMcpClient::new(connection, self.credential.clone())
+        if let Some((http, maximum)) = &self.confined_http {
+            LegacyHttpMcpClient::new_with_http(
+                connection,
+                self.credential.clone(),
+                http.clone(),
+                *maximum,
+            )
+        } else {
+            LegacyHttpMcpClient::new(connection, self.credential.clone())
+        }
     }
 }
 

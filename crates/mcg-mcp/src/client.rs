@@ -10,8 +10,9 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::{
-    MCP_PROTOCOL_VERSION, McpAuthMode, McpConnection, McpCredential, McpError, McpProtocolMode,
-    McpServerInfo, McpToolCatalog, McpToolDescriptor, McpToolResult, McpTransport,
+    DEFAULT_MCP_RESPONSE_MAX_BYTES, MCP_PROTOCOL_VERSION, McpAuthMode, McpConnection,
+    McpCredential, McpError, McpProtocolMode, McpServerInfo, McpToolCatalog, McpToolDescriptor,
+    McpToolResult, McpTransport, bounded_response_body,
 };
 
 const DEFAULT_TTL_MS: i64 = 300_000;
@@ -22,6 +23,7 @@ pub struct ModernHttpMcpClient {
     connection: McpConnection,
     credential: Option<McpCredential>,
     next_id: AtomicU64,
+    max_response_bytes: usize,
 }
 
 impl ModernHttpMcpClient {
@@ -56,11 +58,39 @@ impl ModernHttpMcpClient {
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|error| McpError::Transport(error.to_string()))?;
+        Self::new_with_http(connection, credential, http, DEFAULT_MCP_RESPONSE_MAX_BYTES)
+    }
+
+    /// Creates a current client with caller-supplied transport confinement and response limit.
+    ///
+    /// # Errors
+    /// Returns configuration errors for invalid metadata, transport, auth shape, or byte limit.
+    pub fn new_with_http(
+        connection: McpConnection,
+        credential: Option<McpCredential>,
+        http: reqwest::Client,
+        max_response_bytes: usize,
+    ) -> Result<Self, McpError> {
+        connection.validate()?;
+        if !matches!(connection.transport, McpTransport::StreamableHttp { .. })
+            || connection.protocol_mode == McpProtocolMode::Legacy
+            || max_response_bytes == 0
+        {
+            return Err(McpError::Configuration(
+                "modern HTTP client authority is invalid".into(),
+            ));
+        }
+        if (connection.auth_mode == McpAuthMode::BearerToken) != credential.is_some() {
+            return Err(McpError::Configuration(
+                "MCP credential shape does not match the explicit authentication mode".into(),
+            ));
+        }
         Ok(Self {
             http,
             connection,
             credential,
             next_id: AtomicU64::new(1),
+            max_response_bytes,
         })
     }
 
@@ -182,9 +212,8 @@ impl ModernHttpMcpClient {
             .await
             .map_err(|error| McpError::Transport(error.to_string()))?;
         let status = response.status();
-        let value: Value = response
-            .json()
-            .await
+        let bytes = bounded_response_body(response, self.max_response_bytes).await?;
+        let value: Value = serde_json::from_slice(&bytes)
             .map_err(|error| McpError::InvalidResponse(error.to_string()))?;
         let envelope: RpcEnvelope = serde_json::from_value(value)
             .map_err(|error| McpError::InvalidResponse(error.to_string()))?;
@@ -380,5 +409,43 @@ mod tests {
         let result = client.call_tool("alpha", json!({})).await.expect("call");
         assert!(!result.is_error);
         assert_eq!(result.structured_content, Some(json!({"ok": true})));
+    }
+
+    #[tokio::test]
+    async fn caller_supplied_response_limit_fails_before_unbounded_json_decode() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let address = listener.local_addr().expect("address");
+        let app = Router::new()
+            .route("/mcp", post(fixture))
+            .with_state(FixtureState {
+                expected_token: "Bearer private-fixture".into(),
+            });
+        tokio::spawn(async move { axum::serve(listener, app).await.expect("serve") });
+        let client = ModernHttpMcpClient::new_with_http(
+            McpConnection {
+                contract_version: MCP_CONNECTION_CONTRACT_VERSION,
+                id: "fixture".into(),
+                display_name: "Fixture".into(),
+                transport: McpTransport::StreamableHttp {
+                    url: format!("http://{address}/mcp"),
+                },
+                auth_mode: McpAuthMode::BearerToken,
+                protocol_mode: McpProtocolMode::Modern20260728,
+                enabled: true,
+            },
+            Some(McpCredential::new("private-fixture").expect("credential")),
+            reqwest::Client::builder()
+                .no_proxy()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .expect("HTTP client"),
+            32,
+        )
+        .expect("bounded client");
+        assert!(matches!(
+            client.discover().await,
+            Err(McpError::InvalidResponse(message))
+                if message == "MCP response exceeded its authorized byte limit"
+        ));
     }
 }
