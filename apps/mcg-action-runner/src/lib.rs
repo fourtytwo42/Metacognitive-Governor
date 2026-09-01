@@ -110,9 +110,20 @@ pub enum GovernedFilesystemOperation {
         relative_path: String,
         content_base64: String,
     },
+    ReplaceFile {
+        relative_path: String,
+        expected_preimage_sha256: String,
+        preimage_base64: String,
+        content_base64: String,
+    },
     RemoveCreatedFile {
         relative_path: String,
         expected_sha256: String,
+    },
+    RestoreReplacedFile {
+        relative_path: String,
+        expected_current_sha256: String,
+        content_base64: String,
     },
     InspectFile {
         relative_path: String,
@@ -756,7 +767,9 @@ fn validate_operation_plan(
             relative_path
         }
         GovernedFilesystemOperation::CreateFile { relative_path, .. }
-        | GovernedFilesystemOperation::RemoveCreatedFile { relative_path, .. } => relative_path,
+        | GovernedFilesystemOperation::ReplaceFile { relative_path, .. }
+        | GovernedFilesystemOperation::RemoveCreatedFile { relative_path, .. }
+        | GovernedFilesystemOperation::RestoreReplacedFile { relative_path, .. } => relative_path,
     };
     if !normalized_relative_path(relative_path) {
         return Err(ActionRunnerProtocolError::Invalid("filesystem path"));
@@ -777,6 +790,18 @@ fn validate_operation_plan(
             relative_path,
             content_base64,
         } => validate_create_plan(envelope, relative_path, content_base64)?,
+        GovernedFilesystemOperation::ReplaceFile {
+            relative_path,
+            expected_preimage_sha256,
+            preimage_base64,
+            content_base64,
+        } => validate_replace_plan(
+            envelope,
+            relative_path,
+            expected_preimage_sha256,
+            preimage_base64,
+            content_base64,
+        )?,
         GovernedFilesystemOperation::RemoveCreatedFile {
             relative_path,
             expected_sha256,
@@ -788,6 +813,23 @@ fn validate_operation_plan(
             {
                 return Err(ActionRunnerProtocolError::Invalid(
                     "compensation effect plan",
+                ));
+            }
+            validate_reconciler(envelope, relative_path)?;
+        }
+        GovernedFilesystemOperation::RestoreReplacedFile {
+            relative_path,
+            expected_current_sha256,
+            content_base64,
+        } => {
+            if envelope.effect_class != EffectClass::Reversible
+                || envelope.compensates_action.is_none()
+                || envelope.compensation.is_some()
+                || !valid_sha256(expected_current_sha256)
+                || decode_bounded_canonical_content(content_base64).is_err()
+            {
+                return Err(ActionRunnerProtocolError::Invalid(
+                    "replacement compensation effect plan",
                 ));
             }
             validate_reconciler(envelope, relative_path)?;
@@ -875,6 +917,53 @@ fn validate_create_plan(
         })
     {
         return Err(ActionRunnerProtocolError::Invalid("create compensation"));
+    }
+    validate_reconciler(envelope, relative_path)
+}
+
+fn decode_bounded_canonical_content(value: &str) -> Result<Vec<u8>, ActionRunnerProtocolError> {
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(value)
+        .map_err(|_| ActionRunnerProtocolError::Invalid("filesystem content"))?;
+    if base64::engine::general_purpose::STANDARD.encode(&bytes) != value
+        || u64::try_from(bytes.len()).unwrap_or(u64::MAX) > ACTION_RUNNER_CONTENT_MAX_BYTES
+    {
+        return Err(ActionRunnerProtocolError::Invalid("filesystem content"));
+    }
+    Ok(bytes)
+}
+
+fn validate_replace_plan(
+    envelope: &ActionEnvelope,
+    relative_path: &str,
+    expected_preimage_sha256: &str,
+    preimage_base64: &str,
+    content_base64: &str,
+) -> Result<(), ActionRunnerProtocolError> {
+    if envelope.effect_class != EffectClass::Reversible
+        || envelope.compensates_action.is_some()
+        || !valid_sha256(expected_preimage_sha256)
+    {
+        return Err(ActionRunnerProtocolError::Invalid("replace effect plan"));
+    }
+    let preimage = decode_bounded_canonical_content(preimage_base64)?;
+    let content = decode_bounded_canonical_content(content_base64)?;
+    if sha256(&preimage) != expected_preimage_sha256 {
+        return Err(ActionRunnerProtocolError::Invalid("replace preimage"));
+    }
+    let compensation = envelope
+        .compensation
+        .as_ref()
+        .ok_or(ActionRunnerProtocolError::Invalid("replace compensation"))
+        .and_then(decode_filesystem_operation)?;
+    if compensation
+        != (GovernedFilesystemOperation::RestoreReplacedFile {
+            relative_path: relative_path.into(),
+            expected_current_sha256: sha256(&content),
+            content_base64: preimage_base64.into(),
+        })
+    {
+        return Err(ActionRunnerProtocolError::Invalid("replace compensation"));
     }
     validate_reconciler(envelope, relative_path)
 }
@@ -1558,6 +1647,18 @@ fn execute_operation(
                 "created governed file exactly once".into(),
             )
         }
+        GovernedFilesystemOperation::ReplaceFile {
+            relative_path,
+            expected_preimage_sha256,
+            preimage_base64,
+            content_base64,
+        } => execute_replace_operation(
+            root,
+            &relative_path,
+            &expected_preimage_sha256,
+            &preimage_base64,
+            &content_base64,
+        )?,
         GovernedFilesystemOperation::RemoveCreatedFile {
             relative_path,
             expected_sha256,
@@ -1570,7 +1671,83 @@ fn execute_operation(
                 "removed the exact governed file as compensation".into(),
             )
         }
+        GovernedFilesystemOperation::RestoreReplacedFile {
+            relative_path,
+            expected_current_sha256,
+            content_base64,
+        } => execute_restore_operation(
+            root,
+            &relative_path,
+            &expected_current_sha256,
+            &content_base64,
+        )?,
     })
+}
+
+#[cfg(feature = "executor")]
+fn execute_replace_operation(
+    root: &CapabilityRoot,
+    relative_path: &str,
+    expected_preimage_sha256: &str,
+    preimage_base64: &str,
+    content_base64: &str,
+) -> Result<(RunnerEffectOutcome, GovernedFilesystemObservation, String), RunnerFailure> {
+    let preimage = decode_executor_content(preimage_base64)?;
+    if sha256(&preimage) != expected_preimage_sha256 {
+        return Err(denied(
+            "preimage_binding_invalid",
+            "replacement preimage does not match its authorized digest",
+        ));
+    }
+    let content = decode_executor_content(content_base64)?;
+    let observation = root.replace_exact(
+        relative_path,
+        expected_preimage_sha256,
+        &content,
+        "replacement",
+    )?;
+    Ok((
+        RunnerEffectOutcome::EffectConfirmed,
+        observation,
+        "conditionally replaced the exact governed file".into(),
+    ))
+}
+
+#[cfg(feature = "executor")]
+fn execute_restore_operation(
+    root: &CapabilityRoot,
+    relative_path: &str,
+    expected_current_sha256: &str,
+    content_base64: &str,
+) -> Result<(RunnerEffectOutcome, GovernedFilesystemObservation, String), RunnerFailure> {
+    let content = decode_executor_content(content_base64)?;
+    let observation = root.replace_exact(
+        relative_path,
+        expected_current_sha256,
+        &content,
+        "replacement compensation",
+    )?;
+    Ok((
+        RunnerEffectOutcome::EffectConfirmed,
+        observation,
+        "restored the exact governed replacement preimage".into(),
+    ))
+}
+
+#[cfg(feature = "executor")]
+fn decode_executor_content(value: &str) -> Result<Vec<u8>, RunnerFailure> {
+    let content = base64::engine::general_purpose::STANDARD
+        .decode(value)
+        .map_err(|error| denied("content_invalid", error.to_string()))?;
+    if base64::engine::general_purpose::STANDARD.encode(&content) != value
+        || u64::try_from(content.len()).unwrap_or(u64::MAX) > ACTION_RUNNER_CONTENT_MAX_BYTES
+    {
+        return Err(denied(
+            "content_invalid",
+            "governed file content is not canonical or exceeds its byte limit",
+        ));
+    }
+    Ok(content)
 }
 
 #[cfg(feature = "executor")]
@@ -1855,6 +2032,152 @@ impl CapabilityRoot {
         }
         Ok(after)
     }
+
+    fn stage_exact_replacement(
+        &self,
+        relative_path: &str,
+        expected_sha256: &str,
+        replacement: &[u8],
+        operation_label: &str,
+    ) -> Result<(PathBuf, PathBuf, PathBuf), RunnerFailure> {
+        validate_sha256(expected_sha256)?;
+        if u64::try_from(replacement.len()).unwrap_or(u64::MAX) > ACTION_RUNNER_CONTENT_MAX_BYTES {
+            return Err(denied(
+                "content_too_large",
+                "governed replacement exceeds its byte limit",
+            ));
+        }
+        let relative = self.relative(relative_path)?;
+        let before = self.inspect(relative_path, ACTION_RUNNER_CONTENT_MAX_BYTES, false)?;
+        if !before.exists {
+            return Err(no_effect(
+                "file_not_found",
+                format!("{operation_label} target does not exist"),
+            ));
+        }
+        if before.sha256.as_deref() != Some(expected_sha256) {
+            return Err(no_effect(
+                "precondition_failed",
+                format!("{operation_label} target hash changed"),
+            ));
+        }
+        let parent = relative
+            .parent()
+            .ok_or_else(|| denied("path_parent_invalid", "governed file has no parent"))?;
+        let name = relative
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| denied("path_name_invalid", "governed file name is invalid"))?;
+        let nonce = Uuid::new_v4();
+        let temporary = parent.join(format!(".{name}.{nonce}.mcg-replace"));
+        let quarantine = parent.join(format!(".{name}.{nonce}.mcg-preimage"));
+        let mut options = OpenOptions::new();
+        options
+            .write(true)
+            .create_new(true)
+            .follow(FollowSymlinks::No);
+        let mut file = self
+            .directory
+            .open_with(&temporary, &options)
+            .map_err(|error| no_effect("temporary_create_failed", error.to_string()))?;
+        if let Err(error) = file.write_all(replacement).and_then(|()| file.sync_all()) {
+            let _ = self.directory.remove_file(&temporary);
+            return Err(no_effect("temporary_write_failed", error.to_string()));
+        }
+        drop(file);
+        Ok((relative, temporary, quarantine))
+    }
+
+    fn replace_exact(
+        &self,
+        relative_path: &str,
+        expected_sha256: &str,
+        replacement: &[u8],
+        operation_label: &str,
+    ) -> Result<GovernedFilesystemObservation, RunnerFailure> {
+        let (relative, temporary, quarantine) = self.stage_exact_replacement(
+            relative_path,
+            expected_sha256,
+            replacement,
+            operation_label,
+        )?;
+        if let Err(error) = self
+            .directory
+            .rename(&relative, &self.directory, &quarantine)
+        {
+            let _ = self.directory.remove_file(&temporary);
+            return Err(no_effect("preimage_quarantine_failed", error.to_string()));
+        }
+        let quarantined = inspect_relative(
+            &self.directory,
+            &quarantine,
+            ACTION_RUNNER_CONTENT_MAX_BYTES,
+        );
+        match quarantined {
+            Ok(bytes) if sha256(&bytes) == expected_sha256 => {}
+            Ok(_) => {
+                let restored = self
+                    .directory
+                    .rename(&quarantine, &self.directory, &relative);
+                let _ = self.directory.remove_file(&temporary);
+                return if restored.is_ok() {
+                    Err(no_effect(
+                        "precondition_raced",
+                        format!("{operation_label} target changed before commit"),
+                    ))
+                } else {
+                    Err(unknown(
+                        "preimage_restore_failed",
+                        format!("{operation_label} target raced and could not be restored"),
+                    ))
+                };
+            }
+            Err(error) => {
+                let restored = self
+                    .directory
+                    .rename(&quarantine, &self.directory, &relative);
+                let _ = self.directory.remove_file(&temporary);
+                return if restored.is_ok() {
+                    Err(no_effect("preimage_inspection_failed", error))
+                } else {
+                    Err(unknown("preimage_restore_failed", error))
+                };
+            }
+        }
+        if let Err(error) = self
+            .directory
+            .rename(&temporary, &self.directory, &relative)
+        {
+            let restored = self
+                .directory
+                .rename(&quarantine, &self.directory, &relative);
+            let _ = self.directory.remove_file(&temporary);
+            return if restored.is_ok() {
+                Err(no_effect("replacement_publish_failed", error.to_string()))
+            } else {
+                Err(unknown(
+                    "replacement_publish_restore_failed",
+                    error.to_string(),
+                ))
+            };
+        }
+        if let Err(error) = self.directory.remove_file(&quarantine) {
+            return Err(unknown(
+                "preimage_cleanup_failed",
+                format!("replacement published but preimage cleanup failed: {error}"),
+            ));
+        }
+        match self.inspect(relative_path, ACTION_RUNNER_CONTENT_MAX_BYTES, false) {
+            Ok(observed) if observed.sha256.as_deref() == Some(sha256(replacement).as_str()) => {
+                Ok(observed)
+            }
+            Ok(_) => Err(unknown(
+                "post_write_mismatch",
+                "replaced file does not match authorized content",
+            )),
+            Err(error) => Err(unknown("post_write_unknown", error.to_string())),
+        }
+    }
 }
 
 #[cfg(feature = "executor")]
@@ -1945,7 +2268,9 @@ fn standalone_authorized_request(
     let relative_path = match operation {
         GovernedFilesystemOperation::ReadFile { relative_path, .. }
         | GovernedFilesystemOperation::CreateFile { relative_path, .. }
+        | GovernedFilesystemOperation::ReplaceFile { relative_path, .. }
         | GovernedFilesystemOperation::RemoveCreatedFile { relative_path, .. }
+        | GovernedFilesystemOperation::RestoreReplacedFile { relative_path, .. }
         | GovernedFilesystemOperation::InspectFile { relative_path, .. } => relative_path,
     };
     let access = if matches!(
@@ -1984,6 +2309,26 @@ fn standalone_authorized_request(
                     &GovernedFilesystemOperation::RemoveCreatedFile {
                         relative_path: relative_path.clone(),
                         expected_sha256: sha256(&bytes),
+                    },
+                )?
+                .0,
+            )
+        }
+        GovernedFilesystemOperation::ReplaceFile {
+            relative_path,
+            preimage_base64,
+            content_base64,
+            ..
+        } => {
+            let content = base64::engine::general_purpose::STANDARD
+                .decode(content_base64)
+                .map_err(|error| error.to_string())?;
+            Some(
+                governed_filesystem_operation_payload(
+                    &GovernedFilesystemOperation::RestoreReplacedFile {
+                        relative_path: relative_path.clone(),
+                        expected_current_sha256: sha256(&content),
+                        content_base64: preimage_base64.clone(),
                     },
                 )?
                 .0,
@@ -2044,6 +2389,7 @@ fn standalone_authorized_request(
         compensates_action: matches!(
             operation,
             GovernedFilesystemOperation::RemoveCreatedFile { .. }
+                | GovernedFilesystemOperation::RestoreReplacedFile { .. }
         )
         .then(ActionId::new),
         reconciler,
@@ -2329,6 +2675,84 @@ mod tests {
         assert!(!root.path().join("result.txt").exists());
         let repeated = run(&compensate);
         assert_eq!(repeated.outcome, RunnerEffectOutcome::NoEffectConfirmed);
+    }
+
+    #[test]
+    fn replace_requires_exact_preimage_and_compensation_refuses_owner_changes() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("owned.txt");
+        let preimage = b"owner preimage";
+        let replacement = b"governed replacement";
+        std::fs::write(&path, preimage).unwrap();
+        let replace = request(
+            root.path(),
+            GovernedFilesystemOperation::ReplaceFile {
+                relative_path: "owned.txt".into(),
+                expected_preimage_sha256: sha256(preimage),
+                preimage_base64: base64::engine::general_purpose::STANDARD.encode(preimage),
+                content_base64: base64::engine::general_purpose::STANDARD.encode(replacement),
+            },
+        );
+        let replaced = run(&replace);
+        assert_eq!(replaced.outcome, RunnerEffectOutcome::EffectConfirmed);
+        assert_eq!(std::fs::read(&path).unwrap(), replacement);
+
+        let stale = run(&replace);
+        assert_eq!(stale.outcome, RunnerEffectOutcome::NoEffectConfirmed);
+        assert_eq!(stale.error_code.as_deref(), Some("precondition_failed"));
+        assert_eq!(std::fs::read(&path).unwrap(), replacement);
+
+        let restore = request(
+            root.path(),
+            GovernedFilesystemOperation::RestoreReplacedFile {
+                relative_path: "owned.txt".into(),
+                expected_current_sha256: sha256(replacement),
+                content_base64: base64::engine::general_purpose::STANDARD.encode(preimage),
+            },
+        );
+        let restored = run(&restore);
+        assert_eq!(restored.outcome, RunnerEffectOutcome::EffectConfirmed);
+        assert_eq!(std::fs::read(&path).unwrap(), preimage);
+
+        let fresh_replace = run(&replace);
+        assert_eq!(fresh_replace.outcome, RunnerEffectOutcome::EffectConfirmed);
+        std::fs::write(&path, b"later owner change").unwrap();
+        let refused = run(&restore);
+        assert_eq!(refused.outcome, RunnerEffectOutcome::NoEffectConfirmed);
+        assert_eq!(refused.error_code.as_deref(), Some("precondition_failed"));
+        assert_eq!(std::fs::read(&path).unwrap(), b"later owner change");
+    }
+
+    #[test]
+    fn replacement_plan_rejects_substituted_preimage_and_restore_bytes() {
+        let root = tempfile::tempdir().unwrap();
+        let preimage = b"exact preimage";
+        std::fs::write(root.path().join("owned.txt"), preimage).unwrap();
+        let mut substituted = request(
+            root.path(),
+            GovernedFilesystemOperation::ReplaceFile {
+                relative_path: "owned.txt".into(),
+                expected_preimage_sha256: sha256(preimage),
+                preimage_base64: base64::engine::general_purpose::STANDARD.encode(preimage),
+                content_base64: base64::engine::general_purpose::STANDARD.encode(b"replacement"),
+            },
+        );
+        let compensation = GovernedFilesystemOperation::RestoreReplacedFile {
+            relative_path: "owned.txt".into(),
+            expected_current_sha256: sha256(b"replacement"),
+            content_base64: base64::engine::general_purpose::STANDARD.encode(b"attacker bytes"),
+        };
+        substituted.envelope.compensation = Some(
+            governed_filesystem_operation_payload(&compensation)
+                .unwrap()
+                .0,
+        );
+        let response = run(&substituted);
+        assert_eq!(response.outcome, RunnerEffectOutcome::Denied);
+        assert_eq!(
+            std::fs::read(root.path().join("owned.txt")).unwrap(),
+            preimage
+        );
     }
 
     #[test]

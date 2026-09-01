@@ -10,6 +10,7 @@ use mcg_action_runner::{
     ActionRunnerClient, ActionRunnerClientError, ActionRunnerRequest, ActionRunnerResponse,
     GovernedFilesystemOperation, RunnerEffectOutcome, qualification_request_with_evidence,
 };
+use sha2::{Digest as _, Sha256};
 
 fn request(root: &Path, operation: &GovernedFilesystemOperation) -> ActionRunnerRequest {
     let client = ActionRunnerClient::with_executable(
@@ -187,6 +188,46 @@ async fn bounded_parent_client_validates_the_exact_child_response() {
 
     assert!(!ActionRunnerClientError::Launch.effect_may_have_occurred());
     assert!(ActionRunnerClientError::Timeout.effect_may_have_occurred());
+}
+
+#[tokio::test]
+async fn real_child_conditionally_replaces_and_restores_exact_preimage() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("owned.txt");
+    let preimage = b"real child preimage";
+    let replacement = b"real child replacement";
+    std::fs::write(&path, preimage).unwrap();
+    let client = ActionRunnerClient::with_executable(
+        env!("CARGO_BIN_EXE_mcg-action-runner"),
+        Duration::from_secs(5),
+    )
+    .unwrap();
+    let replace = request_for(
+        &client,
+        root.path(),
+        &GovernedFilesystemOperation::ReplaceFile {
+            relative_path: "owned.txt".into(),
+            expected_preimage_sha256: format!("{:x}", Sha256::digest(preimage)),
+            preimage_base64: base64::engine::general_purpose::STANDARD.encode(preimage),
+            content_base64: base64::engine::general_purpose::STANDARD.encode(replacement),
+        },
+    );
+    let replaced = client.invoke(&replace).await.unwrap();
+    assert_eq!(replaced.outcome, RunnerEffectOutcome::EffectConfirmed);
+    assert_eq!(std::fs::read(&path).unwrap(), replacement);
+
+    let restore = request_for(
+        &client,
+        root.path(),
+        &GovernedFilesystemOperation::RestoreReplacedFile {
+            relative_path: "owned.txt".into(),
+            expected_current_sha256: format!("{:x}", Sha256::digest(replacement)),
+            content_base64: base64::engine::general_purpose::STANDARD.encode(preimage),
+        },
+    );
+    let restored = client.invoke(&restore).await.unwrap();
+    assert_eq!(restored.outcome, RunnerEffectOutcome::EffectConfirmed);
+    assert_eq!(std::fs::read(&path).unwrap(), preimage);
 }
 
 #[tokio::test]

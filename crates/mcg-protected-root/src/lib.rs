@@ -1378,14 +1378,14 @@ async fn execute_protected_plugin_capability(
         _ => None,
     };
     if let Some((path, content, create_new)) = filesystem_write {
-        require_create_only_plugin_write(create_new)?;
-        return execute_plugin_filesystem_create(
+        return execute_plugin_filesystem_write(
             dispatcher,
             runtime.as_ref(),
             &authority,
             request,
             path,
             content,
+            create_new,
             now,
         )
         .await;
@@ -1543,15 +1543,6 @@ async fn execute_protected_plugin_capability(
     Ok(outcome)
 }
 
-fn require_create_only_plugin_write(create_new: bool) -> Result<(), ToolError> {
-    if create_new {
-        return Ok(());
-    }
-    Err(ToolError::Denied(
-        "plugin filesystem replacement is awaiting exact reversible preimage authority".into(),
-    ))
-}
-
 fn require_plugin_task_project_read(grants: &[PluginCapabilityGrant]) -> Result<(), ToolError> {
     let granted = grants.iter().any(|grant| {
         grant.capability == PluginCapability::FilesystemRead
@@ -1581,13 +1572,177 @@ fn require_plugin_task_project_write(grants: &[PluginCapabilityGrant]) -> Result
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-async fn execute_plugin_filesystem_create(
+async fn capture_plugin_filesystem_preimage(
+    dispatcher: &RootPluginDispatcher,
+    runtime: &AppRuntime,
+    authority: &mcg_storage::PluginInvocationWorkflowAuthority,
+    request: &PluginCapabilityRequest,
+    relative_path: &str,
+    now: chrono::DateTime<Utc>,
+) -> Result<GovernedFilesystemObservation, ToolError> {
+    let project = authority
+        .project
+        .as_ref()
+        .ok_or_else(|| ToolError::Denied("plugin capability has no source-bound project".into()))?;
+    let attempt = &authority.workflow.attempt;
+    let lease_expiry = attempt.lease_expires_at.ok_or_else(|| {
+        ToolError::Denied("plugin capability workflow has no active lease".into())
+    })?;
+    let deadline = lease_expiry.min(now + Duration::seconds(PLUGIN_PERMIT_SECONDS));
+    let operation = GovernedFilesystemOperation::ReadFile {
+        relative_path: relative_path.into(),
+        max_bytes: ACTION_RUNNER_CONTENT_MAX_BYTES,
+    };
+    let (operation, operation_hash) =
+        mcg_action_runner::governed_filesystem_operation_payload(&operation)
+            .map_err(ToolError::Denied)?;
+    let action_id = ActionId::new();
+    let execution = ActionExecution {
+        id: ActionExecutionId::new(),
+        action_id,
+        attempt_number: 1,
+        state: ActionExecutionState::Authorized,
+        revision: 1,
+        lease_generation: 0,
+        executor: None,
+        outcome: None,
+        created_at: now,
+        updated_at: now,
+    };
+    let action_authority = policy_binding(
+        "mcg.plugin_replacement_preimage_authority.v1",
+        "MetaCog.PluginReplacementPreimageAuthority",
+        &serde_json::json!({
+            "invocation_id": authority.invocation.id,
+            "plugin_revision_id": authority.revision.id,
+            "capability_request": request,
+            "source": authority.workflow.attachment.source,
+        }),
+    )
+    .map_err(protected_plugin_tool_denied)?;
+    let budget = policy_binding(
+        "mcg.plugin_replacement_preimage_budget.v1",
+        "MetaCog.PluginReplacementPreimageBudget",
+        &serde_json::json!({"maximum_read_bytes": ACTION_RUNNER_CONTENT_MAX_BYTES}),
+    )
+    .map_err(protected_plugin_tool_denied)?;
+    let filesystem_authority =
+        governed_filesystem_authority_binding(&GovernedFilesystemAuthority {
+            action_id,
+            actor: dispatcher.runtime_actor,
+            capability_root: PathBuf::from(&project.root),
+            operation_hash: operation_hash.clone(),
+            effect_class: EffectClass::Observational,
+            expires_at: deadline,
+        })
+        .map_err(ToolError::Denied)?;
+    let envelope = ActionEnvelope {
+        id: action_id,
+        workflow_id: attempt.workflow_id,
+        attempt_id: attempt.attempt_id,
+        task_contract: attempt.task_contract.clone(),
+        actor: dispatcher.runtime_actor,
+        origin: Some(ActionOrigin {
+            conversation: None,
+            invocation: Some(authority.workflow.attachment.source.clone()),
+            command: None,
+            approval: None,
+            agent: None,
+            evidence: Vec::new(),
+        }),
+        authority: filesystem_authority,
+        elevated_authority: Some(action_authority),
+        expected_versions: Vec::new(),
+        operation,
+        operation_hash,
+        effect_class: EffectClass::Observational,
+        preconditions: Vec::new(),
+        budget_reservation: budget,
+        idempotency_key: format!(
+            "plugin-capability:{}:{}:replacement-preimage",
+            authority.invocation.id, request.id
+        ),
+        compensation: None,
+        compensates_action: None,
+        reconciler: None,
+        reconciliation_deadline: None,
+        created_at: now,
+    };
+    runtime
+        .authorize_canonical_action(
+            &envelope,
+            &execution,
+            attempt.revision,
+            attempt.lease_generation,
+            CorrelationId::new(),
+            now,
+        )
+        .map_err(protected_plugin_tool_denied)?;
+
+    #[cfg(test)]
+    let client: Arc<dyn GovernedActionRunnerGateway> =
+        if let Some(gateway) = &dispatcher.test_action_gateway {
+            gateway.clone()
+        } else {
+            Arc::new(
+                ActionRunnerClient::adjacent_to(&dispatcher.root_executable)
+                    .map_err(|error| ToolError::Execution(error.to_string()))?,
+            )
+        };
+    #[cfg(not(test))]
+    let client: Arc<dyn GovernedActionRunnerGateway> = Arc::new(
+        ActionRunnerClient::adjacent_to(&dispatcher.root_executable)
+            .map_err(|error| ToolError::Execution(error.to_string()))?,
+    );
+    let receipt = execute_authorized_filesystem_action(
+        runtime,
+        client.as_ref(),
+        execution.id,
+        execution.revision,
+        execution.lease_generation,
+        dispatcher.runtime_actor,
+        now,
+    )
+    .await
+    .map_err(|error| ToolError::Execution(error.to_string()))?;
+    let response = receipt.runner_response.ok_or_else(|| {
+        ToolError::Execution("replacement preimage read returned no child evidence".into())
+    })?;
+    if response.outcome != RunnerEffectOutcome::Observational {
+        return Err(
+            if response.outcome == RunnerEffectOutcome::NoEffectConfirmed {
+                ToolError::Denied(
+                    response
+                        .error_code
+                        .unwrap_or_else(|| "replacement_preimage_unavailable".into()),
+                )
+            } else {
+                ToolError::Execution("replacement preimage read was not observational".into())
+            },
+        );
+    }
+    let payload = response.observation.ok_or_else(|| {
+        ToolError::Execution("replacement preimage observation is missing".into())
+    })?;
+    let observation = decode_governed_filesystem_observation(&payload)
+        .map_err(|error| ToolError::Execution(error.to_string()))?;
+    if !observation.exists || observation.content_base64.is_none() || observation.sha256.is_none() {
+        return Err(ToolError::Denied(
+            "replacement target is not an existing bounded regular file".into(),
+        ));
+    }
+    Ok(observation)
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+async fn execute_plugin_filesystem_write(
     dispatcher: &RootPluginDispatcher,
     runtime: &AppRuntime,
     authority: &mcg_storage::PluginInvocationWorkflowAuthority,
     request: PluginCapabilityRequest,
     relative_path: String,
     content: String,
+    create_new: bool,
     now: chrono::DateTime<Utc>,
 ) -> Result<PluginCapabilityOutcome, ToolError> {
     require_plugin_task_project_write(&authority.installation.capability_grants)?;
@@ -1611,13 +1766,64 @@ async fn execute_plugin_filesystem_create(
         ));
     }
     let content_sha256 = format!("{:x}", Sha256::digest(content_bytes));
-    let operation = GovernedFilesystemOperation::CreateFile {
-        relative_path: relative_path.clone(),
-        content_base64: STANDARD.encode(content_bytes),
+    let preimage = if create_new {
+        None
+    } else {
+        Some(
+            capture_plugin_filesystem_preimage(
+                dispatcher,
+                runtime,
+                authority,
+                &request,
+                &relative_path,
+                now,
+            )
+            .await?,
+        )
     };
-    let compensation = GovernedFilesystemOperation::RemoveCreatedFile {
-        relative_path: relative_path.clone(),
-        expected_sha256: content_sha256.clone(),
+    let (operation, compensation, preconditions) = if let Some(preimage) = preimage {
+        let preimage_content = preimage.content_base64.ok_or_else(|| {
+            ToolError::Denied("plugin replacement preimage content is unavailable".into())
+        })?;
+        let preimage_sha256 = preimage.sha256.ok_or_else(|| {
+            ToolError::Denied("plugin replacement preimage digest is unavailable".into())
+        })?;
+        let precondition = VersionedPayload::canonical_v1(
+            StableTypeId::parse("mcg.plugin_filesystem_preimage.v1")
+                .map_err(|error| ToolError::Denied(error.to_string()))?,
+            &serde_json::json!({
+                "relative_path": relative_path,
+                "sha256": preimage_sha256,
+                "size_bytes": preimage.size_bytes,
+            }),
+        )
+        .map_err(|error| ToolError::Denied(error.to_string()))?;
+        (
+            GovernedFilesystemOperation::ReplaceFile {
+                relative_path: relative_path.clone(),
+                expected_preimage_sha256: preimage_sha256,
+                preimage_base64: preimage_content.clone(),
+                content_base64: STANDARD.encode(content_bytes),
+            },
+            GovernedFilesystemOperation::RestoreReplacedFile {
+                relative_path: relative_path.clone(),
+                expected_current_sha256: content_sha256.clone(),
+                content_base64: preimage_content,
+            },
+            vec![precondition],
+        )
+    } else {
+        (
+            GovernedFilesystemOperation::CreateFile {
+                relative_path: relative_path.clone(),
+                content_base64: STANDARD.encode(content_bytes),
+            },
+            GovernedFilesystemOperation::RemoveCreatedFile {
+                relative_path: relative_path.clone(),
+                expected_sha256: content_sha256.clone(),
+            },
+            Vec::new(),
+        )
     };
     let reconciler = GovernedFilesystemOperation::InspectFile {
         relative_path,
@@ -1666,7 +1872,7 @@ async fn execute_plugin_filesystem_create(
         "MetaCog.PluginCapabilityBudget",
         &serde_json::json!({
             "maximum_write_bytes": content_bytes.len(),
-            "create_new": true,
+            "create_new": create_new,
         }),
     )
     .map_err(protected_plugin_tool_denied)?;
@@ -1700,7 +1906,7 @@ async fn execute_plugin_filesystem_create(
         operation,
         operation_hash,
         effect_class: EffectClass::Reversible,
-        preconditions: Vec::new(),
+        preconditions,
         budget_reservation: budget,
         idempotency_key: format!(
             "plugin-capability:{}:{}",
@@ -1751,7 +1957,8 @@ async fn execute_plugin_filesystem_create(
     .map_err(|error| ToolError::Execution(error.to_string()))?;
     let receipt =
         commit_confirmed_plugin_filesystem_effect(runtime, dispatcher.runtime_actor, receipt)?;
-    let outcome = plugin_filesystem_create_outcome(&request.id, &content_sha256, receipt)?;
+    let outcome =
+        plugin_filesystem_write_outcome(&request.id, &content_sha256, create_new, receipt)?;
     let mut sessions = dispatcher
         .capability_sessions
         .lock()
@@ -1821,9 +2028,10 @@ fn commit_confirmed_plugin_filesystem_effect(
     Ok(receipt)
 }
 
-fn plugin_filesystem_create_outcome(
+fn plugin_filesystem_write_outcome(
     capability_request_id: &str,
     expected_sha256: &str,
+    create_new: bool,
     receipt: GovernedActionDispatchReceipt,
 ) -> Result<PluginCapabilityOutcome, ToolError> {
     match (&receipt.execution.state, &receipt.execution.outcome) {
@@ -1832,7 +2040,11 @@ fn plugin_filesystem_create_outcome(
                 request_id: capability_request_id.into(),
                 outcome: serde_json::json!({
                     "status": ToolOutcomeStatus::Succeeded,
-                    "summary": "created governed project file",
+                    "summary": if create_new {
+                        "created governed project file"
+                    } else {
+                        "conditionally replaced governed project file"
+                    },
                     "exit_code": null,
                     "stdout": null,
                     "stderr": null,
@@ -4935,43 +5147,76 @@ fn interpret_filesystem_reconciliation(
     deadline: chrono::DateTime<Utc>,
 ) -> Result<ReconciliationObservation, ProtectedRootError> {
     let operation = decode_governed_filesystem_operation(&envelope.operation)?;
-    let expected_sha256 = match &operation {
-        GovernedFilesystemOperation::CreateFile { .. } => {
-            let compensation = envelope
-                .compensation
-                .as_ref()
-                .ok_or(ActionRunnerProtocolError::Invalid("create compensation"))?;
-            match decode_governed_filesystem_operation(compensation)? {
-                GovernedFilesystemOperation::RemoveCreatedFile {
-                    expected_sha256, ..
-                } => expected_sha256,
-                _ => {
-                    return Err(ActionRunnerProtocolError::Invalid("create compensation").into());
+    let (occurred_sha256, not_occurred_sha256, occurred_absent, not_occurred_absent) =
+        match &operation {
+            GovernedFilesystemOperation::CreateFile { .. } => {
+                let compensation = envelope
+                    .compensation
+                    .as_ref()
+                    .ok_or(ActionRunnerProtocolError::Invalid("create compensation"))?;
+                match decode_governed_filesystem_operation(compensation)? {
+                    GovernedFilesystemOperation::RemoveCreatedFile {
+                        expected_sha256, ..
+                    } => (Some(expected_sha256), None, false, true),
+                    _ => {
+                        return Err(
+                            ActionRunnerProtocolError::Invalid("create compensation").into()
+                        );
+                    }
                 }
             }
-        }
-        GovernedFilesystemOperation::RemoveCreatedFile {
-            expected_sha256, ..
-        } => expected_sha256.clone(),
-        GovernedFilesystemOperation::ReadFile { .. }
-        | GovernedFilesystemOperation::InspectFile { .. } => {
-            return Err(ActionRunnerProtocolError::Invalid("observational reconciliation").into());
-        }
-    };
-    let exact_original_exists =
-        observation.exists && observation.sha256.as_deref() == Some(expected_sha256.as_str());
-    let confirmed_occurred = match operation {
-        GovernedFilesystemOperation::CreateFile { .. } => exact_original_exists,
-        GovernedFilesystemOperation::RemoveCreatedFile { .. } => !observation.exists,
-        GovernedFilesystemOperation::ReadFile { .. }
-        | GovernedFilesystemOperation::InspectFile { .. } => false,
-    };
-    let confirmed_not_occurred = match operation {
-        GovernedFilesystemOperation::CreateFile { .. } => !observation.exists,
-        GovernedFilesystemOperation::RemoveCreatedFile { .. } => exact_original_exists,
-        GovernedFilesystemOperation::ReadFile { .. }
-        | GovernedFilesystemOperation::InspectFile { .. } => false,
-    };
+            GovernedFilesystemOperation::ReplaceFile {
+                expected_preimage_sha256,
+                content_base64,
+                ..
+            } => (
+                Some(format!(
+                    "{:x}",
+                    Sha256::digest(
+                        STANDARD
+                            .decode(content_base64)
+                            .map_err(|_| ActionRunnerProtocolError::Invalid("replace content"))?
+                    )
+                )),
+                Some(expected_preimage_sha256.clone()),
+                false,
+                false,
+            ),
+            GovernedFilesystemOperation::RemoveCreatedFile {
+                expected_sha256, ..
+            } => (None, Some(expected_sha256.clone()), true, false),
+            GovernedFilesystemOperation::RestoreReplacedFile {
+                expected_current_sha256,
+                content_base64,
+                ..
+            } => (
+                Some(format!(
+                    "{:x}",
+                    Sha256::digest(
+                        STANDARD
+                            .decode(content_base64)
+                            .map_err(|_| ActionRunnerProtocolError::Invalid("restore content"))?
+                    )
+                )),
+                Some(expected_current_sha256.clone()),
+                false,
+                false,
+            ),
+            GovernedFilesystemOperation::ReadFile { .. }
+            | GovernedFilesystemOperation::InspectFile { .. } => {
+                return Err(
+                    ActionRunnerProtocolError::Invalid("observational reconciliation").into(),
+                );
+            }
+        };
+    let confirmed_occurred = (occurred_absent && !observation.exists)
+        || occurred_sha256.as_deref().is_some_and(|expected| {
+            observation.exists && observation.sha256.as_deref() == Some(expected)
+        });
+    let confirmed_not_occurred = (not_occurred_absent && !observation.exists)
+        || not_occurred_sha256.as_deref().is_some_and(|expected| {
+            observation.exists && observation.sha256.as_deref() == Some(expected)
+        });
     if confirmed_occurred {
         return Ok(ReconciliationObservation::ConfirmedOccurred {
             receipt: ActionReceipt {
@@ -4994,7 +5239,10 @@ fn interpret_filesystem_reconciliation(
                 "relative_path": observation.relative_path,
                 "exists": observation.exists,
                 "sha256": observation.sha256,
-                "expected_sha256": expected_sha256,
+                "expected_occurred_sha256": occurred_sha256,
+                "expected_not_occurred_sha256": not_occurred_sha256,
+                "expected_occurred_absent": occurred_absent,
+                "expected_not_occurred_absent": not_occurred_absent,
             }),
         )?,
         next_attempt_at: next_reconciliation_attempt(observed_at, deadline),
@@ -5530,9 +5778,10 @@ fn commit_reconciled_plugin_filesystem_effect(
         decode_governed_filesystem_operation(&action.envelope.operation)
             .map_err(|error| RuntimeError::Storage(StorageError::InvalidData(error.to_string())))?,
         GovernedFilesystemOperation::CreateFile { .. }
+            | GovernedFilesystemOperation::ReplaceFile { .. }
     ) {
         return Err(RuntimeError::Storage(StorageError::InvalidData(
-            "reconciled plugin effect is not an exact create-only filesystem action".into(),
+            "reconciled plugin effect is not an exact governed filesystem write".into(),
         )));
     }
     let postcondition = resolution
@@ -6273,19 +6522,6 @@ mod tests {
     };
     use mcg_storage::{SqliteEventStore, task_contract_content_hash, verify_backup_bundle};
 
-    #[test]
-    fn plugin_filesystem_replacement_fails_closed_without_preimage_authority() {
-        require_create_only_plugin_write(true).expect("create-only writes are eligible");
-        let error = require_create_only_plugin_write(false)
-            .expect_err("replacement must require exact reversible preimage authority");
-        assert!(matches!(
-            error,
-            ToolError::Denied(ref message)
-                if message
-                    == "plugin filesystem replacement is awaiting exact reversible preimage authority"
-        ));
-    }
-
     fn workflow_hash(label: &str) -> ContentHash {
         VersionedPayload::canonical_v1(
             StableTypeId::parse("test.root_workflow_ref.v1").expect("reference type"),
@@ -6698,6 +6934,110 @@ mod tests {
         }
     }
 
+    struct PluginReplaceActionGateway {
+        calls: Arc<Mutex<Vec<ActionRunnerRequest>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl GovernedActionRunnerGateway for PluginReplaceActionGateway {
+        fn capability_evidence(
+            &self,
+        ) -> Result<ActionRunnerCapabilityEvidence, ActionRunnerClientError> {
+            Ok(scripted_action_capability_evidence())
+        }
+
+        async fn invoke(
+            &self,
+            request: &ActionRunnerRequest,
+        ) -> Result<ActionRunnerResponse, ActionRunnerClientError> {
+            let operation = decode_governed_filesystem_operation(&request.operation)
+                .expect("governed plugin replacement operation");
+            let (outcome, relative_path, bytes, include_content, detail) = match operation {
+                GovernedFilesystemOperation::ReadFile {
+                    relative_path,
+                    max_bytes,
+                } => {
+                    assert_eq!(
+                        request.authorization.proposal.requested_effect_class,
+                        EffectClass::Observational
+                    );
+                    let bytes = fs::read(request.capability_root.join(&relative_path))
+                        .expect("read replacement preimage");
+                    assert!(u64::try_from(bytes.len()).expect("preimage length") <= max_bytes);
+                    (
+                        RunnerEffectOutcome::Observational,
+                        relative_path,
+                        bytes,
+                        true,
+                        "captured exact replacement preimage",
+                    )
+                }
+                GovernedFilesystemOperation::ReplaceFile {
+                    relative_path,
+                    expected_preimage_sha256,
+                    preimage_base64,
+                    content_base64,
+                } => {
+                    assert_eq!(
+                        request.authorization.proposal.requested_effect_class,
+                        EffectClass::Reversible
+                    );
+                    let path = request.capability_root.join(&relative_path);
+                    let current = fs::read(&path).expect("read current replacement target");
+                    assert_eq!(
+                        format!("{:x}", Sha256::digest(&current)),
+                        expected_preimage_sha256
+                    );
+                    assert_eq!(
+                        STANDARD.decode(preimage_base64).expect("decode preimage"),
+                        current
+                    );
+                    let bytes = STANDARD
+                        .decode(content_base64)
+                        .expect("decode replacement bytes");
+                    fs::write(&path, &bytes).expect("replace protected plugin fixture");
+                    (
+                        RunnerEffectOutcome::EffectConfirmed,
+                        relative_path,
+                        bytes,
+                        false,
+                        "conditionally replaced protected plugin fixture",
+                    )
+                }
+                _ => panic!("replacement gateway received another operation"),
+            };
+            self.calls
+                .lock()
+                .expect("plugin replacement calls")
+                .push(request.clone());
+            let now = Utc::now();
+            let observation = VersionedPayload::canonical_v1(
+                StableTypeId::parse(GOVERNED_FILESYSTEM_OBSERVATION_TYPE)
+                    .expect("observation type"),
+                &serde_json::json!({
+                    "relative_path": relative_path,
+                    "exists": true,
+                    "sha256": format!("{:x}", Sha256::digest(&bytes)),
+                    "size_bytes": bytes.len(),
+                    "content_base64": include_content.then(|| STANDARD.encode(&bytes)),
+                }),
+            )
+            .expect("observation payload");
+            Ok(ActionRunnerResponse {
+                protocol_version: mcg_action_runner::ACTION_RUNNER_PROTOCOL_VERSION,
+                request_id: Some(request.request_id),
+                action_id: Some(request.action_id),
+                execution_id: Some(request.execution_id),
+                outcome,
+                observation: Some(observation),
+                error_code: None,
+                detail: detail.into(),
+                started_at: now,
+                finished_at: now,
+            })
+        }
+    }
+
     struct PluginLostCreateResponseGateway {
         calls: Arc<Mutex<Vec<ActionRunnerRequest>>>,
     }
@@ -6721,6 +7061,42 @@ mod tests {
             match decode_governed_filesystem_operation(&request.operation)
                 .expect("lost create or reconciliation operation")
             {
+                GovernedFilesystemOperation::ReadFile {
+                    relative_path,
+                    max_bytes,
+                } => {
+                    let bytes = fs::read(request.capability_root.join(&relative_path))
+                        .map_err(|_| ActionRunnerClientError::Process)?;
+                    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > max_bytes {
+                        return Err(ActionRunnerClientError::InvalidResponse);
+                    }
+                    let now = Utc::now();
+                    Ok(ActionRunnerResponse {
+                        protocol_version: mcg_action_runner::ACTION_RUNNER_PROTOCOL_VERSION,
+                        request_id: Some(request.request_id),
+                        action_id: Some(request.action_id),
+                        execution_id: Some(request.execution_id),
+                        outcome: RunnerEffectOutcome::Observational,
+                        observation: Some(
+                            VersionedPayload::canonical_v1(
+                                StableTypeId::parse(GOVERNED_FILESYSTEM_OBSERVATION_TYPE)
+                                    .expect("observation type"),
+                                &serde_json::json!({
+                                    "relative_path": relative_path,
+                                    "exists": true,
+                                    "sha256": format!("{:x}", Sha256::digest(&bytes)),
+                                    "size_bytes": bytes.len(),
+                                    "content_base64": STANDARD.encode(&bytes),
+                                }),
+                            )
+                            .expect("preimage observation"),
+                        ),
+                        error_code: None,
+                        detail: "captured lost replacement preimage".into(),
+                        started_at: now,
+                        finished_at: now,
+                    })
+                }
                 GovernedFilesystemOperation::CreateFile {
                     relative_path,
                     content_base64,
@@ -6730,6 +7106,23 @@ mod tests {
                         .map_err(|_| ActionRunnerClientError::InvalidResponse)?;
                     fs::write(request.capability_root.join(relative_path), bytes)
                         .map_err(|_| ActionRunnerClientError::Process)?;
+                    Err(ActionRunnerClientError::Process)
+                }
+                GovernedFilesystemOperation::ReplaceFile {
+                    relative_path,
+                    expected_preimage_sha256,
+                    content_base64,
+                    ..
+                } => {
+                    let path = request.capability_root.join(relative_path);
+                    let before = fs::read(&path).map_err(|_| ActionRunnerClientError::Process)?;
+                    if format!("{:x}", Sha256::digest(&before)) != expected_preimage_sha256 {
+                        return Err(ActionRunnerClientError::InvalidResponse);
+                    }
+                    let bytes = STANDARD
+                        .decode(content_base64)
+                        .map_err(|_| ActionRunnerClientError::InvalidResponse)?;
+                    fs::write(path, bytes).map_err(|_| ActionRunnerClientError::Process)?;
                     Err(ActionRunnerClientError::Process)
                 }
                 GovernedFilesystemOperation::InspectFile { relative_path, .. } => {
@@ -9689,16 +10082,227 @@ mod tests {
 
     #[tokio::test]
     #[allow(clippy::too_many_lines)]
-    async fn lost_plugin_create_response_waits_for_reconciliation_without_redispatch() {
+    async fn root_replaces_plugin_project_file_from_exact_governed_preimage() {
         let temporary = tempfile::tempdir().expect("temporary Root data directory");
         let project_root = tempfile::tempdir().expect("plugin project root");
+        fs::write(project_root.path().join("owned.txt"), "owner preimage")
+            .expect("write replacement preimage");
+        let runtime = Arc::new(
+            AppRuntime::open(AppConfig::default().with_data_directory(temporary.path()))
+                .expect("runtime"),
+        );
+        let project_id = ProjectId::new();
+        runtime
+            .discover_project(project_root.path(), project_id)
+            .expect("discover plugin project");
+        let mut task = TaskEnvelope::new("exercise a protected plugin replacement");
+        task.project_id = Some(project_id);
+        runtime.create_task(&task).expect("create plugin task");
+        let identity = current_runtime_identity().expect("Root identity");
+        runtime
+            .initialize_root_ownership(
+                identity.clone(),
+                RootMigrationReceipt {
+                    schema_version: PROTOCOL_V1,
+                    from_storage_schema: STORAGE_SCHEMA_VERSION,
+                    to_storage_schema: STORAGE_SCHEMA_VERSION,
+                    backup_path: None,
+                    backup_sha256: None,
+                    migrated_at: Utc::now(),
+                },
+            )
+            .expect("Root ownership");
+        let plugin_requests = Arc::new(Mutex::new(Vec::new()));
+        let action_requests = Arc::new(Mutex::new(Vec::new()));
+        let runner = SourceRef {
+            source_type: StableTypeId::parse("mcg.plugin_runner_executable.v1")
+                .expect("runner type"),
+            locator: "mcg-plugin-runner".into(),
+            content_hash: ContentHash {
+                algorithm: HashAlgorithm::Sha256,
+                domain: "MetaCog.PluginRunnerExecutable".into(),
+                digest_hex: "9".repeat(64),
+            },
+        };
+        runtime
+            .install_protected_plugin_dispatcher(Arc::new(RootPluginDispatcher {
+                runtime: Arc::downgrade(&runtime),
+                root_executable: PathBuf::from("unused-in-injected-test"),
+                runtime_actor: RuntimeActorId(identity.instance_id.0),
+                runtime_identity: identity,
+                capability_sessions: Mutex::new(BTreeMap::new()),
+                test_gateway: Some(Arc::new(ScriptedProtectedPluginGateway {
+                    runner,
+                    requests: plugin_requests.clone(),
+                    turns: Mutex::new(VecDeque::from([
+                        PluginGuestTurn::CapabilityRequest {
+                            request: PluginCapabilityRequest {
+                                schema_version: PLUGIN_SCHEMA_VERSION,
+                                id: "replace-proof".into(),
+                                operation: PluginCapabilityOperation::FilesystemWrite {
+                                    path: "owned.txt".into(),
+                                    content: "governed replacement".into(),
+                                    create_new: false,
+                                },
+                            },
+                        },
+                        PluginGuestTurn::Completed {
+                            output: serde_json::json!({"replaced": true}),
+                        },
+                    ])),
+                })),
+                test_action_gateway: Some(Arc::new(PluginReplaceActionGateway {
+                    calls: action_requests.clone(),
+                })),
+            }))
+            .expect("install protected plugin dispatcher");
+        let module = br#"(module (func (export "_start")))"#;
+        let revision = PluginRevision {
+            schema_version: PLUGIN_CATALOG_SCHEMA_VERSION,
+            id: PluginRevisionId::new(),
+            manifest: PluginManifest {
+                schema_version: PLUGIN_SCHEMA_VERSION,
+                id: "example.protected-replace".into(),
+                display_name: "Protected replacement fixture".into(),
+                version: "1.0.0".into(),
+                class: PluginClass::SandboxedWasi,
+                requested_capabilities: vec![PluginCapability::FilesystemWrite],
+            },
+            module_sha256: format!("{:x}", Sha256::digest(module)),
+            module_size_bytes: u64::try_from(module.len()).expect("module size"),
+            source: PluginInstallSource::LocalImport,
+            signature: PluginSignature {
+                state: PluginSignatureState::Unsigned,
+                scheme: None,
+                signer: None,
+                signature_sha256: None,
+            },
+            installed_at: Utc::now(),
+        };
+        let installation = runtime
+            .install_sandboxed_plugin(&revision, module)
+            .expect("install protected replacement plugin");
+        let installation = runtime
+            .set_plugin_capability_grants(
+                &revision.manifest.id,
+                installation.revision,
+                vec![PluginCapabilityGrant {
+                    schema_version: PLUGIN_CATALOG_SCHEMA_VERSION,
+                    capability: PluginCapability::FilesystemWrite,
+                    scopes: vec![PluginCapabilityScope::TaskProject],
+                }],
+            )
+            .expect("grant protected project write");
+        runtime
+            .set_plugin_enabled(&revision.manifest.id, installation.revision, true)
+            .expect("enable protected replacement plugin");
+
+        let result = runtime
+            .invoke_sandboxed_plugin(
+                PluginInvocationId::new(),
+                &revision.manifest.id,
+                Some(task.id),
+                serde_json::json!({"goal": "replace proof"}),
+            )
+            .await
+            .expect("invoke protected replacement plugin");
+
+        assert_eq!(
+            result.invocation.state,
+            mcg_domain::PluginInvocationState::Succeeded
+        );
+        assert_eq!(
+            fs::read_to_string(project_root.path().join("owned.txt"))
+                .expect("replaced project file"),
+            "governed replacement"
+        );
+        let action_requests = action_requests.lock().expect("action requests");
+        assert_eq!(action_requests.len(), 2);
+        assert!(matches!(
+            decode_governed_filesystem_operation(&action_requests[0].operation)
+                .expect("preimage operation"),
+            GovernedFilesystemOperation::ReadFile { .. }
+        ));
+        let replacement = decode_governed_filesystem_operation(&action_requests[1].operation)
+            .expect("replacement operation");
+        let GovernedFilesystemOperation::ReplaceFile {
+            expected_preimage_sha256,
+            preimage_base64,
+            ..
+        } = replacement
+        else {
+            panic!("second operation must be replacement")
+        };
+        assert_eq!(
+            expected_preimage_sha256,
+            format!("{:x}", Sha256::digest(b"owner preimage"))
+        );
+        assert_eq!(
+            STANDARD.decode(preimage_base64).expect("decode preimage"),
+            b"owner preimage"
+        );
+        assert!(matches!(
+            decode_governed_filesystem_operation(
+                action_requests[1]
+                    .envelope
+                    .compensation
+                    .as_ref()
+                    .expect("replacement compensation")
+            )
+            .expect("decode replacement compensation"),
+            GovernedFilesystemOperation::RestoreReplacedFile { .. }
+        ));
+        assert_eq!(action_requests[1].envelope.preconditions.len(), 1);
+        assert_eq!(
+            action_requests[1].envelope.preconditions[0]
+                .type_id
+                .as_str(),
+            "mcg.plugin_filesystem_preimage.v1"
+        );
+        drop(action_requests);
+        let actions = runtime.canonical_actions(10).expect("plugin actions");
+        assert_eq!(actions.len(), 4);
+        assert_eq!(
+            actions
+                .iter()
+                .filter(|action| action.state == ActionExecutionState::Committed)
+                .count(),
+            1
+        );
+        assert_eq!(
+            actions
+                .iter()
+                .filter(|action| action.state == ActionExecutionState::NoEffectConfirmed)
+                .count(),
+            3
+        );
+        assert_eq!(
+            runtime.canonical_workflows().expect("plugin workflow")[0].state,
+            WorkflowState::Succeeded
+        );
+        assert_eq!(
+            runtime
+                .tool_authorizations(10, Utc::now())
+                .expect("plugin Tool permits")
+                .len(),
+            4
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn lost_plugin_replacement_response_reconciles_after_restart_without_redispatch() {
+        let temporary = tempfile::tempdir().expect("temporary Root data directory");
+        let project_root = tempfile::tempdir().expect("plugin project root");
+        fs::write(project_root.path().join("uncertain.txt"), "owner preimage")
+            .expect("write uncertain replacement preimage");
         let config = AppConfig::default().with_data_directory(temporary.path());
         let runtime = Arc::new(AppRuntime::open(config.clone()).expect("runtime"));
         let project_id = ProjectId::new();
         runtime
             .discover_project(project_root.path(), project_id)
             .expect("discover plugin project");
-        let mut task = TaskEnvelope::new("exercise an uncertain protected plugin create");
+        let mut task = TaskEnvelope::new("exercise an uncertain protected plugin replacement");
         task.project_id = Some(project_id);
         runtime.create_task(&task).expect("create plugin task");
         let identity = current_runtime_identity().expect("Root identity");
@@ -9739,11 +10343,11 @@ mod tests {
                     turns: Mutex::new(VecDeque::from([PluginGuestTurn::CapabilityRequest {
                         request: PluginCapabilityRequest {
                             schema_version: PLUGIN_SCHEMA_VERSION,
-                            id: "lost-create-proof".into(),
+                            id: "lost-replacement-proof".into(),
                             operation: PluginCapabilityOperation::FilesystemWrite {
                                 path: "uncertain.txt".into(),
-                                content: "effect survives response loss".into(),
-                                create_new: true,
+                                content: "replacement survives response loss".into(),
+                                create_new: false,
                             },
                         },
                     }])),
@@ -9759,8 +10363,8 @@ mod tests {
             id: PluginRevisionId::new(),
             manifest: PluginManifest {
                 schema_version: PLUGIN_SCHEMA_VERSION,
-                id: "example.uncertain-create".into(),
-                display_name: "Uncertain create fixture".into(),
+                id: "example.uncertain-replacement".into(),
+                display_name: "Uncertain replacement fixture".into(),
                 version: "1.0.0".into(),
                 class: PluginClass::SandboxedWasi,
                 requested_capabilities: vec![PluginCapability::FilesystemWrite],
@@ -9778,7 +10382,7 @@ mod tests {
         };
         let installation = runtime
             .install_sandboxed_plugin(&revision, module)
-            .expect("install uncertain create plugin");
+            .expect("install uncertain replacement plugin");
         let installation = runtime
             .set_plugin_capability_grants(
                 &revision.manifest.id,
@@ -9792,7 +10396,7 @@ mod tests {
             .expect("grant protected project write");
         runtime
             .set_plugin_enabled(&revision.manifest.id, installation.revision, true)
-            .expect("enable uncertain create plugin");
+            .expect("enable uncertain replacement plugin");
 
         let result = runtime
             .invoke_sandboxed_plugin(
@@ -9815,9 +10419,9 @@ mod tests {
         assert_eq!(
             fs::read_to_string(project_root.path().join("uncertain.txt"))
                 .expect("uncertain effect remains inspectable"),
-            "effect survives response loss"
+            "replacement survives response loss"
         );
-        assert_eq!(action_requests.lock().expect("action requests").len(), 1);
+        assert_eq!(action_requests.lock().expect("action requests").len(), 2);
         let workflow = runtime
             .canonical_workflows()
             .expect("plugin workflow")
@@ -9829,7 +10433,7 @@ mod tests {
             WorkflowState::Waiting(WaitReason::Reconciliation)
         );
         let actions = runtime.canonical_actions(10).expect("plugin actions");
-        assert_eq!(actions.len(), 2);
+        assert_eq!(actions.len(), 3);
         assert_eq!(
             actions
                 .iter()
@@ -9873,7 +10477,7 @@ mod tests {
             std::cmp::max(Utc::now(), job.next_attempt_at),
         )
         .await
-        .expect("reconcile plugin create after runtime reopen");
+        .expect("reconcile plugin replacement after runtime reopen");
         assert_eq!(
             reconciled.resolution.job.state,
             mcg_contracts::ReconciliationJobState::Resolved
@@ -9904,7 +10508,7 @@ mod tests {
         let actions = runtime
             .canonical_actions(10)
             .expect("reconciled plugin actions");
-        assert_eq!(actions.len(), 3);
+        assert_eq!(actions.len(), 4);
         assert_eq!(
             actions
                 .iter()
@@ -9917,11 +10521,11 @@ mod tests {
                 .iter()
                 .filter(|action| action.state == ActionExecutionState::NoEffectConfirmed)
                 .count(),
-            2
+            3
         );
         let requests = action_requests.lock().expect("action requests");
-        assert_eq!(requests.len(), 2);
-        assert_ne!(requests[0].action_id, requests[1].action_id);
+        assert_eq!(requests.len(), 3);
+        assert_ne!(requests[1].action_id, requests[2].action_id);
         assert_eq!(
             requests[0].execution_mode,
             mcg_action_runner::ActionRunnerExecutionMode::Effect
@@ -9930,13 +10534,22 @@ mod tests {
             requests[1].execution_mode,
             mcg_action_runner::ActionRunnerExecutionMode::Effect
         );
-        assert_eq!(requests[0].envelope.effect_class, EffectClass::Reversible);
         assert_eq!(
-            requests[1].envelope.effect_class,
+            requests[0].envelope.effect_class,
+            EffectClass::Observational
+        );
+        assert_eq!(requests[1].envelope.effect_class, EffectClass::Reversible);
+        assert!(matches!(
+            decode_governed_filesystem_operation(&requests[1].operation)
+                .expect("exact replacement operation"),
+            GovernedFilesystemOperation::ReplaceFile { .. }
+        ));
+        assert_eq!(
+            requests[2].envelope.effect_class,
             EffectClass::Observational
         );
         assert!(matches!(
-            decode_governed_filesystem_operation(&requests[1].operation)
+            decode_governed_filesystem_operation(&requests[2].operation)
                 .expect("exact reconciliation probe"),
             GovernedFilesystemOperation::InspectFile { .. }
         ));
@@ -9946,7 +10559,7 @@ mod tests {
                 .tool_authorizations(10, Utc::now())
                 .expect("reconciliation Tool permits")
                 .len(),
-            3
+            4
         );
     }
 
