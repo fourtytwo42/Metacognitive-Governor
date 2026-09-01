@@ -1,14 +1,14 @@
 # Stage 6 — Governed Providers, Tools, Hooks, and Plugins
 
-**Status:** Root-bound model-egress permit kernel, deterministic Root gateway, and isolated credential-resolving OpenAI-compatible provider runner implemented; production caller migration, retry/stream/cancellation, product inspection, and the broader capability gateway remain open
+**Status:** Root-bound model-egress permit kernel, deterministic Root gateway, isolated credential-resolving OpenAI-compatible provider runner, and fresh/resumed compatibility-agent production routing implemented; canonical completion, retry/stream/cancellation, product inspection, and the broader capability gateway remain open
 
-**Product checkpoints:** `0e4c0e8` (`Add Root-bound model egress permits`), `deb4136` (`Add deterministic permit-consuming provider gateway`), `50f29fd` (`Add isolated governed provider runner`), and `ad378b6` (`Pin governed provider runner identity`)
+**Product checkpoints:** `0e4c0e8` (`Add Root-bound model egress permits`), `deb4136` (`Add deterministic permit-consuming provider gateway`), `50f29fd` (`Add isolated governed provider runner`), `ad378b6` (`Pin governed provider runner identity`), and `b6b2ddf` (`Route agent models through protected root`)
 
 ## Authority boundary
 
 Remote model execution is governed disclosure and cost, not authority-free inference. Runtime may propose one bounded invocation, but only Protected Root may validate the exact persisted workflow/context/provider state and issue durable authority. Runtime receives opaque secret-handle identifiers, never raw credentials. The isolated provider runner resolves a handle only for the exact active permit, provider connection, credential slot, and expiry.
 
-The schema-59 permit kernel and deterministic in-process gateway do not send network traffic. The isolated provider runner now exercises one real OpenAI-compatible Responses HTTP route, but existing product provider callers remain compatibility foundations until they all execute only through the governed path described below.
+The schema-59 permit kernel and deterministic in-process gateway do not send network traffic. The isolated provider runner exercises one real OpenAI-compatible Responses HTTP route. Fresh and resumed compatibility-agent turns under Root ownership now execute only through a lease-scoped Root dispatcher and that isolated runner; a missing dispatcher refuses the call instead of falling back to the legacy provider registry. Other provider surfaces remain compatibility foundations until separately migrated.
 
 ## Implemented permit kernel
 
@@ -44,7 +44,18 @@ The schema-59 permit kernel and deterministic in-process gateway do not send net
 - A real-process loopback test exercises the OpenAI-compatible `/v1/responses` route through the fixed child. A separate credential test proves the API key is absent from the Root request, appears only in the outbound authorization header, and never enters the response artifact.
 - Packaging contracts include and qualify the runner for Windows installer/portable, Linux Debian/AppImage, and macOS payloads. Native installed-package execution remains part of the open Stage 6 exit gate.
 
+## Implemented production compatibility-agent route
+
+- Protected Root installs one non-replaceable dispatcher when it acquires authoritative ownership. Runtime gives it only the selected provider/model request and exact live `AgentLeaseId`; Root reloads provider/catalog state and chooses the fixed adjacent isolated runner.
+- Fresh turns and approval resumptions both use a lease-scoped gateway. Under Root ownership, absence of the dispatcher fails closed before registry or OAuth fallback; embedded pre-Root test/runtime use remains backward compatible.
+- One transaction creates or reloads the immutable schema-60 attachment, verifies the current compatibility task/run/plan/instance/lease chain, and claims the Ready canonical attempt. Same-owner live replay is safe; expired, completed, reassigned, foreign-owner, or otherwise stale authority is rejected without changing the canonical attempt.
+- Each physical call has a new invocation ID, stable client request ID, Root permit, and `ModelRun`. Input/output/cost/time limits are derived from the persisted lease, current model descriptor, and a hard per-call cost ceiling; the ContextManifest exposes only the immutable source reference and request-bound influence hashes.
+- The exact request, manifest, permit, plan, dispatch, and bounded response evidence use the existing Stage 6 result fences. No raw provider response, arbitrary metadata, or credential is added to generic durable state.
+- Production streaming remains refused until it has a separately authorized invocation path. OAuth-backed calls fail closed in the isolated runner until the governed broker exists.
+
 ## Verified evidence
+
+- Production-route checkpoint `b6b2ddf`: Storage 116/116; Runtime 111 active with two explicit Windows Sandbox qualifications ignored; Protected Root 15/15 plus real-child action recovery; schema-50 interruption/retry/verified-backup-restore migration 1/1; focused registry-bypass and exact one-permit gateway regressions; changed-boundary Clippy; documentation, packaging, formatting, and diff gates pass.
 
 - `mcg-contracts`: 20/20, including model overscope, substitution, duplicate-handle, invalid-time, and bounded-evidence failures.
 - `mcg-storage`: 113/113, including schema-59 authorization, replay, secret opacity, handle expiry, and InvocationManifest permit binding.
@@ -62,9 +73,9 @@ The schema-59 permit kernel and deterministic in-process gateway do not send net
 - Add declared retry/idempotency policy with a distinct invocation/permit/ModelRun for every physical attempt; the storage model intentionally allows one physical ModelRun head per invocation.
 - Route recorded parser fixtures through the implemented deterministic path and add cancellation plus invalid/oversized response cases.
 
-### 6B — Real governed provider route — partially complete
+### 6B — Real governed provider route — substantially complete for compatibility agents
 
-- A real credential-free OpenAI-compatible Responses HTTP route passes through the isolated child in process tests. Schema 60 now lets Root derive one immutable canonical contract/workflow/attempt from only an exact active compatibility agent lease ID; production calls do not use that seam yet. Attach and claim each production turn, then migrate its provider call through the governed route without a compatibility bypass and add opt-in external-provider qualification.
+- A real credential-free OpenAI-compatible Responses HTTP route passes through the isolated child in process tests. Schema 60 lets Root derive one immutable canonical contract/workflow/attempt from only an exact active compatibility agent lease ID, and fresh/resumed production compatibility-agent calls now attach, claim, authorize, and dispatch without a legacy-provider fallback. Add canonical post-call workflow settlement and opt-in external-provider qualification.
 - Add streaming cancellation, response-size bounds, late/duplicate result fencing, retry fault injection, and observed provider/model fingerprint persistence.
 - Run opt-in real-provider tests and a bounded release smoke test without retaining prompts, responses, or credentials in generic logs/evidence.
 

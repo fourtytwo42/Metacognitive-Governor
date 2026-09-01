@@ -1,6 +1,6 @@
 # MetaCog Cognitive Runtime Implementation Plan
 
-**Status:** Active staged delivery plan; Stages 0–4 have implementation checkpoints, Stage 5 is implemented through reconstructable real-process Work/Verify and governed agent inspection, and Stage 6 now includes exact Runtime/lease-bound model-egress permits, deterministic Root dispatch/result fencing, and a verified isolated credential-resolving OpenAI-compatible provider runner
+**Status:** Active staged delivery plan; Stages 0–4 have implementation checkpoints, Stage 5 is implemented through reconstructable real-process Work/Verify, governed agent inspection, and the first compatibility-agent model bridge, and Stage 6 now includes exact Runtime/lease-bound model-egress permits, deterministic Root dispatch/result fencing, a verified isolated credential-resolving OpenAI-compatible provider runner, and fresh/resumed production compatibility-agent routing
 **Scope:** Alignment with the Adaptive Cognitive Agent Runtime PRD v1.4.2, Cognitive Runtime Implementation Contract v0.1, and Cognitive Runtime Experimental Protocol Specification v0.2
 **Product:** MetaCog desktop and `mcg` CLI on Windows, macOS, and Linux
 
@@ -677,10 +677,10 @@ Do not claim consciousness, subjective identity, unrestricted self-improvement, 
 
 ## 10. Immediate Next Actions
 
-1. Complete Stage 3 compatibility reattachment, child propagation, event streaming, wake triggers, and the remaining nonterminal crash/reassignment matrix.
+1. Complete canonical compatibility-turn result settlement, remaining Stage 3 source reattachment, child propagation, event streaming, wake triggers, and the remaining nonterminal crash/reassignment matrix.
 2. Extend Stage 4's implemented owner-authorized compensation and real-child fault paths through packaged adversarial and native three-platform qualification.
 3. Finish Stage 5 packaged remote-inventory, cancellation, replacement, crash-injection, and native qualification; direct remote Codex sub-agent inventory and canonical workflow/current-attempt invocation drill-down are implemented.
-4. Migrate existing product provider callers through the verified isolated provider runner without a compatibility bypass, then add distinct-authority retries, streaming/cancellation, governed tool/capability permits, redaction/security E2E, and cross-platform product qualification.
+4. Complete canonical settlement for the fresh/resumed compatibility-agent callers now routed through the verified isolated provider runner, migrate any remaining provider surfaces without a compatibility bypass, then add distinct-authority retries, streaming/cancellation, governed tool/capability permits, redaction/security E2E, and cross-platform product qualification.
 5. Build and pass the Stage 7 Protected Evaluator and Phase 0 integrity gate before beginning recursive improvement work.
 6. Continue through Stages 8–13 only behind the recorded scientific and production gates, with matched Windows/macOS/Linux package and native UAT evidence at every affected boundary.
 
