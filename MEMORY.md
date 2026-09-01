@@ -2,6 +2,15 @@
 
 Durable project context lives here. Update this file whenever information should survive chat context compression or future agent handoff.
 
+### 2026-09-01 - OAuth provider execution excludes renewable authority
+
+- Context: Stage 6 governed API-key/bearer/no-auth provider execution, but the isolated runner denied ChatGPT OAuth and Root-issued OAuth permits exposed the renewable refresh-token slot alongside execution credentials.
+- Decision: Version the provider-runner protocol to v3. Define one canonical least-authority execution-slot shape: OAuth receives only access and ID-token handles, never the refresh token. Build the exact first-party ChatGPT subscription route from those two credentials, reject API-billing route substitution, and force one physical attempt. Protected Root holds the existing per-connection credential-rotation gate for the full buffered call or returned stream so explicit refresh cannot rotate credentials mid-authorized execution.
+- Files: `apps/mcg-provider-runner/src/lib.rs`, `crates/mcg-protected-root/src/lib.rs`, `crates/mcg-providers/src/{compatible.rs,oauth_device.rs}`, `crates/mcg-runtime/src/oauth.rs`, `crates/mcg-storage/src/{egress.rs,lib.rs}`, and Windows/Linux/macOS package qualification scripts. The other agent's untracked `docs/NewPRD/STAGE_3_DURABLE_WORKFLOW.md` remains untouched.
+- Commands/tests: Product checkpoint `6da3e23`; Providers 44/44 plus the GPU45 live fixture; provider runner 7 unit, 2 package/dependency, and 4 real-process tests; Storage 119/119; Runtime 111 active with two explicit Windows Sandbox qualifications ignored; Protected Root 20/20 plus real-child recovery; whole affected-crate all-target suite; whole-workspace all-target check; strict Providers/provider-runner and Root no-deps Clippy; Runtime Clippy with only its recorded legacy warning backlog; docs/packaging/format/diff gates. Push parity is exact at `6da3e2314eb8a4ec781e3bd1caf822aa935ea5a5`.
+- Result: Existing owner-authenticated ChatGPT browser/device credentials can execute through the Root permit and isolated provider runner without granting renewable credential authority to the child. Refresh waits for active buffered/streaming execution to release the Root-owned gate. No automatic post-contact refresh or retry was introduced; ambiguous contact remains `OutcomeUnknown`.
+- Follow-up: Run opt-in external OAuth smoke with owner credentials, test expired-token/preflight behavior without unsafe post-contact replay, scan packaged backup/log/UI surfaces for credential leakage, and qualify matched Windows/Linux/macOS native packages. Continue Tool/Skill/Capability manifests and Root permits.
+
 ### 2026-09-01 - Governed provider terminal outcomes retain exact cost provenance
 
 - Context: Stage 6 retained governed provider identity and bounded usage, but successful and failed physical attempts did not yet preserve exact elapsed time, actual-cost provenance, or categorical terminal errors on their immutable `ModelRun` histories.
