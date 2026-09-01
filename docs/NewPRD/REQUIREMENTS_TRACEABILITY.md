@@ -1,6 +1,6 @@
 # Cognitive Runtime Requirements Traceability
 
-**Status:** Active implementation matrix; Stages 1–2 implementation complete with owner-bound package lanes open, Stages 3–4 substantially implemented, and Stage 5 complete through Root-owned real-process orchestration/recovery, authenticated Root/CLI/Desktop reconstruction, active cancellation, governed local/global agent inventory, canonical workflow/current-attempt invocation drill-down, and direct remote Codex sub-agent inventory
+**Status:** Active implementation matrix; Stages 1–2 implementation complete with owner-bound package lanes open, Stages 3–4 substantially implemented through schema-60 exact compatibility-agent-lease attachment, and Stage 5 complete through Root-owned real-process orchestration/recovery, authenticated Root/CLI/Desktop reconstruction, active cancellation, governed local/global agent inventory, canonical workflow/current-attempt invocation drill-down, and direct remote Codex sub-agent inventory
 **Purpose:** Map normative requirements to implementation stages, automated evidence, E2E/UAT evidence, and release artifacts
 
 This matrix is updated as implementation lands. `Implemented / cumulative UAT pending` means local implementation and its stage-level automated evidence pass, while final native/cross-platform evidence remains open.
@@ -30,7 +30,7 @@ This matrix is updated as implementation lands. `Implemented / cumulative UAT pe
 | Root and Evaluator maintain separate canonical histories | 7 | Cross-store reference tests | Disclosed-summary inspection | Planned |
 | Large immutable artifacts use verified atomic content-addressed storage | 2, 7 | Temp/flush/hash/rename tests | Crash during artifact creation | Planned |
 | Derived indexes are rebuildable and non-authoritative | 8 | Delete/rebuild equivalence | Search before/after rebuild | Planned |
-| Existing MetaCog data migrates into a default runtime lineage | 2 | Migration fixtures | Packaged upgrade UAT | Schema 50→55, interruption retry, verified restore, data preservation, stable Root identity, and current migration-process tests pass / current-source packaged UAT pending |
+| Existing MetaCog data migrates into a default runtime lineage | 2, 3 | Migration fixtures | Packaged upgrade UAT | Schema 50→60 interruption retry, verified restore, data preservation, and stable Root identity pass. An exact active compatibility task/run/plan/instance/lease can now be atomically attached to one immutable canonical contract/workflow/attempt using only its lease ID / production turn invocation, remaining source classes, and packaged UAT pending |
 | Unsafe downgrade fails clearly | 2 | Version downgrade tests | Old package against new data copy | Newer schema refusal implemented / old-package UAT pending |
 
 ## 3. IPC and Process Security
@@ -49,7 +49,7 @@ This matrix is updated as implementation lands. `Implemented / cumulative UAT pe
 
 | Requirement | Stage | Automated evidence | E2E/UAT evidence | Status |
 |---|---:|---|---|---|
-| Durable `TaskContract` and `WorkflowAttempt` | 3 | Transition/unit tests | Create, restart, inspect | Schema 53 immutable contract versions/heads/dependencies, revision-head CAS with exact replay, attempts, ordered events, atomic v1 Ready creation, authenticated Root IPC/CLI inspection, and deterministic Desktop inspection implemented / process-restart E2E pending |
+| Durable `TaskContract` and `WorkflowAttempt` | 3 | Transition/unit tests | Create, restart, inspect | Schema 53 immutable contract versions/heads/dependencies, revision-head CAS with exact replay, attempts, ordered events, atomic v1 Ready creation, and schema-60 immutable source attachment with exact replay/full rollback/cross-table revalidation are implemented. Root can derive the canonical authority from one active legacy lease ID; authenticated Root IPC/CLI and deterministic Desktop inspection pass / production caller attachment and process/package E2E pending |
 | Only legal workflow transitions occur | 3 | Generated state-machine tests | Invalid transition through API/CLI | Exhaustive contract table, Root-owned revision/generation CAS transitions, authenticated IPC, CLI parser/process coverage, and Desktop cancellation fencing pass / packaged invalid-transition UAT pending |
 | Terminal workflows do not ordinarily reactivate | 3 | Property tests | Retry creates explicit new attempt | Terminal monotonicity and explicit parent-linked retry attempts pass / cumulative process UAT pending |
 | Generation-fenced leases prevent stale commit | 3 | Race/property tests | Kill owner, reassign, deliver stale result | Claim/heartbeat/cancel/recovery CAS, concurrent-claim winner, stale-result tests, and Stage 5 delayed Runtime cancellation/late-result process coverage pass / complete Stage 3 forced-kill/reassignment matrix and packaged UAT pending |

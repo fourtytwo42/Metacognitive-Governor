@@ -2,6 +2,15 @@
 
 Durable project context lives here. Update this file whenever information should survive chat context compression or future agent handoff.
 
+### 2026-08-31 - Canonical compatibility-agent workflow attachment
+
+- Context: Existing agent/provider turns still used mutable compatibility task/run/instance/lease projections and therefore could not be routed honestly through Root-owned invocation permits without inventing canonical workflow authority.
+- Decision: Add schema 60 immutable `WorkflowSourceAttachment` evidence. Protected Root accepts only an `AgentLeaseId`; the authoritative storage transaction loads and verifies the exact active task, run, work plan, instance, and unexpired lease, hashes their stored JSON with SHA-256, derives bounded canonical policies and a new `TaskContract`/Ready attempt, and atomically commits the contract, attempt, creation event, and source attachment. Exact replay returns the original evidence without consulting later mutable projections; differing source reuse fails and rolls back the entire proposed workflow. Every load revalidates denormalized columns and linked contract/attempt evidence.
+- Files: `mcg-contracts`; schema-60 `mcg-storage` workflow/migration code; Runtime narrow Root facade; Protected Root lease-ID-only entry point; migration fixtures; NewPRD status/traceability documents; `MEMORY.md`. The other agent's untracked `docs/NewPRD/STAGE_3_DURABLE_WORKFLOW.md` remains untouched.
+- Commands/tests: Contracts 21/21; storage 116/116; workflow-focused 19/19 after cross-table load hardening; protected-rootd schema-50 interruption/retry/verified-backup-restore migration 1/1; Runtime and Protected Root all-target checks; strict contracts Clippy; normal changed-boundary storage/Runtime/Root Clippy with only the recorded legacy lint backlogs and deliberate fully visible authority-derivation size allowance; formatting and diff checks. Tests ran in `D:\MetaCogStage60Target` because C: had about 11.5 GiB free.
+- Result: Product checkpoint `ded85a2` is pushed with exact local/remote parity. This is the canonical attachment prerequisite, not production provider migration: no legacy model call yet consumes the resulting workflow or a Root permit.
+- Follow-up: Claim the attached Ready attempt under the authenticated Runtime actor, derive and persist its material Work invocation/context, authorize exact egress, and route one production agent provider call exclusively through the isolated provider runner. Then add distinct-authority retry, streaming/cancellation, remaining source classes, inspection, packaged adversarial E2E, and native Windows/macOS/Linux UAT.
+
 ### 2026-08-31 - Provider-runner executable identity pinning
 
 - Context: The isolated provider client required the fixed adjacent filename and a regular non-link file but did not retain the selected executable's content identity, leaving replacement between client construction and a later invocation insufficiently detected.

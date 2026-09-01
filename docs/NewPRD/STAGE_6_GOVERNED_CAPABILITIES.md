@@ -64,7 +64,7 @@ The schema-59 permit kernel and deterministic in-process gateway do not send net
 
 ### 6B — Real governed provider route — partially complete
 
-- A real credential-free OpenAI-compatible Responses HTTP route passes through the isolated child in process tests. Migrate the existing product provider callers through this route without a compatibility bypass and add opt-in external-provider qualification.
+- A real credential-free OpenAI-compatible Responses HTTP route passes through the isolated child in process tests. Schema 60 now lets Root derive one immutable canonical contract/workflow/attempt from only an exact active compatibility agent lease ID; production calls do not use that seam yet. Attach and claim each production turn, then migrate its provider call through the governed route without a compatibility bypass and add opt-in external-provider qualification.
 - Add streaming cancellation, response-size bounds, late/duplicate result fencing, retry fault injection, and observed provider/model fingerprint persistence.
 - Run opt-in real-provider tests and a bounded release smoke test without retaining prompts, responses, or credentials in generic logs/evidence.
 

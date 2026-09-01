@@ -205,7 +205,7 @@ Strict whole-storage Clippy still reaches the repository’s documented pre-exis
 
 Stage 5 is not complete until all of the following are implemented and qualified:
 
-1. Connect real governed provider/model execution through Stage 6 permits without giving Runtime ambient network, storage, or secret authority.
+1. Use the schema-60 Root-only active-agent-lease attachment seam from production turns, claim the resulting canonical attempt under authenticated Runtime authority, and connect real governed provider/model execution through Stage 6 permits without giving Runtime ambient network, storage, or secret authority.
 2. Run packaged active cancellation/service replacement, direct remote-inventory transport qualification, broader combined workflow/Runtime crash injection, native GUI UAT, migration, and matched Windows/Linux/macOS package gates.
 
 No real provider is required for this stage’s correctness. Root-bound remote egress permits and secret handles begin in Stage 6.
