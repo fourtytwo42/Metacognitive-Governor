@@ -1429,6 +1429,7 @@ export interface CanonicalInvocationInspection {
       state: CanonicalModelRunState;
       provider_request_id: string | null;
       response_artifact: { content_hash: { algorithm: string; domain: string; digest_hex: string }; media_type: string; byte_length: number } | null;
+      observed_model_fingerprint: string | null;
       started_at: string;
       finished_at: string | null;
       [key: string]: unknown;

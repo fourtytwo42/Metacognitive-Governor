@@ -1472,6 +1472,7 @@ test("Runtime invocations preserve one Root truth across Simple Advanced and Dev
         state: "completed",
         provider_request_id: "provider-request-567",
         response_artifact: { content_hash: hash("MetaCog.RuntimeResponse", "5"), media_type: "application/vnd.metacog.runtime-response+json", byte_length: 512 },
+        observed_model_fingerprint: "MetaCog.ObservedModelFingerprint:sha256:observed-fixture-567",
         started_at: updatedAt,
         finished_at: "2026-08-30T14:00:01Z"
       },
@@ -1497,6 +1498,7 @@ test("Runtime invocations preserve one Root truth across Simple Advanced and Dev
   fireEvent.click(within(invocations).getByRole("button", { name: "Inspect" }));
   expect(await within(invocations).findByText(/governed-provider/)).toBeInTheDocument();
   expect(within(invocations).getByText(/deterministic-work-v1/)).toBeInTheDocument();
+  expect(within(invocations).getByText(/observed model/)).toHaveTextContent(/MetaCog\.ObservedModel/);
   expect(within(invocations).getByText(/1 governed context source · approximately 144 tokens/)).toBeInTheDocument();
   expect(within(invocations).queryByRole("button", { name: "Canonical invocation evidence" })).not.toBeInTheDocument();
 
@@ -1510,6 +1512,7 @@ test("Runtime invocations preserve one Root truth across Simple Advanced and Dev
   expect(evidence).toHaveTextContent("provider-request-567");
   expect(evidence).toHaveTextContent("MetaCog.ModelRequest");
   expect(evidence).toHaveTextContent("response_artifact");
+  expect(evidence).toHaveTextContent("MetaCog.ObservedModelFingerprint:sha256:observed-fixture-567");
 
   fireEvent.click(complexity);
   await waitFor(() => expect(complexity).toHaveTextContent("Simple"));

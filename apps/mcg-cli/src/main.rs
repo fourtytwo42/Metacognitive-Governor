@@ -11512,6 +11512,9 @@ async fn run_root_invocation(
                         "  run {} revision {}: {:?} at {}",
                         run.run.id, run.revision, run.run.state, run.recorded_at
                     );
+                    if let Some(fingerprint) = &run.run.observed_model_fingerprint {
+                        println!("    observed model: {fingerprint}");
+                    }
                 }
                 if inspection.model_runs_truncated {
                     println!("  model-run history truncated at {model_run_limit} revisions");

@@ -3375,6 +3375,7 @@ mod tests {
             provider_request_id: None,
             response_artifact: None,
             usage: None,
+            observed_model_fingerprint: None,
             started_at: observed_at,
             finished_at: None,
         };

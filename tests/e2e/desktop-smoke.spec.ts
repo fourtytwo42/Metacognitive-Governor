@@ -277,6 +277,7 @@ test.beforeEach(async ({ page }) => {
           state: "completed",
           provider_request_id: "provider-request-615",
           response_artifact: { content_hash: invocationHash("MetaCog.RuntimeResponse", "1"), media_type: "application/vnd.metacog.runtime-response+json", byte_length: 512 },
+          observed_model_fingerprint: "MetaCog.ObservedModelFingerprint:sha256:observed-playwright-615",
           started_at: now,
           finished_at: "2026-08-18T00:00:01Z"
         },
@@ -789,6 +790,7 @@ test("Runtime invocations keep one Root truth across Simple Advanced and Develop
   await invocations.getByRole("button", { name: "Inspect" }).click();
   await expect(invocations.getByText(/governed-provider/)).toBeVisible();
   await expect(invocations.getByText(/deterministic-work-v1/)).toBeVisible();
+  await expect(invocations.getByText(/observed model/)).toContainText("MetaCog.ObservedModel");
   await expect(invocations.getByText(/1 governed context source · approximately 144 tokens/)).toBeVisible();
   await expect(invocations.getByRole("button", { name: "Canonical invocation evidence" })).toHaveCount(0);
 
@@ -803,6 +805,7 @@ test("Runtime invocations keep one Root truth across Simple Advanced and Develop
   await expect(evidence).toContainText("provider-request-615");
   await expect(evidence).toContainText("MetaCog.ModelRequest");
   await expect(evidence).toContainText("response_artifact");
+  await expect(evidence).toContainText("MetaCog.ObservedModelFingerprint:sha256:observed-playwright-615");
   const accessibility = await new AxeBuilder({ page }).include(".canonical-invocation-section").analyze();
   expect(accessibility.violations, "Runtime-invocation accessibility violations").toEqual([]);
 

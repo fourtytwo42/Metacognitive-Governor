@@ -4727,6 +4727,7 @@ mod tests {
                 provider_request_id: None,
                 response_artifact: None,
                 usage: None,
+                observed_model_fingerprint: None,
                 started_at: now,
                 finished_at: None,
             };

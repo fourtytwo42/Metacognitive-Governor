@@ -4304,6 +4304,7 @@ impl AppRuntime {
                 provider_request_id: None,
                 response_artifact: None,
                 usage: None,
+                observed_model_fingerprint: None,
                 started_at: now,
                 finished_at: None,
             },
@@ -4348,6 +4349,7 @@ impl AppRuntime {
         model_run_id: ModelRunId,
         response_artifact: ArtifactRef,
         usage: ModelUsage,
+        observed_model_fingerprint: String,
         now: DateTime<Utc>,
     ) -> Result<mcg_storage::ModelRunRecord, RuntimeError> {
         response_artifact
@@ -4376,6 +4378,7 @@ impl AppRuntime {
         next.state = ModelRunState::Completed;
         next.response_artifact = Some(response_artifact);
         next.usage = Some(usage);
+        next.observed_model_fingerprint = Some(observed_model_fingerprint);
         next.finished_at = Some(now);
         Ok(store.transition_model_run(&next, current.revision, now)?)
     }
@@ -4501,6 +4504,7 @@ impl AppRuntime {
                     provider_request_id: None,
                     response_artifact: None,
                     usage: None,
+                    observed_model_fingerprint: None,
                     started_at: now,
                     finished_at: None,
                 },

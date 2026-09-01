@@ -1762,6 +1762,8 @@ pub struct ModelRun {
     pub provider_request_id: Option<String>,
     pub response_artifact: Option<ArtifactRef>,
     pub usage: Option<ModelUsage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_model_fingerprint: Option<String>,
     pub started_at: DateTime<Utc>,
     pub finished_at: Option<DateTime<Utc>>,
 }
@@ -1790,12 +1792,23 @@ impl ModelRun {
                 "artifact media type is empty, oversized, or contains controls",
             )?;
         }
+        if let Some(fingerprint) = &self.observed_model_fingerprint {
+            validate_text(
+                fingerprint,
+                MAX_MANIFEST_TEXT_BYTES,
+                "observed model fingerprint is empty, oversized, or contains controls",
+            )?;
+        }
         if self.state == ModelRunState::Planned
             && (self.provider_request_id.is_some()
                 || self.response_artifact.is_some()
-                || self.usage.is_some())
+                || self.usage.is_some()
+                || self.observed_model_fingerprint.is_some())
             || self.state == ModelRunState::Dispatched
-                && (self.response_artifact.is_some() || self.usage.is_some())
+                && (self.response_artifact.is_some()
+                    || self.usage.is_some()
+                    || self.observed_model_fingerprint.is_some())
+            || self.state != ModelRunState::Completed && self.observed_model_fingerprint.is_some()
         {
             return Err(ContractError::InvalidContract(
                 "model run metadata appears before its lifecycle state permits it",
@@ -2847,6 +2860,7 @@ mod tests {
                 cached_input_tokens: 0,
                 reasoning_tokens: 2,
             }),
+            observed_model_fingerprint: None,
             started_at: fixture_time("2026-08-30T12:00:00Z"),
             finished_at: Some(fixture_time("2026-08-30T12:00:01Z")),
         };
@@ -2970,6 +2984,7 @@ mod tests {
             provider_request_id: None,
             response_artifact: None,
             usage: None,
+            observed_model_fingerprint: None,
             started_at: fixture_time("2026-08-30T12:00:00Z"),
             finished_at: Some(fixture_time("2026-08-30T12:00:01Z")),
         };
@@ -2979,6 +2994,26 @@ mod tests {
                 "model run state and timestamps are inconsistent"
             ))
         );
+
+        let mut premature_fingerprint = run;
+        premature_fingerprint.finished_at = None;
+        premature_fingerprint.observed_model_fingerprint =
+            Some("MetaCog.ObservedModelFingerprint:sha256:fixture".into());
+        assert_eq!(
+            premature_fingerprint.validate(),
+            Err(ContractError::InvalidContract(
+                "model run metadata appears before its lifecycle state permits it"
+            ))
+        );
+        let legacy_json = serde_json::to_value(&ModelRun {
+            observed_model_fingerprint: None,
+            ..premature_fingerprint
+        })
+        .expect("legacy-compatible model run JSON");
+        assert!(legacy_json.get("observed_model_fingerprint").is_none());
+        let decoded: ModelRun =
+            serde_json::from_value(legacy_json).expect("decode model run without fingerprint");
+        assert!(decoded.observed_model_fingerprint.is_none());
 
         assert!(ModelRunState::Planned.can_transition_to(ModelRunState::Dispatched));
         assert!(ModelRunState::Dispatched.can_transition_to(ModelRunState::Completed));

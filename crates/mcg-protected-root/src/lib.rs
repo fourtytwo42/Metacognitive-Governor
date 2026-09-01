@@ -11,7 +11,7 @@ pub use runtime_worker::{
 };
 
 use std::{
-    collections::{BTreeSet, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     fs,
     net::SocketAddr,
     path::{Path, PathBuf},
@@ -426,6 +426,56 @@ fn model_provider_response_artifact(
     response: &ModelResponse,
 ) -> Result<ArtifactRef, ProtectedRootError> {
     runner_response_artifact(response).map_err(ProtectedRootError::Serialization)
+}
+
+const OBSERVED_MODEL_FINGERPRINT_TYPE: &str = "mcg.observed_model_fingerprint.v1";
+const OBSERVED_MODEL_FINGERPRINT_DOMAIN: &str = "MetaCog.ObservedModelFingerprint";
+
+#[derive(serde::Serialize)]
+struct ObservedModelFingerprintInput<'a> {
+    resolved_provider: &'a SourceRef,
+    resolved_model: &'a SourceRef,
+    request_hash: &'a ContentHash,
+    policy_hash: &'a ContentHash,
+    response_model: &'a str,
+    reported_metadata_hashes: BTreeMap<String, String>,
+}
+
+fn observed_model_fingerprint(
+    authorization: &RuntimeModelEgressAuthorizationReceipt,
+    response: &ModelResponse,
+) -> Result<String, ProtectedRootError> {
+    let mut reported_metadata_hashes = BTreeMap::new();
+    for key in [
+        "system_fingerprint",
+        "model_revision",
+        "revision",
+        "version",
+        "build",
+        "service_tier",
+    ] {
+        if let Some(value) = response.provider_metadata.get(key) {
+            let bytes = serde_json::to_vec(value)?;
+            reported_metadata_hashes.insert(key.to_owned(), format!("{:x}", Sha256::digest(bytes)));
+        }
+    }
+    let hash = canonical_contract_hash(
+        OBSERVED_MODEL_FINGERPRINT_TYPE,
+        OBSERVED_MODEL_FINGERPRINT_DOMAIN,
+        &ObservedModelFingerprintInput {
+            resolved_provider: &authorization.permit.resolved_provider,
+            resolved_model: &authorization.permit.resolved_model,
+            request_hash: &authorization.proposal.request_hash,
+            policy_hash: &authorization.permit.policy.content_hash,
+            response_model: &response.model,
+            reported_metadata_hashes,
+        },
+    )?;
+    let algorithm = match hash.algorithm {
+        HashAlgorithm::Sha256 => "sha256",
+        HashAlgorithm::Blake3_256 => "blake3-256",
+    };
+    Ok(format!("{}:{algorithm}:{}", hash.domain, hash.digest_hex))
 }
 
 #[async_trait::async_trait]
@@ -1753,6 +1803,17 @@ pub async fn execute_authorized_model_invocation(
             return Err(error);
         }
     };
+    let fingerprint = match observed_model_fingerprint(&authorization, &response) {
+        Ok(fingerprint) => fingerprint,
+        Err(error) => {
+            runtime.settle_governed_provider_invocation_unknown(
+                manifest.id,
+                model_run_id,
+                completed_at,
+            )?;
+            return Err(error);
+        }
+    };
     let completed_run = match runtime.complete_governed_provider_invocation(
         manifest.id,
         model_run_id,
@@ -1763,6 +1824,7 @@ pub async fn execute_authorized_model_invocation(
             cached_input_tokens: response.usage.cached_input_tokens,
             reasoning_tokens: response.usage.reasoning_tokens,
         },
+        fingerprint,
         completed_at,
     ) {
         Ok(completed) => completed,
@@ -1976,6 +2038,7 @@ async fn run_authorized_model_stream(
         if let ModelStreamEvent::Completed { response } = &event {
             let completed_at = Utc::now();
             let completion = model_provider_response_artifact(response).and_then(|artifact| {
+                let fingerprint = observed_model_fingerprint(&authorization, response)?;
                 runtime
                     .complete_governed_provider_invocation(
                         invocation_id,
@@ -1987,6 +2050,7 @@ async fn run_authorized_model_stream(
                             cached_input_tokens: response.usage.cached_input_tokens,
                             reasoning_tokens: response.usage.reasoning_tokens,
                         },
+                        fingerprint,
                         completed_at,
                     )
                     .map_err(ProtectedRootError::from)
@@ -4642,6 +4706,7 @@ mod tests {
             provider_request_id: None,
             response_artifact: None,
             usage: None,
+            observed_model_fingerprint: None,
             started_at: at,
             finished_at: None,
         };
@@ -5362,6 +5427,16 @@ mod tests {
                 .state,
             ModelRunState::OutcomeUnknown
         );
+        assert!(
+            inspection
+                .model_runs
+                .last()
+                .expect("cancelled stream model run")
+                .run
+                .observed_model_fingerprint
+                .is_none(),
+            "possible-contact cancellation must not invent observed completion identity"
+        );
         drop(gateway);
         drop(runtime);
 
@@ -5465,6 +5540,7 @@ mod tests {
         let (authorization, dispatched_request) = calls[1].clone();
         let first_invocation_id = calls[0].0.proposal.invocation_id;
         drop(calls);
+        let expected_fingerprint = observed_model_fingerprint(&authorization, &gateway.response)?;
         assert_eq!(
             authorization.proposal.request_hash,
             model_provider_stream_request_artifact(&dispatched_request)
@@ -5556,6 +5632,13 @@ mod tests {
                 .state,
             ModelRunState::Completed
         );
+        assert_eq!(
+            completed
+                .model_runs
+                .last()
+                .and_then(|record| record.run.observed_model_fingerprint.as_deref()),
+            Some(expected_fingerprint.as_str())
+        );
         drop(stream);
         drop(gateway);
         drop(runtime);
@@ -5573,6 +5656,13 @@ mod tests {
                 .run
                 .state,
             ModelRunState::Completed
+        );
+        assert_eq!(
+            completed
+                .model_runs
+                .last()
+                .and_then(|record| record.run.observed_model_fingerprint.as_deref()),
+            Some(expected_fingerprint.as_str())
         );
         Ok::<(), ProtectedRootError>(())
     }
@@ -5982,9 +6072,33 @@ mod tests {
                     reasoning_tokens: 0,
                     total_tokens: 11,
                 },
-                provider_metadata: serde_json::json!({"fixture": true}),
+                provider_metadata: serde_json::json!({
+                    "fixture": true,
+                    "system_fingerprint": "fixture-provider-revision-sensitive"
+                }),
             },
         };
+        let expected_fingerprint = observed_model_fingerprint(&receipt, &gateway.response)
+            .expect("observed provider fingerprint");
+        assert!(!expected_fingerprint.contains("fixture-provider-revision-sensitive"));
+        let mut changed_response = gateway.response.clone();
+        changed_response.provider_metadata["system_fingerprint"] =
+            serde_json::json!("different-provider-revision");
+        assert_ne!(
+            observed_model_fingerprint(&receipt, &changed_response)
+                .expect("changed observed provider fingerprint"),
+            expected_fingerprint
+        );
+        let mut content_changed_response = gateway.response.clone();
+        content_changed_response.id = "different-response-id".into();
+        content_changed_response.output.clear();
+        content_changed_response.provider_metadata["fixture"] = serde_json::json!(false);
+        assert_eq!(
+            observed_model_fingerprint(&receipt, &content_changed_response)
+                .expect("content-minimized observed provider fingerprint"),
+            expected_fingerprint,
+            "response content and unapproved metadata must not enter identity evidence"
+        );
         let model_run_id = ModelRunId::new();
         let mut substituted_request = request.clone();
         substituted_request.model = "substituted-model".into();
@@ -6026,6 +6140,14 @@ mod tests {
             4
         );
         assert!(dispatch.completed_run.run.response_artifact.is_some());
+        assert_eq!(
+            dispatch
+                .completed_run
+                .run
+                .observed_model_fingerprint
+                .as_deref(),
+            Some(expected_fingerprint.as_str())
+        );
         assert!(
             runtime
                 .runtime_response(model_run_id)

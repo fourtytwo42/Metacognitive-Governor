@@ -1085,6 +1085,8 @@ fn validate_model_run_continuity(current: &ModelRun, next: &ModelRun) -> Result<
     let artifact_preserved =
         current.response_artifact.is_none() || current.response_artifact == next.response_artifact;
     let usage_preserved = current.usage.is_none() || current.usage == next.usage;
+    let fingerprint_preserved = current.observed_model_fingerprint.is_none()
+        || current.observed_model_fingerprint == next.observed_model_fingerprint;
     if current.id != next.id
         || current.invocation_id != next.invocation_id
         || current.role != next.role
@@ -1092,6 +1094,7 @@ fn validate_model_run_continuity(current: &ModelRun, next: &ModelRun) -> Result<
         || !provider_preserved
         || !artifact_preserved
         || !usage_preserved
+        || !fingerprint_preserved
     {
         return Err(StorageError::Conflict(
             "model-run transition rewrites immutable historical fields".into(),
@@ -1399,6 +1402,7 @@ mod tests {
             provider_request_id: None,
             response_artifact: None,
             usage: None,
+            observed_model_fingerprint: None,
             started_at: now(),
             finished_at: None,
         }
@@ -1419,6 +1423,9 @@ mod tests {
                 cached_input_tokens: 0,
                 reasoning_tokens: 0,
             }),
+            observed_model_fingerprint: Some(
+                "MetaCog.ObservedModelFingerprint:sha256:fixture".into(),
+            ),
             finished_at: Some(now() + chrono::Duration::seconds(2)),
             ..run.clone()
         }
@@ -1519,6 +1526,13 @@ mod tests {
         assert_eq!(inspection.manifest, work);
         assert_eq!(inspection.model_runs.len(), 3);
         assert_eq!(inspection.model_runs.last(), Some(&work_record));
+        assert_eq!(
+            inspection
+                .model_runs
+                .last()
+                .and_then(|record| record.run.observed_model_fingerprint.as_deref()),
+            Some("MetaCog.ObservedModelFingerprint:sha256:fixture")
+        );
         assert!(!inspection.model_runs_truncated);
         let summaries = store.invocation_summaries(10).unwrap();
         assert_eq!(summaries.len(), 2);
