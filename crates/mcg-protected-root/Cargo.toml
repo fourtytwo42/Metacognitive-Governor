@@ -16,6 +16,7 @@ mcg-api = { path = "../mcg-api" }
 mcg-action-runner = { path = "../../apps/mcg-action-runner", default-features = false }
 mcg-provider-runner = { path = "../../apps/mcg-provider-runner", default-features = false }
 mcg-plugin-runner = { path = "../../apps/mcg-plugin-runner", default-features = false }
+mcg-process-runner = { path = "../../apps/mcg-process-runner", default-features = false }
 mcg-plugin-protocol = { path = "../mcg-plugin-protocol" }
 mcg-config = { path = "../mcg-config" }
 mcg-contracts = { path = "../mcg-contracts" }

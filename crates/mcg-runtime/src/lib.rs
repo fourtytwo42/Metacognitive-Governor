@@ -3892,12 +3892,12 @@ impl AppRuntime {
         )?)
     }
 
-    /// Settles an undispatched observational action as proven no-effect.
+    /// Settles an undispatched authorized action as proven no-effect.
     ///
     /// # Errors
-    /// Returns a runtime error for stale, effectful, or already-dispatched intent.
+    /// Returns a runtime error for stale or already-dispatched intent.
     #[allow(clippy::too_many_arguments)]
-    pub fn abandon_authorized_observational_action(
+    pub fn abandon_authorized_action_before_dispatch(
         &self,
         execution_id: ActionExecutionId,
         expected_revision: u64,
@@ -3906,7 +3906,7 @@ impl AppRuntime {
         idempotency_key: &str,
         now: DateTime<Utc>,
     ) -> Result<ActionExecution, RuntimeError> {
-        Ok(self.store()?.abandon_authorized_observational_action(
+        Ok(self.store()?.abandon_authorized_action_before_dispatch(
             execution_id,
             expected_revision,
             expected_generation,

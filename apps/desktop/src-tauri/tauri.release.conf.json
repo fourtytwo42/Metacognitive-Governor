@@ -18,6 +18,7 @@
       "binaries/mcg",
       "binaries/mcg-agent-mcp",
       "binaries/mcg-action-runner",
+      "binaries/mcg-process-runner",
       "binaries/mcg-provider-runner",
       "binaries/mcg-runtime-worker",
       "binaries/mcg-plugin-runner",

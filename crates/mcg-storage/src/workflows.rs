@@ -1184,7 +1184,17 @@ fn validate_successful_plugin_action(
                     && envelope.compensation.is_some()
                     && envelope.reconciler.is_some()
             }
-            EffectClass::Consequential | EffectClass::Irreversible => false,
+            EffectClass::Irreversible => {
+                execution.state == ActionExecutionState::Committed
+                    && matches!(
+                        execution.outcome,
+                        Some(EffectOutcome::EffectConfirmed { .. })
+                    )
+                    && envelope.elevated_authority.is_some()
+                    && envelope.compensation.is_none()
+                    && envelope.reconciler.is_some()
+            }
+            EffectClass::Consequential => false,
         };
         if envelope.workflow_id != attempt.workflow_id
             || envelope.attempt_id != attempt.attempt_id

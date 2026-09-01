@@ -128,7 +128,7 @@ verify_signature() {
 
 verify_payload() {
   local app="$1"
-  for file in mcg-desktop mcg-service mcg mcg-action-runner mcg-provider-runner mcg-runtime-worker mcg-plugin-runner mcg-shadow-runner mcg-updater; do
+  for file in mcg-desktop mcg-service mcg mcg-action-runner mcg-process-runner mcg-provider-runner mcg-runtime-worker mcg-plugin-runner mcg-shadow-runner mcg-updater; do
     [[ -x "$app/Contents/MacOS/$file" ]] || { echo "App bundle is missing executable $file." >&2; exit 1; }
   done
   [[ "$(plutil -extract CFBundleIdentifier raw "$app/Contents/Info.plist")" == "dev.mcg.desktop" ]] || {
@@ -219,6 +219,24 @@ NODE
   }
 }
 
+test_process_runner() {
+  local executable="$1"
+  local report="$2"
+  local qualification_root="$uat_root/process-runner-root"
+  mkdir "$qualification_root"
+  "$executable" --qualify-process-root "$qualification_root" >"$report"
+  python3 - "$report" <<'PY'
+import json
+import pathlib
+import sys
+
+report = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+assert report["outcome"] == "effect_confirmed"
+assert report["observation"] is not None
+assert report["error_code"] is None
+PY
+}
+
 test_runtime_worker() {
   local executable="$1"
   local report="$2"
@@ -274,6 +292,7 @@ installed_signature="$(verify_signature "$installed_app" installed)"
 verify_payload "$installed_app"
 test_plugin_runner "$installed_app/Contents/MacOS/mcg-plugin-runner" "$uat_root/plugin-runner.json"
 test_action_runner "$installed_app/Contents/MacOS/mcg-action-runner" "$uat_root/action-runner.json"
+test_process_runner "$installed_app/Contents/MacOS/mcg-process-runner" "$uat_root/process-runner.json"
 test_provider_runner "$installed_app/Contents/MacOS/mcg-provider-runner" "$uat_root/provider-runner.json"
 test_runtime_worker "$installed_app/Contents/MacOS/mcg-runtime-worker" "$uat_root/runtime-worker.json"
 
@@ -536,5 +555,6 @@ REINSTALL_PRESERVED_DATA=true
 APPLICATION_REMOVED=true
 PLUGIN_RUNNERS_QUALIFIED=true
 ACTION_RUNNERS_QUALIFIED=true
+PROCESS_RUNNERS_QUALIFIED=true
 NOTARIZATION_REQUIRED=${MCG_MACOS_UAT_REQUIRE_NOTARIZED:-0}
 EOF

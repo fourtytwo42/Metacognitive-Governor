@@ -4279,6 +4279,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "mcg-process-runner"
+version = "0.4.67"
+dependencies = [
+ "base64 0.22.1",
+ "chrono",
+ "mcg-contracts",
+ "process-wrap",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
 name = "mcg-projects"
 version = "0.4.67"
 dependencies = [
@@ -4313,6 +4330,7 @@ dependencies = [
  "mcg-platform",
  "mcg-plugin-protocol",
  "mcg-plugin-runner",
+ "mcg-process-runner",
  "mcg-provider-runner",
  "mcg-providers",
  "mcg-runtime",

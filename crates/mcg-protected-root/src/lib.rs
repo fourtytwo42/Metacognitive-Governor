@@ -78,13 +78,24 @@ use mcg_platform::{
 };
 use mcg_plugin_protocol::{
     PluginCapability, PluginCapabilityOperation, PluginCapabilityOutcome, PluginCapabilityRequest,
-    PluginGuestTurn, PluginHostTurn,
+    PluginGuestTurn, PluginHostTurn, PluginValueSource,
 };
 use mcg_plugin_runner::{
     PluginRunnerAuthorization, PluginRunnerClient, PluginRunnerClientError, PluginRunnerRequest,
     PluginRunnerResponse, current_execution_platform as plugin_execution_platform,
     governed_plugin_tool_manifest, governed_plugin_tool_policy, plugin_runner_invocation_artifact,
     plugin_runner_invocation_payload, plugin_runner_sandbox_profile,
+};
+use mcg_process_runner::{
+    GovernedProcessAuthority, GovernedProcessEnvironmentVariable, GovernedProcessOperation,
+    ProcessRunnerAuthorization, ProcessRunnerCapabilityEvidence, ProcessRunnerClient,
+    ProcessRunnerClientError, ProcessRunnerOutcome, ProcessRunnerProtocolError,
+    ProcessRunnerRequest, ProcessRunnerResponse, decode_governed_process_observation,
+    executable_sha256 as governed_executable_sha256, governed_process_authority_binding,
+    governed_process_operation_payload, governed_process_reconciler,
+    governed_process_tool_manifest, governed_process_tool_policy,
+    request_from_authorized_action as process_request_from_authorized_action,
+    validate_governed_process_envelope,
 };
 use mcg_provider_runner::{
     ProviderRunnerAuthorization, ProviderRunnerClient, ProviderRunnerClientError,
@@ -145,6 +156,10 @@ pub enum ProtectedRootError {
     ActionProtocol(#[from] ActionRunnerProtocolError),
     #[error(transparent)]
     ActionRunnerClient(#[from] ActionRunnerClientError),
+    #[error(transparent)]
+    ProcessProtocol(#[from] ProcessRunnerProtocolError),
+    #[error(transparent)]
+    ProcessRunnerClient(#[from] ProcessRunnerClientError),
     #[error(transparent)]
     RuntimeWorker(#[from] RuntimeWorkerClientError),
     #[error(transparent)]
@@ -971,6 +986,8 @@ struct RootPluginDispatcher {
     test_gateway: Option<Arc<dyn RootPluginRunnerGateway>>,
     #[cfg(test)]
     test_action_gateway: Option<Arc<dyn GovernedActionRunnerGateway>>,
+    #[cfg(test)]
+    test_process_gateway: Option<Arc<dyn GovernedProcessRunnerGateway>>,
 }
 
 #[async_trait::async_trait]
@@ -994,6 +1011,34 @@ impl RootPluginRunnerGateway for PluginRunnerClient {
         request: &PluginRunnerRequest,
     ) -> Result<PluginRunnerResponse, PluginRunnerClientError> {
         PluginRunnerClient::invoke(self, request).await
+    }
+}
+
+#[async_trait::async_trait]
+trait GovernedProcessRunnerGateway: Send + Sync {
+    fn capability_evidence(
+        &self,
+    ) -> Result<ProcessRunnerCapabilityEvidence, ProcessRunnerClientError>;
+
+    async fn invoke(
+        &self,
+        request: &ProcessRunnerRequest,
+    ) -> Result<ProcessRunnerResponse, ProcessRunnerClientError>;
+}
+
+#[async_trait::async_trait]
+impl GovernedProcessRunnerGateway for ProcessRunnerClient {
+    fn capability_evidence(
+        &self,
+    ) -> Result<ProcessRunnerCapabilityEvidence, ProcessRunnerClientError> {
+        Ok(ProcessRunnerClient::capability_evidence(self).clone())
+    }
+
+    async fn invoke(
+        &self,
+        request: &ProcessRunnerRequest,
+    ) -> Result<ProcessRunnerResponse, ProcessRunnerClientError> {
+        ProcessRunnerClient::invoke(self, request).await
     }
 }
 
@@ -1390,6 +1435,13 @@ async fn execute_protected_plugin_capability(
         )
         .await;
     }
+    if matches!(
+        request.operation,
+        PluginCapabilityOperation::ProcessExec { .. }
+    ) {
+        return execute_plugin_process(dispatcher, runtime.as_ref(), &authority, request, now)
+            .await;
+    }
     let (relative_path, max_bytes) = match &request.operation {
         PluginCapabilityOperation::FilesystemRead { path, max_bytes } => (path.clone(), *max_bytes),
         _ => {
@@ -1541,6 +1593,689 @@ async fn execute_protected_plugin_capability(
     })?;
     session.outcomes.push(outcome.clone());
     Ok(outcome)
+}
+
+fn plugin_process_scope_matches(allowed: &str, requested: &str) -> bool {
+    if cfg!(windows) {
+        allowed.eq_ignore_ascii_case(requested)
+    } else {
+        allowed == requested
+    }
+}
+
+fn require_plugin_process_grant(
+    grants: &[PluginCapabilityGrant],
+    executable: &str,
+) -> Result<(), ToolError> {
+    if grants.iter().any(|grant| {
+        grant.capability == PluginCapability::Process
+            && grant.scopes.iter().any(|scope| {
+                matches!(scope, PluginCapabilityScope::Executable { executable: allowed }
+                    if plugin_process_scope_matches(allowed, executable))
+            })
+    }) {
+        Ok(())
+    } else {
+        Err(ToolError::Denied(format!(
+            "plugin executable {executable} is not exactly granted"
+        )))
+    }
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn ensure_process_tool_authorization(
+    runtime: &AppRuntime,
+    client: &dyn GovernedProcessRunnerGateway,
+    envelope: &ActionEnvelope,
+    operation: &GovernedProcessOperation,
+    now: chrono::DateTime<Utc>,
+) -> Result<ProcessRunnerAuthorization, ToolError> {
+    let authority = validate_governed_process_envelope(envelope, now)
+        .map_err(|error| ToolError::Denied(error.to_string()))?;
+    let evidence = client
+        .capability_evidence()
+        .map_err(|error| ToolError::Execution(error.to_string()))?;
+    let limits = mcg_contracts::ToolResourceLimits {
+        timeout_ms: operation.timeout_ms,
+        max_output_bytes: operation.max_output_bytes,
+        max_memory_bytes: 0,
+        max_child_processes: 64,
+    };
+    let manifest = governed_process_tool_manifest(
+        &evidence,
+        &authority.project_root,
+        &operation.executable,
+        &operation.executable_sha256,
+        limits,
+    )
+    .map_err(ToolError::Denied)?;
+    runtime
+        .register_tool_manifest(&manifest, now)
+        .map_err(|error| ToolError::Execution(error.to_string()))?;
+    let workflow = runtime
+        .canonical_workflow(envelope.workflow_id)
+        .map_err(|error| ToolError::Execution(error.to_string()))?
+        .ok_or_else(|| ToolError::Denied("process Tool workflow is missing".into()))?;
+    let attempt = workflow.attempt;
+    if attempt.attempt_id != envelope.attempt_id
+        || attempt.task_contract != envelope.task_contract
+        || attempt.state != WorkflowState::Running
+        || attempt.lease_owner != Some(envelope.actor)
+        || attempt.lease_expires_at.is_none_or(|expiry| expiry <= now)
+    {
+        return Err(ToolError::Denied(
+            "process Tool action does not belong to the exact active workflow lease".into(),
+        ));
+    }
+    let root_identity = runtime
+        .root_ownership()
+        .map_err(|error| ToolError::Execution(error.to_string()))?
+        .ok_or_else(|| ToolError::Execution("Root ownership identity is missing".into()))?
+        .runtime_identity;
+    let deadline = std::cmp::min(
+        std::cmp::min(
+            authority.expires_at,
+            envelope
+                .reconciliation_deadline
+                .unwrap_or(authority.expires_at),
+        ),
+        attempt.lease_expires_at.unwrap_or(authority.expires_at),
+    );
+    if deadline <= now {
+        return Err(ToolError::Denied("process Tool authority expired".into()));
+    }
+    let proposal = ToolInvocationProposal {
+        action_id: envelope.id,
+        attempt_id: envelope.attempt_id,
+        attempt_revision: attempt.revision,
+        lease_generation: attempt.lease_generation,
+        runtime_actor: envelope.actor,
+        runtime_identity: root_identity.clone(),
+        task_contract: envelope.task_contract.clone(),
+        tool_manifest: manifest
+            .versioned_ref()
+            .map_err(|error| ToolError::Denied(error.to_string()))?,
+        arguments: ArtifactRef {
+            content_hash: envelope.operation_hash.clone(),
+            media_type: "application/vnd.metacog.governed-process-operation+cbor".into(),
+            byte_length: u64::try_from(envelope.operation.bytes.len())
+                .map_err(|_| ToolError::Denied("process argument length overflowed".into()))?,
+        },
+        argument_hash: envelope.operation_hash.clone(),
+        requested_effect_class: EffectClass::Irreversible,
+        requested_capabilities: manifest.required_capabilities.clone(),
+        requested_limits: limits,
+        required_sandbox: manifest.sandbox_requirement,
+        platform: evidence.platform,
+        deadline,
+    };
+    let policy = governed_process_tool_policy(&manifest).map_err(ToolError::Denied)?;
+    let receipt = authorize_and_persist_runtime_tool_capability(
+        runtime,
+        &proposal,
+        &root_identity,
+        &manifest,
+        &policy,
+        evidence.available_sandbox,
+        evidence.platform,
+        now,
+    )
+    .map_err(|error| ToolError::Denied(error.to_string()))?;
+    Ok(ProcessRunnerAuthorization {
+        manifest,
+        proposal: receipt.proposal,
+        proposal_hash: receipt.proposal_hash,
+        policy,
+        permit: receipt.permit,
+        permit_hash: receipt.permit_hash,
+        permit_ref: receipt.permit_ref,
+    })
+}
+
+#[allow(clippy::too_many_lines)]
+async fn execute_plugin_process(
+    dispatcher: &RootPluginDispatcher,
+    runtime: &AppRuntime,
+    authority: &mcg_storage::PluginInvocationWorkflowAuthority,
+    request: PluginCapabilityRequest,
+    now: chrono::DateTime<Utc>,
+) -> Result<PluginCapabilityOutcome, ToolError> {
+    let PluginCapabilityOperation::ProcessExec {
+        executable,
+        argv,
+        cwd,
+        env,
+        stdin,
+    } = &request.operation
+    else {
+        return Err(ToolError::Denied(
+            "plugin operation is not process execution".into(),
+        ));
+    };
+    require_plugin_process_grant(&authority.installation.capability_grants, executable)?;
+    if env
+        .iter()
+        .any(|variable| matches!(variable.value, PluginValueSource::Credential(_)))
+    {
+        return Err(ToolError::Denied(
+            "plugin process credentials remain unavailable until the process runner consumes opaque handles"
+                .into(),
+        ));
+    }
+    let task = authority
+        .task
+        .as_ref()
+        .ok_or_else(|| ToolError::Denied("plugin process has no source-bound task".into()))?;
+    let project = authority
+        .project
+        .as_ref()
+        .ok_or_else(|| ToolError::Denied("plugin process has no source-bound project".into()))?;
+    if task.project_id != Some(project.project_id) {
+        return Err(ToolError::Denied(
+            "plugin process task and project authority diverge".into(),
+        ));
+    }
+    let project_root = PathBuf::from(&project.root)
+        .canonicalize()
+        .map_err(|error| ToolError::Denied(format!("resolve plugin project root: {error}")))?;
+    let executable_path = PathBuf::from(executable);
+    if !executable_path.is_absolute() {
+        return Err(ToolError::Denied(
+            "governed plugin process executable must be an exact absolute path".into(),
+        ));
+    }
+    let executable_sha256 = governed_executable_sha256(&executable_path)
+        .map_err(|error| ToolError::Denied(error.to_string()))?;
+    let environment = env
+        .iter()
+        .map(|variable| match &variable.value {
+            PluginValueSource::Literal(value) => Ok(GovernedProcessEnvironmentVariable {
+                name: variable.name.clone(),
+                value: value.clone(),
+            }),
+            PluginValueSource::Credential(_) => Err(ToolError::Denied(
+                "plugin process credential substitution is unavailable".into(),
+            )),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let operation = GovernedProcessOperation {
+        executable: executable_path,
+        executable_sha256: executable_sha256.clone(),
+        argv: argv.clone(),
+        cwd_relative: cwd.clone(),
+        environment,
+        stdin_base64: stdin
+            .as_ref()
+            .map(|value| STANDARD.encode(value.as_bytes())),
+        timeout_ms: 30_000,
+        max_output_bytes: 1024 * 1024,
+    };
+    // Resolve and measure the fixed adjacent child before creating durable effect authority. A
+    // missing runner is a proved pre-dispatch failure, not an Authorized action that recovery
+    // could later mistake for stranded physical work.
+    #[cfg(test)]
+    let client: Arc<dyn GovernedProcessRunnerGateway> =
+        if let Some(gateway) = &dispatcher.test_process_gateway {
+            gateway.clone()
+        } else {
+            Arc::new(
+                ProcessRunnerClient::adjacent_to(&dispatcher.root_executable)
+                    .map_err(|error| ToolError::Execution(error.to_string()))?,
+            )
+        };
+    #[cfg(not(test))]
+    let client: Arc<dyn GovernedProcessRunnerGateway> = Arc::new(
+        ProcessRunnerClient::adjacent_to(&dispatcher.root_executable)
+            .map_err(|error| ToolError::Execution(error.to_string()))?,
+    );
+    client
+        .capability_evidence()
+        .map_err(|error| ToolError::Execution(error.to_string()))?;
+    let (operation_payload, operation_hash) =
+        governed_process_operation_payload(&operation).map_err(ToolError::Denied)?;
+    let attempt = &authority.workflow.attempt;
+    let lease_expiry = attempt
+        .lease_expires_at
+        .ok_or_else(|| ToolError::Denied("plugin process workflow has no active lease".into()))?;
+    let deadline = lease_expiry.min(now + Duration::seconds(PLUGIN_PERMIT_SECONDS));
+    let action_id = ActionId::new();
+    let action_authority = governed_process_authority_binding(&GovernedProcessAuthority {
+        action_id,
+        actor: dispatcher.runtime_actor,
+        project_root,
+        operation_hash: operation_hash.clone(),
+        expires_at: deadline,
+    })
+    .map_err(ToolError::Denied)?;
+    let elevated_authority = policy_binding(
+        "mcg.plugin_process_authority.v1",
+        "MetaCog.PluginProcessAuthority",
+        &serde_json::json!({
+            "invocation_id": authority.invocation.id,
+            "plugin_revision_id": authority.revision.id,
+            "capability_request": request,
+            "source": authority.workflow.attachment.source,
+            "executable_sha256": executable_sha256,
+        }),
+    )
+    .map_err(protected_plugin_tool_denied)?;
+    let budget = policy_binding(
+        "mcg.plugin_process_budget.v1",
+        "MetaCog.PluginProcessBudget",
+        &serde_json::json!({
+            "timeout_ms": operation.timeout_ms,
+            "max_output_bytes": operation.max_output_bytes,
+            "max_child_processes": 64,
+        }),
+    )
+    .map_err(protected_plugin_tool_denied)?;
+    let envelope = ActionEnvelope {
+        id: action_id,
+        workflow_id: attempt.workflow_id,
+        attempt_id: attempt.attempt_id,
+        task_contract: attempt.task_contract.clone(),
+        actor: dispatcher.runtime_actor,
+        origin: Some(ActionOrigin {
+            conversation: None,
+            invocation: Some(authority.workflow.attachment.source.clone()),
+            command: None,
+            approval: None,
+            agent: None,
+            evidence: Vec::new(),
+        }),
+        authority: action_authority,
+        elevated_authority: Some(elevated_authority),
+        expected_versions: Vec::new(),
+        operation: operation_payload,
+        operation_hash,
+        effect_class: EffectClass::Irreversible,
+        preconditions: Vec::new(),
+        budget_reservation: budget,
+        idempotency_key: format!(
+            "plugin-capability:{}:{}",
+            authority.invocation.id, request.id
+        ),
+        compensation: None,
+        compensates_action: None,
+        reconciler: Some(
+            governed_process_reconciler(&operation.executable_sha256).map_err(ToolError::Denied)?,
+        ),
+        reconciliation_deadline: Some(deadline),
+        created_at: now,
+    };
+    let execution = ActionExecution {
+        id: ActionExecutionId::new(),
+        action_id,
+        attempt_number: 1,
+        state: ActionExecutionState::Authorized,
+        revision: 1,
+        lease_generation: 0,
+        executor: None,
+        outcome: None,
+        created_at: now,
+        updated_at: now,
+    };
+    runtime
+        .authorize_canonical_action(
+            &envelope,
+            &execution,
+            attempt.revision,
+            attempt.lease_generation,
+            CorrelationId::new(),
+            now,
+        )
+        .map_err(protected_plugin_tool_denied)?;
+
+    let authorization = match ensure_process_tool_authorization(
+        runtime,
+        client.as_ref(),
+        &envelope,
+        &operation,
+        now,
+    ) {
+        Ok(authorization) => authorization,
+        Err(error) => {
+            runtime
+                .abandon_authorized_action_before_dispatch(
+                    execution.id,
+                    execution.revision,
+                    execution.lease_generation,
+                    CorrelationId::new(),
+                    &format!("abandon-plugin-process-authority:{}", request.id),
+                    Utc::now(),
+                )
+                .map_err(|abandon| ToolError::Execution(abandon.to_string()))?;
+            return Err(error);
+        }
+    };
+    let correlation_id = CorrelationId::new();
+    let process_execution = match runtime.dispatch_canonical_action(
+        execution.id,
+        execution.revision,
+        execution.lease_generation,
+        dispatcher.runtime_actor,
+        correlation_id,
+        &format!("plugin-process-dispatch:{}", request.id),
+        now,
+    ) {
+        Ok(execution) => execution,
+        Err(error) => {
+            runtime
+                .abandon_authorized_action_before_dispatch(
+                    execution.id,
+                    execution.revision,
+                    execution.lease_generation,
+                    CorrelationId::new(),
+                    &format!("abandon-plugin-process-dispatch:{}", request.id),
+                    Utc::now(),
+                )
+                .map_err(|abandon| ToolError::Execution(abandon.to_string()))?;
+            return Err(ToolError::Execution(error.to_string()));
+        }
+    };
+    let request_id = Uuid::new_v4();
+    let runner_request = process_request_from_authorized_action(
+        &envelope,
+        &process_execution,
+        authorization,
+        request_id,
+        now,
+    )
+    .map_err(|error| ToolError::Execution(error.to_string()))?;
+    let runner_result = client.invoke(&runner_request).await;
+    let outcome = settle_plugin_process_result(
+        runtime,
+        dispatcher.runtime_actor,
+        &request.id,
+        &envelope,
+        &process_execution,
+        correlation_id,
+        request_id,
+        runner_result,
+    )?;
+    let mut sessions = dispatcher
+        .capability_sessions
+        .lock()
+        .map_err(|_| ToolError::Execution("plugin capability session is unavailable".into()))?;
+    let session = sessions.get_mut(&authority.invocation.id).ok_or_else(|| {
+        ToolError::Execution("plugin capability session disappeared during dispatch".into())
+    })?;
+    session.outcomes.push(outcome.clone());
+    Ok(outcome)
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn settle_plugin_process_result(
+    runtime: &AppRuntime,
+    validator: RuntimeActorId,
+    capability_request_id: &str,
+    envelope: &ActionEnvelope,
+    dispatched: &ActionExecution,
+    correlation_id: CorrelationId,
+    request_id: Uuid,
+    result: Result<ProcessRunnerResponse, ProcessRunnerClientError>,
+) -> Result<PluginCapabilityOutcome, ToolError> {
+    let (outcome, response) = match result {
+        Ok(response) => (response.outcome, Some(response)),
+        Err(error) => {
+            let hint = runner_outcome_payload(
+                if error.effect_may_have_occurred() {
+                    "mcg.process_runner_transport_unknown.v1"
+                } else {
+                    "mcg.process_runner_launch_no_effect.v1"
+                },
+                &serde_json::json!({
+                    "request_id": request_id,
+                    "error_code": process_runner_client_error_code(error),
+                }),
+            )
+            .map_err(|error| ToolError::Execution(error.to_string()))?;
+            if error.effect_may_have_occurred() {
+                runtime
+                    .classify_canonical_action(
+                        dispatched.id,
+                        dispatched.revision,
+                        dispatched.lease_generation,
+                        EffectOutcome::OutcomeUnknown { hint },
+                        envelope.reconciliation_deadline,
+                        correlation_id,
+                        &format!("plugin-process-classify:{request_id}"),
+                        Utc::now(),
+                    )
+                    .map_err(|error| ToolError::Execution(error.to_string()))?;
+                return Ok(PluginCapabilityOutcome::Failed {
+                    request_id: capability_request_id.into(),
+                    error_code: "capability_execution_uncertain".into(),
+                });
+            }
+            let observed = observe_plugin_process_result(
+                runtime,
+                dispatched,
+                correlation_id,
+                request_id,
+                hint,
+                Utc::now(),
+            )?;
+            runtime
+                .classify_canonical_action(
+                    observed.id,
+                    observed.revision,
+                    observed.lease_generation,
+                    EffectOutcome::NoEffectConfirmed,
+                    None,
+                    correlation_id,
+                    &format!("plugin-process-classify:{request_id}"),
+                    Utc::now(),
+                )
+                .map_err(|error| ToolError::Execution(error.to_string()))?;
+            return Ok(PluginCapabilityOutcome::Failed {
+                request_id: capability_request_id.into(),
+                error_code: "process_launch_failed".into(),
+            });
+        }
+    };
+    let response = response.expect("successful branch retains the response");
+    match outcome {
+        ProcessRunnerOutcome::OutcomeUnknown => {
+            let hint = runner_outcome_payload(
+                "mcg.process_runner_unknown.v1",
+                &serde_json::json!({
+                    "request_id": request_id,
+                    "error_code": response.error_code,
+                }),
+            )
+            .map_err(|error| ToolError::Execution(error.to_string()))?;
+            runtime
+                .classify_canonical_action(
+                    dispatched.id,
+                    dispatched.revision,
+                    dispatched.lease_generation,
+                    EffectOutcome::OutcomeUnknown { hint },
+                    envelope.reconciliation_deadline,
+                    correlation_id,
+                    &format!("plugin-process-classify:{request_id}"),
+                    response.finished_at,
+                )
+                .map_err(|error| ToolError::Execution(error.to_string()))?;
+            Ok(PluginCapabilityOutcome::Failed {
+                request_id: capability_request_id.into(),
+                error_code: "capability_execution_uncertain".into(),
+            })
+        }
+        ProcessRunnerOutcome::NoEffectConfirmed | ProcessRunnerOutcome::Denied => {
+            let observation = runner_outcome_payload(
+                "mcg.process_runner_no_effect.v1",
+                &serde_json::json!({
+                    "request_id": request_id,
+                    "error_code": response.error_code,
+                    "outcome": response.outcome,
+                }),
+            )
+            .map_err(|error| ToolError::Execution(error.to_string()))?;
+            let observed = observe_plugin_process_result(
+                runtime,
+                dispatched,
+                correlation_id,
+                request_id,
+                observation,
+                response.finished_at,
+            )?;
+            runtime
+                .classify_canonical_action(
+                    observed.id,
+                    observed.revision,
+                    observed.lease_generation,
+                    EffectOutcome::NoEffectConfirmed,
+                    None,
+                    correlation_id,
+                    &format!("plugin-process-classify:{request_id}"),
+                    response.finished_at,
+                )
+                .map_err(|error| ToolError::Execution(error.to_string()))?;
+            Ok(PluginCapabilityOutcome::Failed {
+                request_id: capability_request_id.into(),
+                error_code: response
+                    .error_code
+                    .unwrap_or_else(|| "process_denied".into()),
+            })
+        }
+        ProcessRunnerOutcome::EffectConfirmed => {
+            let postcondition = response.observation.clone().ok_or_else(|| {
+                ToolError::Execution("process runner omitted its observation".into())
+            })?;
+            let observation = decode_governed_process_observation(&postcondition)
+                .map_err(|error| ToolError::Execution(error.to_string()))?;
+            let observed = observe_plugin_process_result(
+                runtime,
+                dispatched,
+                correlation_id,
+                request_id,
+                postcondition.clone(),
+                response.finished_at,
+            )?;
+            let (confirmed, _) = runtime
+                .classify_canonical_action(
+                    observed.id,
+                    observed.revision,
+                    observed.lease_generation,
+                    EffectOutcome::EffectConfirmed {
+                        evidence: Vec::new(),
+                    },
+                    None,
+                    correlation_id,
+                    &format!("plugin-process-classify:{request_id}"),
+                    response.finished_at,
+                )
+                .map_err(|error| ToolError::Execution(error.to_string()))?;
+            let validated_at = Utc::now();
+            let validation = ActionValidation {
+                action_id: confirmed.action_id,
+                execution_id: confirmed.id,
+                validator,
+                evidence: Vec::new(),
+                postconditions: vec![postcondition],
+                validated_at,
+            };
+            let validated = runtime
+                .validate_canonical_action_effect(
+                    confirmed.id,
+                    confirmed.revision,
+                    confirmed.lease_generation,
+                    &validation,
+                    CorrelationId::new(),
+                    &format!("validate-plugin-process:{}", confirmed.action_id),
+                    validated_at,
+                )
+                .map_err(|error| ToolError::Execution(error.to_string()))?;
+            let validation_event = runtime
+                .canonical_action(validated.action_id, 32)
+                .map_err(|error| ToolError::Execution(error.to_string()))?
+                .and_then(|inspection| inspection.events.last().cloned())
+                .ok_or_else(|| {
+                    ToolError::Execution("process validation event is missing".into())
+                })?;
+            runtime
+                .commit_canonical_action_effect(
+                    validated.id,
+                    validated.revision,
+                    validated.lease_generation,
+                    validation_event.id,
+                    CorrelationId::new(),
+                    &format!("commit-plugin-process:{}", validated.action_id),
+                    Utc::now(),
+                )
+                .map_err(|error| ToolError::Execution(error.to_string()))?;
+            let stdout = STANDARD
+                .decode(&observation.stdout_base64)
+                .map_err(|_| ToolError::Execution("process stdout is invalid".into()))?;
+            let stderr = STANDARD
+                .decode(&observation.stderr_base64)
+                .map_err(|_| ToolError::Execution("process stderr is invalid".into()))?;
+            Ok(PluginCapabilityOutcome::Succeeded {
+                request_id: capability_request_id.into(),
+                outcome: serde_json::json!({
+                    "status": if observation.exit_code == Some(0) {
+                        ToolOutcomeStatus::Succeeded
+                    } else {
+                        ToolOutcomeStatus::Failed
+                    },
+                    "summary": "executed exact governed plugin process",
+                    "exit_code": observation.exit_code,
+                    "stdout": String::from_utf8_lossy(&stdout),
+                    "stderr": String::from_utf8_lossy(&stderr),
+                    "stdout_truncated": observation.stdout_truncated,
+                    "stderr_truncated": observation.stderr_truncated,
+                    "artifacts": [],
+                    "verification": [{
+                        "method": "protected-root-process-permit",
+                        "passed": true,
+                        "detail": format!("sha256={}", observation.executable_sha256),
+                    }],
+                }),
+            })
+        }
+    }
+}
+
+fn observe_plugin_process_result(
+    runtime: &AppRuntime,
+    dispatched: &ActionExecution,
+    correlation_id: CorrelationId,
+    request_id: Uuid,
+    observation: VersionedPayload,
+    observed_at: chrono::DateTime<Utc>,
+) -> Result<ActionExecution, ToolError> {
+    runtime
+        .observe_canonical_action(
+            &ActionReceipt {
+                id: ActionReceiptId::new(),
+                action_id: dispatched.action_id,
+                execution_id: dispatched.id,
+                observation,
+                observed_at,
+            },
+            dispatched.revision,
+            dispatched.lease_generation,
+            correlation_id,
+            &format!("plugin-process-observe:{request_id}"),
+            observed_at,
+        )
+        .map_err(|error| ToolError::Execution(error.to_string()))
+}
+
+const fn process_runner_client_error_code(error: ProcessRunnerClientError) -> &'static str {
+    match error {
+        ProcessRunnerClientError::Unavailable => "unavailable",
+        ProcessRunnerClientError::ExecutableChanged => "executable_changed",
+        ProcessRunnerClientError::RequestTooLarge => "request_too_large",
+        ProcessRunnerClientError::Launch => "launch_failed",
+        ProcessRunnerClientError::Delivery => "delivery_failed",
+        ProcessRunnerClientError::Timeout => "timeout",
+        ProcessRunnerClientError::Process => "process_failed",
+        ProcessRunnerClientError::ResponseTooLarge => "response_too_large",
+        ProcessRunnerClientError::DiagnosticOutput => "diagnostic_output",
+        ProcessRunnerClientError::InvalidResponse => "invalid_response",
+    }
 }
 
 fn require_plugin_task_project_read(grants: &[PluginCapabilityGrant]) -> Result<(), ToolError> {
@@ -4250,7 +4985,7 @@ fn retire_previous_reconciliation_probe(
     };
     let execution = latest_action_execution(&probe)?;
     if execution.state == ActionExecutionState::Authorized {
-        runtime.abandon_authorized_observational_action(
+        runtime.abandon_authorized_action_before_dispatch(
             execution.id,
             execution.revision,
             execution.lease_generation,
@@ -5566,6 +6301,8 @@ pub fn open(config: AppConfig) -> Result<Arc<AppRuntime>, ProtectedRootError> {
         test_gateway: None,
         #[cfg(test)]
         test_action_gateway: None,
+        #[cfg(test)]
+        test_process_gateway: None,
     }))?;
     runtime.install_protected_agent_model_dispatcher(Arc::new(RootAgentModelDispatcher {
         runtime: Arc::downgrade(&runtime),
@@ -5620,27 +6357,43 @@ pub fn open(config: AppConfig) -> Result<Arc<AppRuntime>, ProtectedRootError> {
     Ok(runtime)
 }
 
-fn start_filesystem_reconciliation_worker(runtime: Arc<AppRuntime>) -> Option<JoinHandle<()>> {
-    let executable = match std::env::current_exe() {
-        Ok(executable) => executable,
-        Err(error) => {
+#[allow(clippy::too_many_lines)] // Keep deadline escalation and adapter dispatch in one audit loop.
+fn start_action_reconciliation_worker(runtime: Arc<AppRuntime>) -> JoinHandle<()> {
+    let client = std::env::current_exe()
+        .map_err(|error| {
             warn!(%error, "filesystem action runner discovery is unavailable");
-            return None;
-        }
-    };
-    let client = match ActionRunnerClient::adjacent_to(executable) {
-        Ok(client) => client,
-        Err(error) => {
-            warn!(%error, "filesystem action runner is unavailable; reconciliation remains durable");
-            return None;
-        }
-    };
-    Some(tokio::spawn(async move {
+            error
+        })
+        .ok()
+        .and_then(|executable| {
+            ActionRunnerClient::adjacent_to(executable)
+                .map_err(|error| {
+                    warn!(%error, "filesystem action runner is unavailable; reconciliation remains durable");
+                    error
+                })
+                .ok()
+        });
+    tokio::spawn(async move {
         let worker = RuntimeActorId::new();
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
         loop {
             interval.tick().await;
             let now = Utc::now();
+            match runtime.recover_action_reconciliations(now) {
+                Ok(report) if report.requeued > 0 || report.escalated > 0 => debug!(
+                    requeued = report.requeued,
+                    escalated = report.escalated,
+                    "fenced or escalated durable action reconciliation without redispatch"
+                ),
+                Ok(_) => {}
+                Err(error) => {
+                    warn!(%error, "could not recover action reconciliation deadlines");
+                    continue;
+                }
+            }
+            let Some(client) = client.as_ref() else {
+                continue;
+            };
             let jobs = match runtime.due_canonical_reconciliations(now, 32) {
                 Ok(jobs) => jobs,
                 Err(error) => {
@@ -5665,7 +6418,7 @@ fn start_filesystem_reconciliation_worker(runtime: Arc<AppRuntime>) -> Option<Jo
                 };
                 match reconcile_filesystem_action(
                     &runtime,
-                    &client,
+                    client,
                     job.id,
                     job.revision,
                     job.lease_generation,
@@ -5719,7 +6472,7 @@ fn start_filesystem_reconciliation_worker(runtime: Arc<AppRuntime>) -> Option<Jo
                 }
             }
         }
-    }))
+    })
 }
 
 fn settle_reconciled_plugin_action_workflow(
@@ -5969,12 +6722,10 @@ pub async fn serve(config: AppConfig) -> Result<(), Box<dyn std::error::Error>> 
         session_id: session.session_id,
     };
     let ipc = start_root_ipc(runtime.clone(), session)?;
-    let reconciliation = start_filesystem_reconciliation_worker(runtime.clone());
+    let reconciliation = start_action_reconciliation_worker(runtime.clone());
     info!(%address, "starting MetaCog Protected Root compatibility API");
     let api_result = mcg_api::serve(address, runtime).await;
-    if let Some(reconciliation) = reconciliation {
-        reconciliation.abort();
-    }
+    reconciliation.abort();
     ipc.abort();
     if let Some(supervisor) = runtime_worker_supervisor {
         supervisor.shutdown().await;
@@ -6713,6 +7464,118 @@ mod tests {
         runner: SourceRef,
         requests: Arc<Mutex<Vec<PluginRunnerRequest>>>,
         turns: Mutex<VecDeque<PluginGuestTurn>>,
+    }
+
+    struct ScriptedProcessGateway {
+        calls: Arc<Mutex<Vec<ProcessRunnerRequest>>>,
+        outcomes: Mutex<VecDeque<ProcessRunnerOutcome>>,
+    }
+
+    fn scripted_process_capability_evidence() -> ProcessRunnerCapabilityEvidence {
+        ProcessRunnerCapabilityEvidence {
+            runner: SourceRef {
+                source_type: StableTypeId::parse("mcg.process_runner_executable.v1")
+                    .expect("process runner type"),
+                locator: if cfg!(windows) {
+                    "mcg-process-runner.exe".into()
+                } else {
+                    "mcg-process-runner".into()
+                },
+                content_hash: ContentHash {
+                    algorithm: HashAlgorithm::Sha256,
+                    domain: "MetaCog.ProcessRunnerExecutable".into(),
+                    digest_hex: "9".repeat(64),
+                },
+            },
+            platform: mcg_process_runner::current_execution_platform(),
+            available_sandbox: mcg_process_runner::process_runner_sandbox_profile(),
+            resource_ceiling: mcg_contracts::ToolResourceLimits {
+                timeout_ms: 35_000,
+                max_output_bytes: 1024 * 1024,
+                max_memory_bytes: 0,
+                max_child_processes: 64,
+            },
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl GovernedProcessRunnerGateway for ScriptedProcessGateway {
+        fn capability_evidence(
+            &self,
+        ) -> Result<ProcessRunnerCapabilityEvidence, ProcessRunnerClientError> {
+            Ok(scripted_process_capability_evidence())
+        }
+
+        async fn invoke(
+            &self,
+            request: &ProcessRunnerRequest,
+        ) -> Result<ProcessRunnerResponse, ProcessRunnerClientError> {
+            assert_eq!(request.authorization.proposal.action_id, request.action_id);
+            assert_eq!(request.authorization.permit.action_id, request.action_id);
+            assert_eq!(
+                request.authorization.permit.allowed_effect_class,
+                EffectClass::Irreversible
+            );
+            assert!(request.authorization.permit.capabilities.process_spawn);
+            assert!(request.authorization.permit.secret_handles.is_empty());
+            let operation: GovernedProcessOperation = serde_json::from_value(
+                decode_canonical_cbor_v1(&request.operation.bytes).expect("process operation CBOR"),
+            )
+            .expect("process operation");
+            self.calls
+                .lock()
+                .expect("process calls")
+                .push(request.clone());
+            let now = Utc::now();
+            let outcome = self
+                .outcomes
+                .lock()
+                .expect("process outcomes")
+                .pop_front()
+                .expect("scripted process outcome");
+            let (observation, error_code, detail) =
+                if outcome == ProcessRunnerOutcome::EffectConfirmed {
+                    (
+                        Some(
+                            VersionedPayload::canonical_v1(
+                                StableTypeId::parse(
+                                    mcg_process_runner::GOVERNED_PROCESS_OBSERVATION_TYPE,
+                                )
+                                .expect("process observation type"),
+                                &serde_json::json!({
+                                    "executable_sha256": operation.executable_sha256,
+                                    "exit_code": 0,
+                                    "stdout_base64": STANDARD.encode(b"governed process\r\n"),
+                                    "stderr_base64": "",
+                                    "stdout_truncated": false,
+                                    "stderr_truncated": false,
+                                }),
+                            )
+                            .expect("process observation"),
+                        ),
+                        None,
+                        "executed scripted governed process",
+                    )
+                } else {
+                    (
+                        None,
+                        Some("process_timeout".into()),
+                        "scripted process outcome is uncertain",
+                    )
+                };
+            Ok(ProcessRunnerResponse {
+                protocol_version: mcg_process_runner::PROCESS_RUNNER_PROTOCOL_VERSION,
+                request_id: Some(request.request_id),
+                action_id: Some(request.action_id),
+                execution_id: Some(request.execution_id),
+                outcome,
+                observation,
+                error_code,
+                detail: detail.into(),
+                started_at: now,
+                finished_at: now,
+            })
+        }
     }
 
     #[async_trait::async_trait]
@@ -9575,6 +10438,7 @@ mod tests {
                     requests: requests.clone(),
                 })),
                 test_action_gateway: None,
+                test_process_gateway: None,
             }))
             .expect("install Root plugin dispatcher");
         let module = br#"(module (func (export "_start")))"#;
@@ -9782,6 +10646,7 @@ mod tests {
                 test_action_gateway: Some(Arc::new(PluginReadActionGateway {
                     calls: action_requests.clone(),
                 })),
+                test_process_gateway: None,
             }))
             .expect("install protected plugin dispatcher");
         let module = br#"(module (func (export "_start")))"#;
@@ -9889,6 +10754,307 @@ mod tests {
 
     #[tokio::test]
     #[allow(clippy::too_many_lines)]
+    async fn root_executes_exact_plugin_process_with_irreversible_permit() {
+        let temporary = tempfile::tempdir().expect("temporary Root data directory");
+        let project_root = tempfile::tempdir().expect("plugin project root");
+        let config = AppConfig::default().with_data_directory(temporary.path());
+        let runtime = Arc::new(AppRuntime::open(config.clone()).expect("runtime"));
+        let project_id = ProjectId::new();
+        runtime
+            .discover_project(project_root.path(), project_id)
+            .expect("discover plugin project");
+        let mut task = TaskEnvelope::new("exercise a governed plugin process");
+        task.project_id = Some(project_id);
+        runtime.create_task(&task).expect("create plugin task");
+        let identity = current_runtime_identity().expect("Root identity");
+        runtime
+            .initialize_root_ownership(
+                identity.clone(),
+                RootMigrationReceipt {
+                    schema_version: PROTOCOL_V1,
+                    from_storage_schema: STORAGE_SCHEMA_VERSION,
+                    to_storage_schema: STORAGE_SCHEMA_VERSION,
+                    backup_path: None,
+                    backup_sha256: None,
+                    migrated_at: Utc::now(),
+                },
+            )
+            .expect("Root ownership");
+        let (executable, argv) = if cfg!(windows) {
+            (
+                r"C:\Windows\System32\cmd.exe".to_owned(),
+                vec!["/d".into(), "/c".into(), "echo governed".into()],
+            )
+        } else {
+            (
+                "/bin/sh".to_owned(),
+                vec!["-c".into(), "printf governed".into()],
+            )
+        };
+        let plugin_requests = Arc::new(Mutex::new(Vec::new()));
+        let process_requests = Arc::new(Mutex::new(Vec::new()));
+        let runner = SourceRef {
+            source_type: StableTypeId::parse("mcg.plugin_runner_executable.v1")
+                .expect("runner type"),
+            locator: "mcg-plugin-runner".into(),
+            content_hash: ContentHash {
+                algorithm: HashAlgorithm::Sha256,
+                domain: "MetaCog.PluginRunnerExecutable".into(),
+                digest_hex: "8".repeat(64),
+            },
+        };
+        let plugin_gateway = Arc::new(ScriptedProtectedPluginGateway {
+            runner,
+            requests: plugin_requests.clone(),
+            turns: Mutex::new(VecDeque::from([
+                PluginGuestTurn::CapabilityRequest {
+                    request: PluginCapabilityRequest {
+                        schema_version: PLUGIN_SCHEMA_VERSION,
+                        id: "process-proof".into(),
+                        operation: PluginCapabilityOperation::ProcessExec {
+                            executable: executable.clone(),
+                            argv: argv.clone(),
+                            cwd: ".".into(),
+                            env: Vec::new(),
+                            stdin: None,
+                        },
+                    },
+                },
+                PluginGuestTurn::Completed {
+                    output: serde_json::json!({"executed": true}),
+                },
+            ])),
+        });
+        let process_gateway = Arc::new(ScriptedProcessGateway {
+            calls: process_requests.clone(),
+            outcomes: Mutex::new(VecDeque::from([ProcessRunnerOutcome::EffectConfirmed])),
+        });
+        runtime
+            .install_protected_plugin_dispatcher(Arc::new(RootPluginDispatcher {
+                runtime: Arc::downgrade(&runtime),
+                root_executable: PathBuf::from("unused-in-injected-test"),
+                runtime_actor: RuntimeActorId(identity.instance_id.0),
+                runtime_identity: identity,
+                capability_sessions: Mutex::new(BTreeMap::new()),
+                test_gateway: Some(plugin_gateway.clone()),
+                test_action_gateway: None,
+                test_process_gateway: Some(process_gateway.clone()),
+            }))
+            .expect("install protected plugin dispatcher");
+        let module = br#"(module (func (export "_start")))"#;
+        let revision = PluginRevision {
+            schema_version: PLUGIN_CATALOG_SCHEMA_VERSION,
+            id: PluginRevisionId::new(),
+            manifest: PluginManifest {
+                schema_version: PLUGIN_SCHEMA_VERSION,
+                id: "example.protected-process".into(),
+                display_name: "Protected process fixture".into(),
+                version: "1.0.0".into(),
+                class: PluginClass::SandboxedWasi,
+                requested_capabilities: vec![PluginCapability::Process],
+            },
+            module_sha256: format!("{:x}", Sha256::digest(module)),
+            module_size_bytes: u64::try_from(module.len()).expect("module size"),
+            source: PluginInstallSource::LocalImport,
+            signature: PluginSignature {
+                state: PluginSignatureState::Unsigned,
+                scheme: None,
+                signer: None,
+                signature_sha256: None,
+            },
+            installed_at: Utc::now(),
+        };
+        let installation = runtime
+            .install_sandboxed_plugin(&revision, module)
+            .expect("install protected process plugin");
+        let installation = runtime
+            .set_plugin_capability_grants(
+                &revision.manifest.id,
+                installation.revision,
+                vec![PluginCapabilityGrant {
+                    schema_version: PLUGIN_CATALOG_SCHEMA_VERSION,
+                    capability: PluginCapability::Process,
+                    scopes: vec![PluginCapabilityScope::Executable {
+                        executable: executable.clone(),
+                    }],
+                }],
+            )
+            .expect("grant exact plugin process");
+        runtime
+            .set_plugin_enabled(&revision.manifest.id, installation.revision, true)
+            .expect("enable protected process plugin");
+
+        let result = runtime
+            .invoke_sandboxed_plugin(
+                PluginInvocationId::new(),
+                &revision.manifest.id,
+                Some(task.id),
+                serde_json::json!({"goal": "process proof"}),
+            )
+            .await
+            .expect("invoke protected process plugin");
+        assert_eq!(
+            result.invocation.state,
+            mcg_domain::PluginInvocationState::Succeeded
+        );
+        assert_eq!(process_requests.lock().expect("process requests").len(), 1);
+        let captured = plugin_requests.lock().expect("plugin requests");
+        assert_eq!(captured.len(), 2);
+        let second: PluginHostTurn =
+            serde_json::from_value(captured[1].input.clone()).expect("protected host turn");
+        let PluginCapabilityOutcome::Succeeded { outcome, .. } = &second.outcomes[0] else {
+            panic!("protected process must return exact success evidence")
+        };
+        assert_eq!(outcome["exit_code"], 0);
+        assert!(
+            outcome["stdout"]
+                .as_str()
+                .is_some_and(|value| value.contains("governed"))
+        );
+        drop(captured);
+        let actions = runtime.canonical_actions(10).expect("plugin actions");
+        assert_eq!(
+            actions
+                .iter()
+                .filter(|action| action.state == ActionExecutionState::Committed)
+                .count(),
+            1
+        );
+        let capabilities = runtime
+            .tool_authorizations(10, Utc::now())
+            .expect("plugin Tool permits");
+        assert_eq!(
+            capabilities
+                .iter()
+                .filter(|capability| capability.process_spawn)
+                .count(),
+            1
+        );
+
+        process_gateway
+            .outcomes
+            .lock()
+            .expect("process outcomes")
+            .push_back(ProcessRunnerOutcome::OutcomeUnknown);
+        plugin_gateway
+            .turns
+            .lock()
+            .expect("plugin turns")
+            .push_back(PluginGuestTurn::CapabilityRequest {
+                request: PluginCapabilityRequest {
+                    schema_version: PLUGIN_SCHEMA_VERSION,
+                    id: "process-unknown".into(),
+                    operation: PluginCapabilityOperation::ProcessExec {
+                        executable,
+                        argv,
+                        cwd: ".".into(),
+                        env: Vec::new(),
+                        stdin: None,
+                    },
+                },
+            });
+        let uncertain = runtime
+            .invoke_sandboxed_plugin(
+                PluginInvocationId::new(),
+                &revision.manifest.id,
+                Some(task.id),
+                serde_json::json!({"goal": "process response loss"}),
+            )
+            .await
+            .expect("settle uncertain protected process plugin");
+        assert_eq!(
+            uncertain.invocation.state,
+            mcg_domain::PluginInvocationState::Uncertain
+        );
+        assert_eq!(process_requests.lock().expect("process requests").len(), 2);
+        let unknown_action = runtime
+            .canonical_actions(20)
+            .expect("process actions")
+            .into_iter()
+            .find(|action| action.state == ActionExecutionState::OutcomeUnknown)
+            .expect("unknown process action");
+        let job = runtime
+            .due_canonical_reconciliations(Utc::now(), 20)
+            .expect("due process reconciliation")
+            .into_iter()
+            .find(|job| job.action_id == unknown_action.action_id)
+            .expect("durable process reconciliation job");
+        assert_eq!(
+            job.adapter.type_id.as_str(),
+            mcg_process_runner::GOVERNED_PROCESS_RECONCILER_TYPE
+        );
+        let substituted_executable = if cfg!(windows) {
+            r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+        } else {
+            "/bin/false"
+        };
+        plugin_gateway
+            .turns
+            .lock()
+            .expect("plugin turns")
+            .push_back(PluginGuestTurn::CapabilityRequest {
+                request: PluginCapabilityRequest {
+                    schema_version: PLUGIN_SCHEMA_VERSION,
+                    id: "process-substitution".into(),
+                    operation: PluginCapabilityOperation::ProcessExec {
+                        executable: substituted_executable.into(),
+                        argv: Vec::new(),
+                        cwd: ".".into(),
+                        env: Vec::new(),
+                        stdin: None,
+                    },
+                },
+            });
+        let denied = runtime
+            .invoke_sandboxed_plugin(
+                PluginInvocationId::new(),
+                &revision.manifest.id,
+                Some(task.id),
+                serde_json::json!({"goal": "substitute executable"}),
+            )
+            .await
+            .expect("settle denied process substitution");
+        assert_eq!(
+            denied.invocation.state,
+            mcg_domain::PluginInvocationState::Failed
+        );
+        assert_eq!(
+            denied.invocation.error_code.as_deref(),
+            Some("capability_denied")
+        );
+        assert_eq!(process_requests.lock().expect("process requests").len(), 2);
+        drop(capabilities);
+        drop(runtime);
+
+        let reopened = AppRuntime::open(config).expect("reopen process Root");
+        let persisted = reopened
+            .canonical_action(unknown_action.action_id, 32)
+            .expect("inspect reopened process action")
+            .expect("reopened process action");
+        assert_eq!(
+            latest_action_execution(&persisted)
+                .expect("reopened process execution")
+                .state,
+            ActionExecutionState::OutcomeUnknown
+        );
+        assert_eq!(process_requests.lock().expect("process requests").len(), 2);
+        let recovery = reopened
+            .recover_action_reconciliations(job.deadline)
+            .expect("escalate manual process reconciliation");
+        assert_eq!(recovery.escalated, 1);
+        assert_eq!(
+            reopened
+                .canonical_reconciliation_job(job.id)
+                .expect("load escalated process reconciliation")
+                .expect("process reconciliation")
+                .state,
+            mcg_contracts::ReconciliationJobState::UserActionRequired
+        );
+        assert_eq!(process_requests.lock().expect("process requests").len(), 2);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn root_creates_plugin_project_file_with_reconciliation_and_compensation_authority() {
         let temporary = tempfile::tempdir().expect("temporary Root data directory");
         let project_root = tempfile::tempdir().expect("plugin project root");
@@ -9957,6 +11123,7 @@ mod tests {
                 test_action_gateway: Some(Arc::new(PluginCreateActionGateway {
                     calls: action_requests.clone(),
                 })),
+                test_process_gateway: None,
             }))
             .expect("install protected plugin dispatcher");
         let module = br#"(module (func (export "_start")))"#;
@@ -10154,6 +11321,7 @@ mod tests {
                 test_action_gateway: Some(Arc::new(PluginReplaceActionGateway {
                     calls: action_requests.clone(),
                 })),
+                test_process_gateway: None,
             }))
             .expect("install protected plugin dispatcher");
         let module = br#"(module (func (export "_start")))"#;
@@ -10355,6 +11523,7 @@ mod tests {
                 test_action_gateway: Some(Arc::new(PluginLostCreateResponseGateway {
                     calls: action_requests.clone(),
                 })),
+                test_process_gateway: None,
             }))
             .expect("install protected plugin dispatcher");
         let module = br#"(module (func (export "_start")))"#;

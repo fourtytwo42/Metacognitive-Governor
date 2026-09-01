@@ -578,16 +578,16 @@ impl SqliteEventStore {
         )
     }
 
-    /// Settles an authorized observational action as proven no-effect before dispatch.
+    /// Settles any authorized action as proven no-effect before physical dispatch.
     ///
-    /// This is used to retire a reconciliation probe whose job lease was fenced before the probe
-    /// could be dispatched. Effectful or already-dispatched actions are never eligible.
+    /// Authorization alone cannot cause an external effect. This retires a reconciliation probe
+    /// whose lease was fenced or an effectful action whose executor/permit preparation failed.
+    /// Already-dispatched actions are never eligible.
     ///
     /// # Errors
-    /// Returns a storage error for stale state, effectful intent, replay substitution, or commit
-    /// failure.
+    /// Returns a storage error for stale state, replay substitution, or commit failure.
     #[allow(clippy::too_many_arguments)]
-    pub fn abandon_authorized_observational_action(
+    pub fn abandon_authorized_action_before_dispatch(
         &mut self,
         execution_id: ActionExecutionId,
         expected_revision: u64,
@@ -609,12 +609,10 @@ impl SqliteEventStore {
                 original.state == ActionExecutionState::NoEffectConfirmed
                     && original.outcome == Some(EffectOutcome::NoEffectConfirmed)
             },
-            |execution, envelope| {
-                if execution.state != ActionExecutionState::Authorized
-                    || envelope.effect_class != EffectClass::Observational
-                {
+            |execution, _envelope| {
+                if execution.state != ActionExecutionState::Authorized {
                     return Err(StorageError::Conflict(
-                        "only an undispatched observational action can be abandoned".into(),
+                        "only an undispatched authorized action can be abandoned".into(),
                     ));
                 }
                 execution.state = ActionExecutionState::NoEffectConfirmed;
@@ -624,7 +622,7 @@ impl SqliteEventStore {
                 execution.executor = None;
                 execution.outcome = Some(EffectOutcome::NoEffectConfirmed);
                 execution.updated_at = now;
-                Ok(serde_json::json!({"reason": "reconciliation probe lease was fenced"}))
+                Ok(serde_json::json!({"reason": "action was abandoned before physical dispatch"}))
             },
         )
     }
@@ -3068,6 +3066,61 @@ mod tests {
                 .action_inspection(ActionId::new(), 10)
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn undispatched_effectful_action_can_be_abandoned_as_proven_no_effect() {
+        let mut store = SqliteEventStore::open_in_memory().unwrap();
+        let (_contract, workflow, actor) = running_workflow(&mut store);
+        let (envelope, execution) = action_fixture(&workflow, actor, EffectClass::Reversible);
+        store
+            .authorize_action(
+                &envelope,
+                &execution,
+                workflow.revision,
+                workflow.lease_generation,
+                CorrelationId::new(),
+                now(),
+            )
+            .unwrap();
+        let abandoned = store
+            .abandon_authorized_action_before_dispatch(
+                execution.id,
+                execution.revision,
+                execution.lease_generation,
+                CorrelationId::new(),
+                "abandon-effectful-before-dispatch",
+                now(),
+            )
+            .unwrap();
+        assert_eq!(abandoned.state, ActionExecutionState::NoEffectConfirmed);
+        assert_eq!(abandoned.outcome, Some(EffectOutcome::NoEffectConfirmed));
+        assert_eq!(
+            store
+                .abandon_authorized_action_before_dispatch(
+                    execution.id,
+                    execution.revision,
+                    execution.lease_generation,
+                    CorrelationId::new(),
+                    "abandon-effectful-before-dispatch",
+                    now(),
+                )
+                .unwrap(),
+            abandoned
+        );
+        assert!(
+            store
+                .dispatch_action(
+                    execution.id,
+                    abandoned.revision,
+                    abandoned.lease_generation,
+                    actor,
+                    CorrelationId::new(),
+                    "dispatch-abandoned-effect",
+                    now(),
+                )
+                .is_err()
         );
     }
 

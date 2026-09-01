@@ -345,7 +345,7 @@ try {
     }
     $installationRemoved = $false
 
-    $requiredPayload = @("mcg-desktop.exe", "mcg-service.exe", "mcg.exe", "mcg-agent-mcp.exe", "mcg-action-runner.exe", "mcg-provider-runner.exe", "mcg-runtime-worker.exe", "mcg-plugin-runner.exe", "mcg-shadow-runner.exe", "mcg-updater.exe", "THIRD_PARTY_NOTICES.md", "Apache-2.0.txt", "Wasmtime-Apache-2.0-WITH-LLVM-exception.txt")
+    $requiredPayload = @("mcg-desktop.exe", "mcg-service.exe", "mcg.exe", "mcg-agent-mcp.exe", "mcg-action-runner.exe", "mcg-process-runner.exe", "mcg-provider-runner.exe", "mcg-runtime-worker.exe", "mcg-plugin-runner.exe", "mcg-shadow-runner.exe", "mcg-updater.exe", "THIRD_PARTY_NOTICES.md", "Apache-2.0.txt", "Wasmtime-Apache-2.0-WITH-LLVM-exception.txt")
     $installed = Get-ChildItem -LiteralPath $installRoot -Recurse -File
     foreach ($name in $requiredPayload) {
         if ($installed.Name -notcontains $name) {
@@ -376,6 +376,21 @@ try {
         throw "Packaged action runner qualification left filesystem residue."
     }
     [IO.File]::WriteAllText((Join-Path $uatRoot "action-runner.json"), $actionQualificationJson, [Text.UTF8Encoding]::new($false))
+
+    $processRunner = Join-Path $installRoot "mcg-process-runner.exe"
+    $processQualificationRoot = Join-Path $uatRoot "process-runner-qualification"
+    New-Item -ItemType Directory -Path $processQualificationRoot | Out-Null
+    $processQualificationJson = (& $processRunner --qualify-process-root $processQualificationRoot) -join "`n"
+    if ($LASTEXITCODE -ne 0) {
+        throw "Packaged process runner qualification failed with exit code $LASTEXITCODE."
+    }
+    $processQualification = $processQualificationJson | ConvertFrom-Json
+    if ($processQualification.outcome -ne "effect_confirmed" -or
+        $null -eq $processQualification.observation -or
+        $null -ne $processQualification.error_code) {
+        throw "Packaged process runner qualification report is incomplete."
+    }
+    [IO.File]::WriteAllText((Join-Path $uatRoot "process-runner.json"), $processQualificationJson, [Text.UTF8Encoding]::new($false))
 
     $runtimeWorker = Join-Path $installRoot "mcg-runtime-worker.exe"
     $runtimeQualificationJson = (& $runtimeWorker --qualify-runtime-worker) -join "`n"
@@ -816,6 +831,7 @@ try {
         ReinstallPreservedData = $true
         PluginRunnerQualified = $true
         ActionRunnerQualified = $true
+        ProcessRunnerQualified = $true
         AppExecutableRemoved = $true
     }
 } finally {
