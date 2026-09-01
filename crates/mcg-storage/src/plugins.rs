@@ -656,6 +656,18 @@ fn valid_plugin_scope(capability: PluginCapability, scope: &PluginCapabilityScop
                 tool_name,
             },
         ) => bounded_scope_text(connection_id, 128) && bounded_scope_text(tool_name, 1_024),
+        (PluginCapability::Browser, PluginCapabilityScope::BrowserOrigin { origin }) => {
+            url::Url::parse(origin).is_ok_and(|url| {
+                matches!(url.scheme(), "http" | "https")
+                    && url.host_str().is_some()
+                    && url.username().is_empty()
+                    && url.password().is_none()
+                    && url.query().is_none()
+                    && url.fragment().is_none()
+                    && url.path() == "/"
+                    && url.origin().ascii_serialization() == *origin
+            })
+        }
         _ => false,
     }
 }
@@ -1209,6 +1221,27 @@ mod tests {
             &PluginCapabilityScope::McpTool {
                 connection_id: "fixture_connection".into(),
                 tool_name: "\0substituted".into(),
+            }
+        ));
+    }
+
+    #[test]
+    fn browser_grants_bind_one_canonical_origin_and_cannot_be_network_grants() {
+        let scope = PluginCapabilityScope::BrowserOrigin {
+            origin: "https://app.example.test".into(),
+        };
+        assert!(valid_plugin_scope(PluginCapability::Browser, &scope));
+        assert!(!valid_plugin_scope(PluginCapability::Network, &scope));
+        assert!(!valid_plugin_scope(
+            PluginCapability::Browser,
+            &PluginCapabilityScope::NetworkOrigin {
+                origin: "https://app.example.test".into(),
+            }
+        ));
+        assert!(!valid_plugin_scope(
+            PluginCapability::Browser,
+            &PluginCapabilityScope::BrowserOrigin {
+                origin: "https://app.example.test/path".into(),
             }
         ));
     }

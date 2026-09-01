@@ -255,6 +255,7 @@ pub fn plugin_signing_payload(
             PluginCapability::Process => 3,
             PluginCapability::Credentials => 4,
             PluginCapability::Mcp => 5,
+            PluginCapability::Browser => 6,
         });
     }
     push_text(&mut payload, &revision.module_sha256)?;
@@ -430,6 +431,13 @@ mod tests {
         changed.module_sha256 = "a".repeat(64);
         assert!(matches!(
             trust(&key).verify_registry_revision(&changed, &proof),
+            Err(PluginTrustError::VerificationFailed)
+        ));
+
+        let mut relabelled = revision(b"module", "https://plugins.example/");
+        relabelled.manifest.requested_capabilities = vec![PluginCapability::Browser];
+        assert!(matches!(
+            trust(&key).verify_registry_revision(&relabelled, &proof),
             Err(PluginTrustError::VerificationFailed)
         ));
 

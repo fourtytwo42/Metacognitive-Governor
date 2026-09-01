@@ -4221,6 +4221,7 @@ dependencies = [
 name = "mcg-plugin-protocol"
 version = "0.4.67"
 dependencies = [
+ "mcg-browser-contracts",
  "serde",
  "serde_json",
  "thiserror 2.0.20",

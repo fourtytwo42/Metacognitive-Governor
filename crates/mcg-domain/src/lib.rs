@@ -1114,6 +1114,9 @@ pub enum PluginCapabilityScope {
         connection_id: String,
         tool_name: String,
     },
+    BrowserOrigin {
+        origin: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

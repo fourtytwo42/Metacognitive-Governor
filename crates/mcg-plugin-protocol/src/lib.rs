@@ -1,5 +1,6 @@
 //! Lightweight, versioned protocol shared by the daemon and isolated plugin runner.
 
+use mcg_browser_contracts::BrowserWorkflowDocument;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -23,6 +24,7 @@ pub enum PluginCapability {
     Process,
     Credentials,
     Mcp,
+    Browser,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -89,6 +91,12 @@ pub enum PluginCapabilityOperation {
         arguments: Value,
         max_response_bytes: u64,
     },
+    BrowserWorkflow {
+        document: BrowserWorkflowDocument,
+        viewport_width: u32,
+        viewport_height: u32,
+        timeout_ms: u64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -135,6 +143,7 @@ impl PluginCapabilityOperation {
             Self::HttpRequest { .. } => PluginCapability::Network,
             Self::ProcessExec { .. } => PluginCapability::Process,
             Self::McpCall { .. } => PluginCapability::Mcp,
+            Self::BrowserWorkflow { .. } => PluginCapability::Browser,
         }];
         let uses_credentials = match self {
             Self::HttpRequest { headers, .. } => headers
@@ -143,9 +152,10 @@ impl PluginCapabilityOperation {
             Self::ProcessExec { env, .. } => env
                 .iter()
                 .any(|variable| matches!(variable.value, PluginValueSource::Credential(_))),
-            Self::FilesystemRead { .. } | Self::FilesystemWrite { .. } | Self::McpCall { .. } => {
-                false
-            }
+            Self::FilesystemRead { .. }
+            | Self::FilesystemWrite { .. }
+            | Self::McpCall { .. }
+            | Self::BrowserWorkflow { .. } => false,
         };
         if uses_credentials {
             capabilities.push(PluginCapability::Credentials);
@@ -246,9 +256,38 @@ impl PluginCapabilityOperation {
                 arguments,
                 max_response_bytes,
             } => validate_mcp_call(connection_id, tool_name, arguments, *max_response_bytes)?,
+            Self::BrowserWorkflow { .. } => validate_browser_workflow(self)?,
         }
         Ok(())
     }
+}
+
+fn validate_browser_workflow(operation: &PluginCapabilityOperation) -> Result<(), PluginError> {
+    let PluginCapabilityOperation::BrowserWorkflow {
+        document,
+        viewport_width,
+        viewport_height,
+        timeout_ms,
+    } = operation
+    else {
+        return Err(PluginError::Manifest(
+            "plugin operation is not a browser workflow".into(),
+        ));
+    };
+    document.validate().map_err(PluginError::Manifest)?;
+    let document_bytes = serde_json::to_vec(document)
+        .map_err(|_| PluginError::Manifest("plugin browser workflow is not serializable".into()))?;
+    if document_bytes.len() > 512 * 1_024
+        || !(320..=7_680).contains(viewport_width)
+        || !(240..=4_320).contains(viewport_height)
+        || *timeout_ms == 0
+        || *timeout_ms > 120_000
+    {
+        return Err(PluginError::Manifest(
+            "plugin browser workflow bounds are invalid".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn validate_mcp_call(
@@ -695,6 +734,60 @@ mod tests {
             unreachable!("MCP fixture operation")
         };
         *arguments = serde_json::json!(["not", "an", "object"]);
+        assert!(matches!(
+            request.validate(&manifest),
+            Err(PluginError::Manifest(_))
+        ));
+    }
+
+    #[test]
+    fn browser_workflows_require_a_distinct_capability_and_bounded_safe_language() {
+        let manifest = PluginManifest {
+            schema_version: PLUGIN_SCHEMA_VERSION,
+            id: "example.browser".into(),
+            display_name: "Browser example".into(),
+            version: "1.0.0".into(),
+            class: PluginClass::SandboxedWasi,
+            requested_capabilities: vec![PluginCapability::Browser],
+        };
+        let mut request = PluginCapabilityRequest {
+            schema_version: PLUGIN_SCHEMA_VERSION,
+            id: "browser-proof".into(),
+            operation: PluginCapabilityOperation::BrowserWorkflow {
+                document: BrowserWorkflowDocument {
+                    schema_version: mcg_browser_contracts::BROWSER_WORKFLOW_SCHEMA_VERSION,
+                    name: "same-origin proof".into(),
+                    start_url: "https://app.example.test/start".into(),
+                    steps: vec![mcg_browser_contracts::BrowserWorkflowStep::AssertElement {
+                        selector: "main".into(),
+                    }],
+                },
+                viewport_width: 1_280,
+                viewport_height: 720,
+                timeout_ms: 30_000,
+            },
+        };
+        assert!(request.validate(&manifest).is_ok());
+        assert_eq!(
+            request.operation.required_capabilities(),
+            vec![PluginCapability::Browser]
+        );
+        let network_only = PluginManifest {
+            requested_capabilities: vec![PluginCapability::Network],
+            ..manifest.clone()
+        };
+        assert!(matches!(
+            request.validate(&network_only),
+            Err(PluginError::CapabilityDenied(_))
+        ));
+        let PluginCapabilityOperation::BrowserWorkflow { document, .. } = &mut request.operation
+        else {
+            unreachable!("browser fixture operation")
+        };
+        document.steps = vec![mcg_browser_contracts::BrowserWorkflowStep::Press {
+            selector: "body".into(),
+            key: "F12".into(),
+        }];
         assert!(matches!(
             request.validate(&manifest),
             Err(PluginError::Manifest(_))
