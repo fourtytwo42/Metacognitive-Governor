@@ -129,6 +129,8 @@ pub enum ProviderRunnerClientError {
     InvalidResponse,
     #[error("provider runner process failed")]
     Process,
+    #[error("provider runner denied the request before provider contact: {0}")]
+    Denied(String),
     #[error("provider execution failed after dispatch: {0}")]
     Provider(String),
 }
@@ -736,7 +738,11 @@ fn validate_client_response(
             if response.response.is_none()
                 && response.error_code.as_deref().is_some_and(valid_code) =>
         {
-            Err(ProviderRunnerClientError::InvalidResponse)
+            Err(ProviderRunnerClientError::Denied(
+                response
+                    .error_code
+                    .unwrap_or_else(|| "provider_runner_denied".into()),
+            ))
         }
         _ => Err(ProviderRunnerClientError::InvalidResponse),
     }
@@ -1158,6 +1164,14 @@ mod tests {
         .await;
         assert_eq!(response.outcome, ProviderRunnerOutcome::Denied);
         assert_eq!(response.error_code.as_deref(), Some("authority_mismatch"));
+        assert!(matches!(
+            validate_client_response(
+                false,
+                &runner_request,
+                &serde_json::to_vec(&response).expect("denied response"),
+            ),
+            Err(ProviderRunnerClientError::Denied(code)) if code == "authority_mismatch"
+        ));
     }
 
     #[tokio::test]

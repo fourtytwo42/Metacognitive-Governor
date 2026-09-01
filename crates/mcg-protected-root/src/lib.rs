@@ -62,8 +62,8 @@ use mcg_platform::{
     create_root_ipc_session, read_canonical_frame, remove_root_ipc_session, write_canonical_frame,
 };
 use mcg_provider_runner::{
-    ProviderRunnerAuthorization, ProviderRunnerClient, ProviderRunnerRequest,
-    RunnerSecretHandleBinding, RunnerSecretSlot,
+    ProviderRunnerAuthorization, ProviderRunnerClient, ProviderRunnerClientError,
+    ProviderRunnerRequest, RunnerSecretHandleBinding, RunnerSecretSlot,
     model_provider_request_artifact as runner_request_artifact,
     model_provider_response_artifact as runner_response_artifact,
 };
@@ -116,6 +116,8 @@ pub enum ProtectedRootError {
     RuntimeWorker(#[from] RuntimeWorkerClientError),
     #[error(transparent)]
     Provider(#[from] ProviderError),
+    #[error("retryable provider gateway failure before provider contact: {0}")]
+    RetryableProviderBeforeContact(ProviderError),
     #[error("authorized action execution was not found")]
     ActionNotFound,
     #[error("configured Root API address is invalid: {0}")]
@@ -417,7 +419,43 @@ pub trait GovernedModelProviderGateway: Send + Sync {
         &self,
         authorization: &RuntimeModelEgressAuthorizationReceipt,
         request: &ModelRequest,
-    ) -> Result<ModelResponse, ProviderError>;
+    ) -> Result<ModelResponse, GovernedModelProviderGatewayError>;
+}
+
+/// Root's conservative classification of a physical gateway failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GovernedProviderFailureClass {
+    /// The gateway proved that no provider contact occurred and a new authorized attempt may help.
+    RetryableBeforeProviderContact,
+    /// The gateway proved that no provider contact occurred, but repeating cannot safely help.
+    FinalBeforeProviderContact,
+    /// Provider contact or billing may have occurred; automatic retry is forbidden.
+    OutcomeUnknown,
+}
+
+/// One bounded gateway error with an explicit provider-contact classification.
+#[derive(Debug, thiserror::Error)]
+#[error("{error}")]
+pub struct GovernedModelProviderGatewayError {
+    class: GovernedProviderFailureClass,
+    error: ProviderError,
+}
+
+impl GovernedModelProviderGatewayError {
+    #[must_use]
+    pub const fn new(class: GovernedProviderFailureClass, error: ProviderError) -> Self {
+        Self { class, error }
+    }
+
+    #[must_use]
+    pub const fn class(&self) -> GovernedProviderFailureClass {
+        self.class
+    }
+
+    #[must_use]
+    pub fn into_provider_error(self) -> ProviderError {
+        self.error
+    }
 }
 
 /// Fixed adjacent process gateway for one exact Root-resolved provider and model.
@@ -453,7 +491,7 @@ impl GovernedModelProviderGateway for IsolatedProviderRunnerGateway {
         &self,
         authorization: &RuntimeModelEgressAuthorizationReceipt,
         request: &ModelRequest,
-    ) -> Result<ModelResponse, ProviderError> {
+    ) -> Result<ModelResponse, GovernedModelProviderGatewayError> {
         self.client
             .invoke(&ProviderRunnerRequest {
                 protocol_version: mcg_provider_runner::PROVIDER_RUNNER_PROTOCOL_VERSION,
@@ -464,16 +502,43 @@ impl GovernedModelProviderGateway for IsolatedProviderRunnerGateway {
                 request: request.clone(),
             })
             .await
-            .map_err(|error| ProviderError::Request {
-                message: error.to_string(),
-                retriable: false,
-            })
+            .map_err(|error| classify_provider_runner_failure(&error))
     }
+}
+
+fn classify_provider_runner_failure(
+    error: &ProviderRunnerClientError,
+) -> GovernedModelProviderGatewayError {
+    let class = match error {
+        ProviderRunnerClientError::Unavailable | ProviderRunnerClientError::Launch => {
+            GovernedProviderFailureClass::RetryableBeforeProviderContact
+        }
+        ProviderRunnerClientError::ExecutableChanged
+        | ProviderRunnerClientError::RequestTooLarge
+        | ProviderRunnerClientError::Denied(_) => {
+            GovernedProviderFailureClass::FinalBeforeProviderContact
+        }
+        ProviderRunnerClientError::Delivery
+        | ProviderRunnerClientError::Timeout
+        | ProviderRunnerClientError::ResponseTooLarge
+        | ProviderRunnerClientError::DiagnosticOutput
+        | ProviderRunnerClientError::InvalidResponse
+        | ProviderRunnerClientError::Process
+        | ProviderRunnerClientError::Provider(_) => GovernedProviderFailureClass::OutcomeUnknown,
+    };
+    GovernedModelProviderGatewayError::new(
+        class,
+        ProviderError::Request {
+            message: error.to_string(),
+            retriable: class == GovernedProviderFailureClass::RetryableBeforeProviderContact,
+        },
+    )
 }
 
 const COMPATIBILITY_AGENT_WORKFLOW_LEASE_SECONDS: u64 = 5 * 60;
 const COMPATIBILITY_AGENT_PERMIT_SECONDS: i64 = 2 * 60;
 const COMPATIBILITY_AGENT_CALL_MAX_COST_MICROUSD: u64 = 5_000_000;
+const COMPATIBILITY_AGENT_PROVIDER_MAX_ATTEMPTS: u32 = 2;
 
 struct RootAgentModelDispatcher {
     runtime: Weak<AppRuntime>,
@@ -924,11 +989,13 @@ fn remaining_compatibility_cost_micro_usd(
 /// Every physical call receives a distinct invocation, permit, stable client request ID, and model
 /// run. Root derives disclosure and budgets from persisted source authority and the exact request;
 /// the supplied gateway cannot be reached before all durable authorization evidence is committed.
+/// Root permits at most one retry, and only after the gateway proves that the preceding attempt
+/// did not contact the provider. Ambiguous outcomes are never retried automatically.
 ///
 /// # Errors
 /// Returns a protected-root error for stale source/workflow/provider authority, invalid budgets,
 /// request substitution, gateway failure, invalid response, or durable settlement failure.
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments)]
 pub async fn execute_compatibility_agent_model_invocation(
     runtime: &AppRuntime,
     gateway: &dyn GovernedModelProviderGateway,
@@ -938,7 +1005,75 @@ pub async fn execute_compatibility_agent_model_invocation(
     runtime_identity: &RuntimeIdentity,
     lease_id: AgentLeaseId,
     target: &mcg_providers::ProviderModelRef,
+    request: ModelRequest,
+    now: chrono::DateTime<Utc>,
+) -> Result<ModelResponse, ProtectedRootError> {
+    let logical_request_id = Uuid::new_v4();
+    let logical_request_hash = model_provider_request_artifact(&request)?.content_hash;
+    let mut retry_of_invocation_id = None;
+    for physical_attempt in 1..=COMPATIBILITY_AGENT_PROVIDER_MAX_ATTEMPTS {
+        let invocation_id = InvocationId::new();
+        let attempt_now = now
+            .checked_add_signed(chrono::Duration::milliseconds(i64::from(
+                physical_attempt.saturating_sub(1),
+            )))
+            .ok_or_else(|| StorageError::InvalidData("provider retry time overflowed".into()))?;
+        match execute_compatibility_agent_model_attempt(
+            runtime,
+            gateway,
+            connection,
+            model,
+            runtime_actor,
+            runtime_identity,
+            lease_id,
+            target,
+            request.clone(),
+            logical_request_id,
+            &logical_request_hash,
+            physical_attempt,
+            retry_of_invocation_id,
+            invocation_id,
+            attempt_now,
+        )
+        .await
+        {
+            Ok(response) => return Ok(response),
+            Err(ProtectedRootError::RetryableProviderBeforeContact(_))
+                if physical_attempt < COMPATIBILITY_AGENT_PROVIDER_MAX_ATTEMPTS =>
+            {
+                retry_of_invocation_id = Some(invocation_id);
+            }
+            Err(ProtectedRootError::RetryableProviderBeforeContact(error)) => {
+                return Err(ProviderError::Request {
+                    message: format!(
+                        "Root provider retry policy exhausted after {physical_attempt} physical attempts: {error}"
+                    ),
+                    retriable: false,
+                }
+                .into());
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Err(StorageError::Conflict("provider retry policy exhausted without a result".into()).into())
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+async fn execute_compatibility_agent_model_attempt(
+    runtime: &AppRuntime,
+    gateway: &dyn GovernedModelProviderGateway,
+    connection: &ProviderConnection,
+    model: &ModelDescriptor,
+    runtime_actor: RuntimeActorId,
+    runtime_identity: &RuntimeIdentity,
+    lease_id: AgentLeaseId,
+    target: &mcg_providers::ProviderModelRef,
     mut request: ModelRequest,
+    logical_request_id: Uuid,
+    logical_request_hash: &ContentHash,
+    physical_attempt: u32,
+    retry_of_invocation_id: Option<InvocationId>,
+    invocation_id: InvocationId,
     now: chrono::DateTime<Utc>,
 ) -> Result<ModelResponse, ProtectedRootError> {
     runtime_identity.validate()?;
@@ -959,7 +1094,6 @@ pub async fn execute_compatibility_agent_model_invocation(
         now,
     )?;
     let attempt = &authority.workflow.attempt;
-    let invocation_id = InvocationId::new();
     request.client_request_id = Some(format!("mcg-governed-{invocation_id}"));
     let request_artifact = model_provider_request_artifact(&request)?;
     let approximate_input_tokens = request_artifact.byte_length.saturating_add(3) / 4;
@@ -1014,6 +1148,11 @@ pub async fn execute_compatibility_agent_model_invocation(
             "lease_id": lease_id,
             "provider_id": target.provider_id,
             "model_id": target.model_id,
+            "logical_request_id": logical_request_id,
+            "logical_request_hash": logical_request_hash,
+            "physical_attempt": physical_attempt,
+            "maximum_physical_attempts": COMPATIBILITY_AGENT_PROVIDER_MAX_ATTEMPTS,
+            "retry_of_invocation_id": retry_of_invocation_id,
             "request_hash": request_artifact.content_hash,
         }),
     )?;
@@ -1033,6 +1172,11 @@ pub async fn execute_compatibility_agent_model_invocation(
             &serde_json::json!({
                 "mode": "exact_compatibility_request",
                 "source_snapshot_hash": context_source.content_hash,
+                "logical_request_id": logical_request_id,
+                "logical_request_hash": logical_request_hash,
+                "physical_attempt": physical_attempt,
+                "maximum_physical_attempts": COMPATIBILITY_AGENT_PROVIDER_MAX_ATTEMPTS,
+                "retry_of_invocation_id": retry_of_invocation_id,
                 "request_hash": request_artifact.content_hash,
             }),
         )?,
@@ -1269,12 +1413,31 @@ pub async fn execute_authorized_model_invocation(
     let response = match gateway.invoke(&authorization, request).await {
         Ok(response) => response,
         Err(error) => {
-            runtime.settle_governed_provider_invocation_unknown(
-                manifest.id,
-                model_run_id,
-                Utc::now(),
-            )?;
-            return Err(error.into());
+            let class = error.class();
+            let provider_error = error.into_provider_error();
+            match class {
+                GovernedProviderFailureClass::RetryableBeforeProviderContact
+                | GovernedProviderFailureClass::FinalBeforeProviderContact => {
+                    runtime.fail_governed_provider_invocation_before_contact(
+                        manifest.id,
+                        model_run_id,
+                        Utc::now(),
+                    )?;
+                    if class == GovernedProviderFailureClass::RetryableBeforeProviderContact {
+                        return Err(ProtectedRootError::RetryableProviderBeforeContact(
+                            provider_error,
+                        ));
+                    }
+                }
+                GovernedProviderFailureClass::OutcomeUnknown => {
+                    runtime.settle_governed_provider_invocation_unknown(
+                        manifest.id,
+                        model_run_id,
+                        Utc::now(),
+                    )?;
+                }
+            }
+            return Err(provider_error.into());
         }
     };
     let completed_at = Utc::now();
@@ -3523,7 +3686,7 @@ mod tests {
             &self,
             _authorization: &RuntimeModelEgressAuthorizationReceipt,
             _request: &ModelRequest,
-        ) -> Result<ModelResponse, ProviderError> {
+        ) -> Result<ModelResponse, GovernedModelProviderGatewayError> {
             *self.calls.lock().expect("model gateway call lock") += 1;
             Ok(self.response.clone())
         }
@@ -3540,12 +3703,68 @@ mod tests {
             &self,
             authorization: &RuntimeModelEgressAuthorizationReceipt,
             request: &ModelRequest,
-        ) -> Result<ModelResponse, ProviderError> {
+        ) -> Result<ModelResponse, GovernedModelProviderGatewayError> {
             self.calls
                 .lock()
                 .expect("agent provider call lock")
                 .push((authorization.clone(), request.clone()));
             Ok(self.response.clone())
+        }
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum ScriptedGatewayFailure {
+        RetryFirst,
+        AlwaysRetryable,
+        FinalBeforeContact,
+        OutcomeUnknown,
+    }
+
+    struct ScriptedAgentProviderGateway {
+        calls: Mutex<Vec<(RuntimeModelEgressAuthorizationReceipt, ModelRequest)>>,
+        response: ModelResponse,
+        failure: ScriptedGatewayFailure,
+    }
+
+    #[async_trait::async_trait]
+    impl GovernedModelProviderGateway for ScriptedAgentProviderGateway {
+        async fn invoke(
+            &self,
+            authorization: &RuntimeModelEgressAuthorizationReceipt,
+            request: &ModelRequest,
+        ) -> Result<ModelResponse, GovernedModelProviderGatewayError> {
+            let mut calls = self.calls.lock().expect("scripted gateway calls");
+            calls.push((authorization.clone(), request.clone()));
+            let call_number = calls.len();
+            drop(calls);
+            let class = match self.failure {
+                ScriptedGatewayFailure::RetryFirst if call_number == 1 => {
+                    Some(GovernedProviderFailureClass::RetryableBeforeProviderContact)
+                }
+                ScriptedGatewayFailure::RetryFirst => None,
+                ScriptedGatewayFailure::AlwaysRetryable => {
+                    Some(GovernedProviderFailureClass::RetryableBeforeProviderContact)
+                }
+                ScriptedGatewayFailure::FinalBeforeContact => {
+                    Some(GovernedProviderFailureClass::FinalBeforeProviderContact)
+                }
+                ScriptedGatewayFailure::OutcomeUnknown => {
+                    Some(GovernedProviderFailureClass::OutcomeUnknown)
+                }
+            };
+            class.map_or_else(
+                || Ok(self.response.clone()),
+                |class| {
+                    Err(GovernedModelProviderGatewayError::new(
+                        class,
+                        ProviderError::Request {
+                            message: "scripted governed gateway failure".into(),
+                            retriable: class
+                                == GovernedProviderFailureClass::RetryableBeforeProviderContact,
+                        },
+                    ))
+                },
+            )
         }
     }
 
@@ -3564,7 +3783,7 @@ mod tests {
             &self,
             _authorization: &RuntimeModelEgressAuthorizationReceipt,
             _request: &ModelRequest,
-        ) -> Result<ModelResponse, ProviderError> {
+        ) -> Result<ModelResponse, GovernedModelProviderGatewayError> {
             self.runtime
                 .begin_runtime_verification(
                     self.attempt_id,
@@ -3916,6 +4135,34 @@ mod tests {
         );
     }
 
+    #[test]
+    fn provider_runner_failures_use_conservative_contact_classification() {
+        for (error, expected) in [
+            (
+                ProviderRunnerClientError::Launch,
+                GovernedProviderFailureClass::RetryableBeforeProviderContact,
+            ),
+            (
+                ProviderRunnerClientError::ExecutableChanged,
+                GovernedProviderFailureClass::FinalBeforeProviderContact,
+            ),
+            (
+                ProviderRunnerClientError::Denied("authority_mismatch".into()),
+                GovernedProviderFailureClass::FinalBeforeProviderContact,
+            ),
+            (
+                ProviderRunnerClientError::Delivery,
+                GovernedProviderFailureClass::OutcomeUnknown,
+            ),
+            (
+                ProviderRunnerClientError::Provider("provider_timeout".into()),
+                GovernedProviderFailureClass::OutcomeUnknown,
+            ),
+        ] {
+            assert_eq!(classify_provider_runner_failure(&error).class(), expected);
+        }
+    }
+
     #[tokio::test]
     #[allow(clippy::too_many_lines)]
     async fn compatibility_agent_call_claims_canonical_authority_and_uses_one_permit_gateway() {
@@ -4038,6 +4285,219 @@ mod tests {
                 .state,
             ModelRunState::Completed
         );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn compatibility_provider_retries_only_proven_no_contact_with_fresh_authority() {
+        for (failure, expected_calls, expected_states) in [
+            (
+                ScriptedGatewayFailure::RetryFirst,
+                2,
+                vec![ModelRunState::Failed, ModelRunState::Completed],
+            ),
+            (
+                ScriptedGatewayFailure::FinalBeforeContact,
+                1,
+                vec![ModelRunState::Failed],
+            ),
+            (
+                ScriptedGatewayFailure::OutcomeUnknown,
+                1,
+                vec![ModelRunState::OutcomeUnknown],
+            ),
+            (
+                ScriptedGatewayFailure::AlwaysRetryable,
+                2,
+                vec![ModelRunState::Failed, ModelRunState::Failed],
+            ),
+        ] {
+            let temporary = tempfile::tempdir().expect("temporary compatibility retry directory");
+            let config = AppConfig::default().with_data_directory(temporary.path());
+            let at = Utc::now();
+            let runtime = open(config.clone()).expect("open compatibility retry Root");
+            let (lease, connection, model) = {
+                let mut store = SqliteEventStore::open(config.database_path())
+                    .expect("compatibility retry store");
+                seed_compatibility_agent_provider(&mut store, at)
+            };
+            let identity = current_runtime_identity().expect("runtime identity");
+            let actor = RuntimeActorId(identity.instance_id.0);
+            let target = mcg_providers::ProviderModelRef {
+                provider_id: connection.id.clone(),
+                model_id: model.id.clone(),
+            };
+            let request = ModelRequest {
+                contract_version: CONTRACT_VERSION,
+                model: model.id.clone(),
+                client_request_id: None,
+                instructions: Some("Use the bounded retry fixture.".into()),
+                messages: vec![Message {
+                    role: MessageRole::User,
+                    content: vec![ContentPart::Text {
+                        text: "Return the retry result.".into(),
+                    }],
+                    name: None,
+                }],
+                tools: Vec::new(),
+                tool_choice: None,
+                structured_output: None,
+                reasoning: None,
+                temperature: None,
+                top_p: None,
+                max_output_tokens: Some(64),
+                metadata: serde_json::json!({"agent_lease_id": lease.id}),
+            };
+            let gateway = ScriptedAgentProviderGateway {
+                calls: Mutex::new(Vec::new()),
+                response: ModelResponse {
+                    contract_version: CONTRACT_VERSION,
+                    id: "governed-retry-response".into(),
+                    model: model.id.clone(),
+                    status: Some("completed".into()),
+                    output: vec![OutputItem::Message {
+                        role: MessageRole::Assistant,
+                        content: vec![ContentPart::Text {
+                            text: "retried safely".into(),
+                        }],
+                    }],
+                    usage: Usage {
+                        input_tokens: 16,
+                        output_tokens: 2,
+                        total_tokens: 18,
+                        ..Usage::default()
+                    },
+                    provider_metadata: serde_json::Value::Null,
+                },
+                failure,
+            };
+
+            let result = execute_compatibility_agent_model_invocation(
+                &runtime,
+                &gateway,
+                &connection,
+                &model,
+                actor,
+                &identity,
+                lease.id,
+                &target,
+                request,
+                at,
+            )
+            .await;
+            assert_eq!(
+                result.is_ok(),
+                failure == ScriptedGatewayFailure::RetryFirst
+            );
+            let calls = gateway.calls.lock().expect("scripted retry calls");
+            assert_eq!(calls.len(), expected_calls);
+            let invocation_ids = calls
+                .iter()
+                .map(|(authorization, _)| authorization.proposal.invocation_id)
+                .collect::<Vec<_>>();
+            let permit_ids = calls
+                .iter()
+                .map(|(authorization, _)| authorization.permit.id)
+                .collect::<Vec<_>>();
+            let client_request_ids = calls
+                .iter()
+                .map(|(_, request)| {
+                    request
+                        .client_request_id
+                        .clone()
+                        .expect("governed client request id")
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                invocation_ids.iter().collect::<BTreeSet<_>>().len(),
+                expected_calls
+            );
+            assert_eq!(
+                permit_ids.iter().collect::<BTreeSet<_>>().len(),
+                expected_calls
+            );
+            assert_eq!(
+                client_request_ids.iter().collect::<BTreeSet<_>>().len(),
+                expected_calls
+            );
+
+            let mut retry_payloads = Vec::new();
+            let mut model_run_ids = Vec::new();
+            for (index, invocation_id) in invocation_ids.iter().enumerate() {
+                let inspection = runtime
+                    .runtime_invocation(*invocation_id, 10)
+                    .expect("retry invocation inspection")
+                    .expect("retry invocation exists");
+                assert_eq!(
+                    inspection
+                        .model_runs
+                        .last()
+                        .expect("retry model run")
+                        .run
+                        .state,
+                    expected_states[index]
+                );
+                model_run_ids.push(
+                    inspection
+                        .model_runs
+                        .last()
+                        .expect("retry model run")
+                        .run
+                        .id,
+                );
+                retry_payloads.push(
+                    decode_canonical_cbor_v1(
+                        &inspection.context_manifest.selected_sources[0]
+                            .influence
+                            .bytes,
+                    )
+                    .expect("retry lineage payload"),
+                );
+            }
+            assert_eq!(
+                model_run_ids.iter().collect::<BTreeSet<_>>().len(),
+                expected_calls
+            );
+            if matches!(
+                failure,
+                ScriptedGatewayFailure::RetryFirst | ScriptedGatewayFailure::AlwaysRetryable
+            ) {
+                assert_eq!(retry_payloads[0]["physical_attempt"], 1);
+                assert_eq!(retry_payloads[1]["physical_attempt"], 2);
+                assert_eq!(
+                    retry_payloads[0]["logical_request_id"],
+                    retry_payloads[1]["logical_request_id"]
+                );
+                assert_eq!(
+                    retry_payloads[0]["logical_request_hash"],
+                    retry_payloads[1]["logical_request_hash"]
+                );
+                assert!(retry_payloads[0]["retry_of_invocation_id"].is_null());
+                assert_eq!(
+                    retry_payloads[1]["retry_of_invocation_id"],
+                    invocation_ids[0].to_string()
+                );
+            }
+            drop(calls);
+            drop(runtime);
+
+            let reopened = open(config).expect("reopen compatibility retry Root");
+            for (index, invocation_id) in invocation_ids.iter().enumerate() {
+                let inspection = reopened
+                    .runtime_invocation(*invocation_id, 10)
+                    .expect("reopened retry invocation")
+                    .expect("persisted retry invocation");
+                assert_eq!(
+                    inspection
+                        .model_runs
+                        .last()
+                        .expect("persisted retry model run")
+                        .run
+                        .state,
+                    expected_states[index]
+                );
+            }
+        }
     }
 
     #[tokio::test]

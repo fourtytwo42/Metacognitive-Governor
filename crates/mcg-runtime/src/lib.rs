@@ -4400,6 +4400,32 @@ impl AppRuntime {
         Ok(store.transition_model_run(&next, current.revision, now)?)
     }
 
+    /// Settles a dispatched provider run after the gateway proves no provider contact occurred.
+    /// This terminal evidence permits a separately authorized physical retry; the same invocation
+    /// and model run can never be redispatched.
+    ///
+    /// # Errors
+    /// Returns a runtime error for substituted lineage, invalid state, or persistence failure.
+    pub fn fail_governed_provider_invocation_before_contact(
+        &self,
+        invocation_id: InvocationId,
+        model_run_id: ModelRunId,
+        now: DateTime<Utc>,
+    ) -> Result<mcg_storage::ModelRunRecord, RuntimeError> {
+        let mut store = self.store()?;
+        let current = exact_model_run(&store, invocation_id, model_run_id)?;
+        if current.run.state != ModelRunState::Dispatched {
+            return Err(StorageError::Conflict(
+                "only a dispatched governed provider invocation can fail before contact".into(),
+            )
+            .into());
+        }
+        let mut next = current.run;
+        next.state = ModelRunState::Failed;
+        next.finished_at = Some(now);
+        Ok(store.transition_model_run(&next, current.revision, now)?)
+    }
+
     /// Loads the current exact revision of one governed provider model run.
     ///
     /// # Errors
