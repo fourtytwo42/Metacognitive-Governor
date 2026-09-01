@@ -2,6 +2,15 @@
 
 Durable project context lives here. Update this file whenever information should survive chat context compression or future agent handoff.
 
+### 2026-09-01 - Root-governed Tool, Skill, and capability contract kernel
+
+- Context: Stage 6 provider execution had exact Root permits, but Tool/Skill/Capability governance still relied on legacy per-feature contracts and lacked the PRD's common manifest, sandbox-guarantee, and permit vocabulary.
+- Decision: Add dependency-isolated canonical `ToolManifest`, `SkillManifest`, rebuildable non-authoritative `CapabilityProfile`, per-dimension `SandboxCapabilityProfile`, exact filesystem/network/secret/process scopes, resource ceilings, and action/workflow/Runtime/TaskContract/arguments-bound `ToolInvocationProposal` and `ToolInvocationPermit`. Protected Root intersects the exact manifest revision, policy allowlist, effect ceiling, capability set, resource limits, host platform, seven sandbox dimensions, authenticated Runtime identity, and deadline. Registration or index presence grants no authority.
+- Files: `crates/mcg-contracts/src/{lib.rs,capabilities.rs}` and `crates/mcg-protected-root/src/lib.rs`. The other agent's untracked `docs/NewPRD/STAGE_3_DURABLE_WORKFLOW.md` remains untouched.
+- Commands/tests: Product checkpoint `dd2355f`; Contracts 27/27; Protected Root 21/21 plus real-child recovery; whole-workspace all-target check; strict Contracts and Root no-deps Clippy; docs/packaging/format/diff gates. Exact local/remote parity at `dd2355fc3ed0a42741165b926a20140632afd7b1`.
+- Result: Stable manifest and permit hashes now bind runner/schema identity, maximum effect, exact capabilities, secret-handle count, ceilings, supported platforms, receipt/reconciliation semantics, sandbox requirements, and immutable arguments. Root fails closed on manifest/hash/Runtime substitution, over-scope, weak isolation, unsupported platforms, or excessive lifetime. This is the authorization contract kernel only; it does not yet persist the registry/permits or migrate legacy executors.
+- Follow-up: Add immutable Root-owned manifest/permit storage and replay revalidation, then route existing process/filesystem/MCP/plugin/hook/browser/computer/Codex/remote execution through the permit before exposing progressive capability inspection.
+
 ### 2026-09-01 - OAuth provider execution excludes renewable authority
 
 - Context: Stage 6 governed API-key/bearer/no-auth provider execution, but the isolated runner denied ChatGPT OAuth and Root-issued OAuth permits exposed the renewable refresh-token slot alongside execution credentials.
