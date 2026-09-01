@@ -30,6 +30,9 @@ url.workspace = true
 uuid.workspace = true
 zeroize.workspace = true
 
+[dev-dependencies]
+axum.workspace = true
+
 [[bin]]
 name = "mcg-process-runner"
 path = "src/main.rs"

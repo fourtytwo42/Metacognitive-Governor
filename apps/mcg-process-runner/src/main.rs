@@ -1,16 +1,24 @@
 use std::{path::PathBuf, process::ExitCode, time::Duration};
 
+use chrono::Utc;
 use mcg_browser_contracts::{
     BROWSER_WORKFLOW_SCHEMA_VERSION, BrowserWorkflowDocument, BrowserWorkflowStep,
+};
+use mcg_mcp::{
+    LEGACY_MCP_PROTOCOL_VERSION, MCP_CONNECTION_CONTRACT_VERSION, McpAuthMode, McpConnection,
+    McpProtocolMode, McpServerInfo, McpToolCatalog, McpToolDescriptor, McpTransport,
 };
 use mcg_process_runner::{
     BROWSER_RUNNER_REQUEST_MAX_BYTES, BrowserRunnerClient, BrowserRunnerOutcome,
     BrowserRunnerResponse, GovernedBrowserOperation, GovernedHttpOperation,
-    GovernedProcessOperation, HTTP_RUNNER_REQUEST_MAX_BYTES, HttpRunnerClient, HttpRunnerOutcome,
-    HttpRunnerResponse, PROCESS_RUNNER_REQUEST_MAX_BYTES, ProcessRunnerClient,
-    ProcessRunnerOutcome, browser_qualification_request_with_evidence, executable_sha256,
-    execute_browser_request, execute_http_request, execute_request,
-    http_qualification_request_with_evidence, qualification_request_with_evidence,
+    GovernedMcpSessionOperation, GovernedProcessOperation, HTTP_RUNNER_REQUEST_MAX_BYTES,
+    HttpRunnerClient, HttpRunnerOutcome, HttpRunnerResponse, MCP_SESSION_RUNNER_REQUEST_MAX_BYTES,
+    McpSessionRunnerClient, McpSessionRunnerOutcome, McpSessionRunnerResponse,
+    PROCESS_RUNNER_REQUEST_MAX_BYTES, ProcessRunnerClient, ProcessRunnerOutcome,
+    browser_qualification_request_with_evidence, executable_sha256, execute_browser_request,
+    execute_http_request, execute_mcp_session_request, execute_request,
+    http_qualification_request_with_evidence, mcp_session_qualification_request_with_evidence,
+    qualification_request_with_evidence,
 };
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
@@ -41,8 +49,23 @@ async fn main() -> ExitCode {
         };
         return emit_browser(response).await;
     }
+    if arguments.as_slice() == [std::ffi::OsString::from("--governed-mcp-session")] {
+        let mut request = Vec::new();
+        let read = tokio::io::stdin()
+            .take(u64::try_from(MCP_SESSION_RUNNER_REQUEST_MAX_BYTES).unwrap_or(u64::MAX) + 1)
+            .read_to_end(&mut request)
+            .await;
+        let response = match read {
+            Ok(_) => execute_mcp_session_request(&request).await,
+            Err(_) => execute_mcp_session_request(b"").await,
+        };
+        return emit_mcp_session(response).await;
+    }
     if arguments.as_slice() == [std::ffi::OsString::from("--qualify-http-policy")] {
         return qualify_http_policy().await;
+    }
+    if arguments.as_slice() == [std::ffi::OsString::from("--qualify-mcp-session-policy")] {
+        return qualify_mcp_session_policy().await;
     }
     if arguments.len() == 3 && arguments[0] == "--qualify-browser-policy" {
         return qualify_browser_policy(PathBuf::from(&arguments[1]), PathBuf::from(&arguments[2]))
@@ -61,6 +84,22 @@ async fn main() -> ExitCode {
         Err(_) => execute_request(b"").await,
     };
     emit(response).await
+}
+
+async fn emit_mcp_session(response: McpSessionRunnerResponse) -> ExitCode {
+    let succeeded = response.outcome == McpSessionRunnerOutcome::Completed;
+    let output = serde_json::to_vec(&response).unwrap_or_else(|_| {
+        br#"{"protocol_version":1,"request_id":null,"action_id":null,"execution_id":null,"outcome":"denied","observation":null,"error_code":"response_serialization_failed","detail":"could not encode MCP session runner response","started_at":"1970-01-01T00:00:00Z","finished_at":"1970-01-01T00:00:00Z"}"#.to_vec()
+    });
+    let mut stdout = tokio::io::stdout();
+    if stdout.write_all(&output).await.is_err() || stdout.write_all(b"\n").await.is_err() {
+        return ExitCode::FAILURE;
+    }
+    if succeeded {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
 }
 
 async fn qualify_browser_policy(browser: PathBuf, profile_root: PathBuf) -> ExitCode {
@@ -169,6 +208,79 @@ async fn qualify_http_policy() -> ExitCode {
     let response = execute_http_request(&bytes).await;
     let qualified = response.outcome == HttpRunnerOutcome::Denied
         && response.error_code.as_deref() == Some("dns_scope_denied")
+        && response.observation.is_none();
+    let output = serde_json::to_vec(&response).unwrap_or_default();
+    let mut stdout = tokio::io::stdout();
+    if output.is_empty()
+        || stdout.write_all(&output).await.is_err()
+        || stdout.write_all(b"\n").await.is_err()
+    {
+        return ExitCode::FAILURE;
+    }
+    if qualified {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
+}
+
+async fn qualify_mcp_session_policy() -> ExitCode {
+    let Ok(current) = std::env::current_exe() else {
+        return ExitCode::FAILURE;
+    };
+    let now = Utc::now();
+    let connection = McpConnection {
+        contract_version: MCP_CONNECTION_CONTRACT_VERSION,
+        id: "package-policy-qualification".into(),
+        display_name: "Package policy qualification".into(),
+        transport: McpTransport::StreamableHttp {
+            url: "http://localhost:9/mcp".into(),
+        },
+        auth_mode: McpAuthMode::None,
+        protocol_mode: McpProtocolMode::Legacy,
+        enabled: true,
+    };
+    let operation = GovernedMcpSessionOperation {
+        connection: connection.clone(),
+        catalog: McpToolCatalog {
+            connection_id: connection.id.clone(),
+            protocol_version: LEGACY_MCP_PROTOCOL_VERSION.into(),
+            server_info: McpServerInfo {
+                name: "package-policy-qualification".into(),
+                version: Some("1.0.0".into()),
+            },
+            capabilities: serde_json::json!({"tools": {}}),
+            tools: vec![McpToolDescriptor {
+                name: "qualify".into(),
+                title: Some("Qualify".into()),
+                description: Some("Package policy qualification".into()),
+                input_schema: serde_json::json!({"type": "object"}),
+                output_schema: None,
+                annotations: serde_json::json!({"readOnlyHint": true}),
+            }],
+            discovered_at: now,
+            expires_at: now + chrono::Duration::minutes(5),
+        },
+        tool_name: "qualify".into(),
+        arguments: serde_json::json!({}),
+        stdio_executable_sha256: None,
+        timeout_ms: 5_000,
+        max_response_bytes: 64 * 1024,
+    };
+    let Ok(client) = McpSessionRunnerClient::with_operation(&current, &operation) else {
+        return ExitCode::FAILURE;
+    };
+    let Ok(mut request) =
+        mcp_session_qualification_request_with_evidence(&operation, client.capability_evidence())
+    else {
+        return ExitCode::FAILURE;
+    };
+    request.operation_hash.digest_hex = "0".repeat(64);
+    let Ok(response) = client.invoke(&request).await else {
+        return ExitCode::FAILURE;
+    };
+    let qualified = response.outcome == McpSessionRunnerOutcome::Denied
+        && response.error_code.as_deref() == Some("tool_authority_mismatch")
         && response.observation.is_none();
     let output = serde_json::to_vec(&response).unwrap_or_default();
     let mut stdout = tokio::io::stdout();

@@ -402,6 +402,17 @@ try {
         throw "Packaged HTTP runner policy qualification report is incomplete."
     }
     [IO.File]::WriteAllText((Join-Path $uatRoot "http-runner-policy.json"), $httpPolicyJson, [Text.UTF8Encoding]::new($false))
+    $mcpSessionPolicyJson = (& $processRunner --qualify-mcp-session-policy) -join "`n"
+    if ($LASTEXITCODE -ne 0) {
+        throw "Packaged MCP session runner policy qualification failed with exit code $LASTEXITCODE."
+    }
+    $mcpSessionPolicy = $mcpSessionPolicyJson | ConvertFrom-Json
+    if ($mcpSessionPolicy.outcome -ne "denied" -or
+        $mcpSessionPolicy.error_code -ne "tool_authority_mismatch" -or
+        $null -ne $mcpSessionPolicy.observation) {
+        throw "Packaged MCP session runner policy qualification report is incomplete."
+    }
+    [IO.File]::WriteAllText((Join-Path $uatRoot "mcp-session-runner-policy.json"), $mcpSessionPolicyJson, [Text.UTF8Encoding]::new($false))
 
     $runtimeWorker = Join-Path $installRoot "mcg-runtime-worker.exe"
     $runtimeQualificationJson = (& $runtimeWorker --qualify-runtime-worker) -join "`n"
@@ -844,6 +855,7 @@ try {
         ActionRunnerQualified = $true
         ProcessRunnerQualified = $true
         HttpPolicyQualified = $true
+        McpSessionPolicyQualified = $true
         AppExecutableRemoved = $true
     }
 } finally {

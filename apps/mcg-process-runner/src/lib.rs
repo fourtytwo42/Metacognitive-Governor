@@ -33,7 +33,9 @@ use tokio::{
 use uuid::Uuid;
 
 mod http;
+mod mcp_session;
 pub use http::*;
+pub use mcp_session::*;
 mod browser;
 pub use browser::*;
 

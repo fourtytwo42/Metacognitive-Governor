@@ -169,6 +169,7 @@ const [windowsBuilder, linuxBuilder, macosBuilder, macosDmgBuilder, updaterSigni
   Promise.all([
     read("apps/mcg-process-runner/src/lib.rs"),
     read("apps/mcg-process-runner/src/browser.rs"),
+    read("apps/mcg-process-runner/src/mcp_session.rs"),
     read("apps/mcg-process-runner/src/main.rs")
   ]).then((parts) => parts.join("\n")),
   read("apps/mcg-provider-runner/src/lib.rs"),
@@ -187,6 +188,9 @@ const [windowsBuilder, linuxBuilder, macosBuilder, macosDmgBuilder, updaterSigni
 ]);
 for (const invariant of ["--governed-browser", "--qualify-browser-policy", "BrowserRunnerClient", "GOVERNED_BROWSER_OPERATION_TYPE", "profile_cleanup_failed", "validate_governed_browser_observation"]) {
   requireText(processRunner, invariant, "governed browser runner package contract");
+}
+for (const invariant of ["--governed-mcp-session", "--qualify-mcp-session-policy", "McpSessionRunnerClient", "GOVERNED_MCP_SESSION_OPERATION_TYPE", "call_tool_against_catalog", "validate_governed_mcp_session_observation"]) {
+  requireText(processRunner, invariant, "governed MCP session runner package contract");
 }
 const installedOrganizationSharing = await read("scripts/test-installed-organization-sharing.mjs");
 for (const [harness, verifier, label] of [
@@ -364,7 +368,7 @@ const installerUat = await read("scripts/test-windows-installer.ps1");
 for (const invariant of ["tauri.conf.json", "productName", "version", '${productName}_${version}_x64-setup.exe']) {
   requireText(installerUat, invariant, "Windows installer UAT artifact discovery");
 }
-for (const invariant of ["InstallerPath", "PythonPath", "NodeBinPath", "npm.cmd", "MCG_CODEX_APP_SERVER_EXECUTABLE", "codex-cli 0.150.1", "MCG_BIND_ADDRESS", "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", "--force-renderer-accessibility", "mcg-action-runner.exe", "--qualify-filesystem-root", "mcg-process-runner.exe", "--qualify-process-root", "--qualify-http-policy", "ProcessRunnerQualified", "HttpPolicyQualified", "mcg-runtime-worker.exe", "--qualify-runtime-worker", "MetaCog.RuntimeWorkerExecutable", "mcg-plugin-runner.exe", "mcg-shadow-runner.exe", "mcg-updater.exe", "Wasmtime-Apache-2.0-WITH-LLVM-exception.txt", "module_digest_mismatch", "PluginRunnerQualified", "ActionRunnerQualified", "installer-uat-retained.txt", "Repair installation removed external MCG data", "Uninstall removed external MCG data", "doctor --json", "backup create --json", "server/discover", "tools/list", "test-installed-experiments.py", "experiments-restart.json", "test-installed-provider-success.py", "provider-success-restart.json", "test-installed-memory-transfer.py", "memory-transfer-restart.json", "test-installed-interface-success.py", "interface-success-restart.json", "test-installed-reviewed-topology.py", "ReviewedTopologyRestartReport", "test-installed-native-reviewed-topology.py", "NativeReviewedTopologyReport", "NativeReviewedTopologyScreenshot", "test-installed-real-project.py", "RealProjectRestartReport", "test-installed-real-api-project.py", "RealApiProjectRestartReport", "test-installed-real-fullstack-project.py", "RealFullstackProjectRestartReport", "Save-DesktopScreenshot", "Get-NetTCPConnection", "ReinstallPreservedData", "Refusing installer cleanup outside the exact UAT root"]) {
+for (const invariant of ["InstallerPath", "PythonPath", "NodeBinPath", "npm.cmd", "MCG_CODEX_APP_SERVER_EXECUTABLE", "codex-cli 0.150.1", "MCG_BIND_ADDRESS", "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", "--force-renderer-accessibility", "mcg-action-runner.exe", "--qualify-filesystem-root", "mcg-process-runner.exe", "--qualify-process-root", "--qualify-http-policy", "--qualify-mcp-session-policy", "ProcessRunnerQualified", "HttpPolicyQualified", "McpSessionPolicyQualified", "mcg-runtime-worker.exe", "--qualify-runtime-worker", "MetaCog.RuntimeWorkerExecutable", "mcg-plugin-runner.exe", "mcg-shadow-runner.exe", "mcg-updater.exe", "Wasmtime-Apache-2.0-WITH-LLVM-exception.txt", "module_digest_mismatch", "PluginRunnerQualified", "ActionRunnerQualified", "installer-uat-retained.txt", "Repair installation removed external MCG data", "Uninstall removed external MCG data", "doctor --json", "backup create --json", "server/discover", "tools/list", "test-installed-experiments.py", "experiments-restart.json", "test-installed-provider-success.py", "provider-success-restart.json", "test-installed-memory-transfer.py", "memory-transfer-restart.json", "test-installed-interface-success.py", "interface-success-restart.json", "test-installed-reviewed-topology.py", "ReviewedTopologyRestartReport", "test-installed-native-reviewed-topology.py", "NativeReviewedTopologyReport", "NativeReviewedTopologyScreenshot", "test-installed-real-project.py", "RealProjectRestartReport", "test-installed-real-api-project.py", "RealApiProjectRestartReport", "test-installed-real-fullstack-project.py", "RealFullstackProjectRestartReport", "Save-DesktopScreenshot", "Get-NetTCPConnection", "ReinstallPreservedData", "Refusing installer cleanup outside the exact UAT root"]) {
   requireText(installerUat, invariant, "Windows installer UAT");
 }
 requireText(installerUat, "mcg-provider-runner.exe", "Windows provider runner package UAT");
@@ -378,7 +382,7 @@ for (const invariant of ["MCG_BIND_ADDRESS", "mcg-action-runner", "--qualify-fil
 }
 requireText(linuxPackageUat, "mcg-provider-runner", "Linux provider runner package UAT");
 requireText(linuxPackageUat, "--qualify-provider-runner", "Linux provider runner qualification");
-for (const invariant of ["mcg-process-runner", "--qualify-process-root", "--qualify-http-policy", "PROCESS_RUNNERS_QUALIFIED", "HTTP_POLICY_QUALIFIED"]) requireText(linuxPackageUat, invariant, "Linux process runner package UAT");
+for (const invariant of ["mcg-process-runner", "--qualify-process-root", "--qualify-http-policy", "--qualify-mcp-session-policy", "PROCESS_RUNNERS_QUALIFIED", "HTTP_POLICY_QUALIFIED", "MCP_SESSION_POLICY_QUALIFIED"]) requireText(linuxPackageUat, invariant, "Linux process runner package UAT");
 const macosPackageUat = await read("scripts/test-macos-packages.sh");
 for (const invariant of ["tauri.conf.json", "version", 'MetaCog_${version}_${bundle_arch}.dmg']) {
   requireText(macosPackageUat, invariant, "macOS package UAT artifact discovery");
@@ -392,7 +396,7 @@ for (const invariant of ["MCG_BIND_ADDRESS", "mcg-action-runner", "--qualify-fil
 }
 requireText(macosPackageUat, "mcg-provider-runner", "macOS provider runner package UAT");
 requireText(macosPackageUat, "--qualify-provider-runner", "macOS provider runner qualification");
-for (const invariant of ["mcg-process-runner", "--qualify-process-root", "--qualify-http-policy", "PROCESS_RUNNERS_QUALIFIED", "HTTP_POLICY_QUALIFIED"]) requireText(macosPackageUat, invariant, "macOS process runner package UAT");
+for (const invariant of ["mcg-process-runner", "--qualify-process-root", "--qualify-http-policy", "--qualify-mcp-session-policy", "PROCESS_RUNNERS_QUALIFIED", "HTTP_POLICY_QUALIFIED", "MCP_SESSION_POLICY_QUALIFIED"]) requireText(macosPackageUat, invariant, "macOS process runner package UAT");
 const releaseSourceCheck = await read("scripts/check-release-source.mjs");
 requireText(releaseSourceCheck, "--untracked-files=all", "release source preflight");
 const unattendedSoakLauncher = await read("scripts/run-release-soak-unattended.mjs");

@@ -522,6 +522,18 @@ assert report["outcome"] == "denied"
 assert report["error_code"] == "dns_scope_denied"
 assert report["observation"] is None
 PY
+  local mcp_session_report="$uat_root/$label-mcp-session-runner-policy.json"
+  runuser -u "$uat_user" -- "$executable" --qualify-mcp-session-policy >"$mcp_session_report"
+  python3 - "$mcp_session_report" <<'PY'
+import json
+import pathlib
+import sys
+
+report = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+assert report["outcome"] == "denied"
+assert report["error_code"] == "tool_authority_mismatch"
+assert report["observation"] is None
+PY
 }
 
 test_runtime_worker() {
@@ -1045,5 +1057,6 @@ PLUGIN_RUNNERS_QUALIFIED=true
 ACTION_RUNNERS_QUALIFIED=true
 PROCESS_RUNNERS_QUALIFIED=true
 HTTP_POLICY_QUALIFIED=true
+MCP_SESSION_POLICY_QUALIFIED=true
 ENCRYPTED_BACKUP_RESTORE_REPORT=$uat_root/encrypted-restore.json
 EOF
