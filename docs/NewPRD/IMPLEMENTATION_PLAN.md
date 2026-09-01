@@ -1,6 +1,6 @@
 # MetaCog Cognitive Runtime Implementation Plan
 
-**Status:** Active staged delivery plan; Stages 0–4 have implementation checkpoints, Stage 5 is implemented through reconstructable real-process Work/Verify, governed agent inspection, and the compatibility-agent model bridge, and Stage 6 now includes exact Runtime/lease-bound model-egress permits, deterministic Root dispatch/result fencing, a verified isolated credential-resolving OpenAI-compatible provider runner, fresh/resumed production compatibility-agent routing, bounded distinct-authority retry, governed buffered and true-streaming cancellation, least-authority ChatGPT OAuth execution, stable Tool/Skill/Capability/Sandbox contracts, schema-61 immutable manifest/proposal/permit/opaque-handle authority with deterministic Root issuance and active replay, content-minimized observed provider/model fingerprints with progressive inspection, and independent certificate closure
+**Status:** Active staged delivery plan; Stages 0–4 have implementation checkpoints, Stage 5 is implemented through reconstructable real-process Work/Verify, governed agent inspection, and the compatibility-agent model bridge, and Stage 6 now includes exact Runtime/lease-bound model-egress permits, deterministic Root dispatch/result fencing, a verified isolated credential-resolving OpenAI-compatible provider runner, fresh/resumed production compatibility-agent routing, bounded distinct-authority retry, governed buffered and true-streaming cancellation, least-authority ChatGPT OAuth execution, stable Tool/Skill/Capability/Sandbox contracts, schema-61 immutable manifest/proposal/permit/opaque-handle authority with deterministic Root issuance and active replay, the first permit-consuming filesystem executor, content-minimized observed provider/model fingerprints with progressive inspection, and independent certificate closure
 **Scope:** Alignment with the Adaptive Cognitive Agent Runtime PRD v1.4.2, Cognitive Runtime Implementation Contract v0.1, and Cognitive Runtime Experimental Protocol Specification v0.2
 **Product:** MetaCog desktop and `mcg` CLI on Windows, macOS, and Linux
 
@@ -309,7 +309,7 @@ Route existing MetaCog capabilities through Root-bound permits without losing cu
 
 - Implement model-egress proposals and Root-bound permits for exact disclosed context, provider, model, cost/budget, and destination.
 - Resolve secrets only inside authorized gateway adapters using opaque secret handles.
-- Move Codex app-server, OpenAI-compatible, local Ollama/LM Studio, remote transport, MCP, plugins, hooks, browser/computer tools, and process tools behind governed gateway contracts.
+- Retain the completed permit-consuming filesystem executor and move Codex app-server, local Ollama/LM Studio, remote transport, MCP, plugins, hooks, browser/computer tools, and process tools behind governed gateway contracts.
 - Preserve exact hook trust and invocation-only trust-bypass semantics.
 - Define `ToolManifest`, `SkillManifest`, `CapabilityProfile`, and sandbox requirements.
 - Retain deterministic fake providers and recorded responses for regression testing.
