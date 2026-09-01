@@ -2,6 +2,15 @@
 
 Durable project context lives here. Update this file whenever information should survive chat context compression or future agent handoff.
 
+### 2026-09-01 - Governed completions retain content-minimized observed model identity
+
+- Context: Stage 6 persisted the authorized provider/model and response artifact, but did not retain an honest post-response provider/model revision fingerprint on the immutable completed run or expose it progressively in product inspection.
+- Decision: Add an optional backward-compatible observed fingerprint to completed `ModelRun` revisions rather than rewriting the pre-dispatch `InvocationManifest`. Protected Root hashes the exact authorized provider/model/request/policy, returned model, and a fixed allow-list of reported revision metadata; plaintext revisions, response content/IDs, and unknown metadata are excluded. Non-completed and uncertain runs cannot acquire a fingerprint.
+- Files: `mcg-contracts`, storage invocation continuity/reconstruction, Runtime governed completion, Protected Root buffered/streaming completion, CLI invocation inspection, Desktop Simple/Advanced/Developer projection, Playwright, tracked Stage 6/status/traceability/plan documents, and `MEMORY.md`. The other agent's untracked `docs/NewPRD/STAGE_3_DURABLE_WORKFLOW.md` remains untouched.
+- Commands/tests: Product checkpoint `4a1fc95`; Contracts 21/21; Storage 118/118; Protected Root 20/20 plus real-child action recovery; Runtime 111 active with two explicit Windows Sandbox qualifications ignored; CLI 70 unit plus 10 integration; Desktop Rust 20/20; Vitest 126/126; Playwright 32/32; production frontend build; whole-workspace all-target check; strict contracts Clippy; Root strict no-deps clean after allowing only its two recorded pre-existing oversized functions; docs/packaging/format/diff gates.
+- Result: Successful buffered and streaming calls now retain deterministic, content-minimized observed provider/model identity through Root reopen. CLI prints it, Advanced abbreviates it, Developer exposes exact canonical evidence, and Simple remains unchanged. The product checkpoint is pushed with exact local/remote parity.
+- Follow-up: Implement governed OAuth, complete provider cost/latency/error evidence, remaining provider/tool/capability gateways, external-provider smoke and redaction/fault injection, then qualify packaged/native Windows/Linux/macOS execution through CompletionCertificate.
+
 ### 2026-09-01 - Governed provider streaming commits only validated completion
 
 - Context: The production compatibility-agent route had Root-governed buffered provider execution and cancellation, but streaming still bypassed the protected dispatcher or was refused. The isolated runner protocol also had no incremental transport whose identity, bounds, terminal result, and cancellation behavior Root could verify.
