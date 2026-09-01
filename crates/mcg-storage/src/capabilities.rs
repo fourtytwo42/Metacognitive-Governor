@@ -1,13 +1,15 @@
 use chrono::{DateTime, Utc};
 use mcg_contracts::{
-    CapabilityProfile, ContentHash, MAX_TOOL_CAPABILITY_SUMMARIES, PermitId, PolicyBinding,
-    SecretHandleId, SkillManifest, SkillManifestId, SourceRef, StableTypeId,
-    TOOL_INVOCATION_PERMIT_HASH_DOMAIN, TOOL_POLICY_HASH_DOMAIN, ToolAuthorizationInspection,
-    ToolAuthorizationState, ToolAuthorizationSummary, ToolCapabilityScopePreview,
-    ToolInvocationPermit, ToolInvocationProposal, ToolManifest, ToolManifestId, ToolPolicy,
-    VersionedPayload, VersionedRef, WorkflowState, capability_profile_hash,
-    decode_canonical_cbor_v1, skill_manifest_hash, tool_capability_set_hash,
-    tool_invocation_permit_hash, tool_invocation_proposal_hash, tool_manifest_hash,
+    ActionExecutionState, CapabilityProfile, ContentHash, EffectClass,
+    MAX_TOOL_CAPABILITY_SUMMARIES, PermitId, PolicyBinding, ReconciliationJobId,
+    ReconciliationJobState, SecretHandleId, SkillManifest, SkillManifestId, SourceRef,
+    StableTypeId, TOOL_INVOCATION_PERMIT_HASH_DOMAIN, TOOL_POLICY_HASH_DOMAIN,
+    ToolAuthorizationInspection, ToolAuthorizationState, ToolAuthorizationSummary,
+    ToolCapabilityScopePreview, ToolInvocationPermit, ToolInvocationProposal, ToolManifest,
+    ToolManifestId, ToolPolicy, VersionedPayload, VersionedRef, WaitReason, WorkflowState,
+    capability_profile_hash, decode_canonical_cbor_v1, skill_manifest_hash,
+    tool_capability_set_hash, tool_invocation_permit_hash, tool_invocation_proposal_hash,
+    tool_manifest_hash,
 };
 use rusqlite::{OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
@@ -16,6 +18,7 @@ use uuid::Uuid;
 use crate::{SqliteEventStore, StorageError};
 
 const TOOL_PERMIT_SOURCE_TYPE: &str = "mcg.tool_invocation_permit.v1";
+const RECONCILIATION_PROBE_BINDING_TYPE: &str = "mcg.reconciliation_probe_binding.v1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolSecretHandleBinding {
@@ -498,6 +501,75 @@ impl SqliteEventStore {
         Ok(receipt)
     }
 
+    /// Persists one observational Tool permit for an exact running reconciliation probe.
+    ///
+    /// Unlike ordinary capability authority, this narrow path is valid only while the owning
+    /// workflow is fenced in `Waiting(Reconciliation)`. It binds an already-authorized
+    /// observational probe to the exact running job and cannot authorize the original effect.
+    ///
+    /// # Errors
+    /// Returns a storage error for malformed, substituted, expired, non-observational, or stale
+    /// reconciliation evidence.
+    pub fn authorize_tool_reconciliation_capability(
+        &mut self,
+        proposal: &ToolInvocationProposal,
+        policy: &ToolPolicy,
+        permit: &ToolInvocationPermit,
+        job_id: ReconciliationJobId,
+        authorized_at: DateTime<Utc>,
+    ) -> Result<ToolCapabilityAuthorizationReceipt, StorageError> {
+        proposal.validate().map_err(contract_error)?;
+        policy.validate().map_err(contract_error)?;
+        permit.validate().map_err(contract_error)?;
+        let proposal_hash = tool_invocation_proposal_hash(proposal).map_err(contract_error)?;
+        let permit_hash = tool_invocation_permit_hash(permit).map_err(contract_error)?;
+        let policy_binding = tool_policy_binding(policy)?;
+        let bindings = tool_secret_bindings(proposal, permit)?;
+        validate_tool_proposal_permit(
+            proposal,
+            policy,
+            permit,
+            &proposal_hash,
+            &policy_binding,
+            authorized_at,
+        )?;
+
+        if let Some(existing) = self.tool_capability_authorization(proposal.action_id)? {
+            if existing.proposal != *proposal
+                || existing.proposal_hash != proposal_hash
+                || existing.permit != *permit
+                || existing.permit_hash != permit_hash
+                || existing.secret_handles != bindings
+            {
+                return Err(StorageError::Conflict(
+                    "reconciliation Tool authority was replayed with substituted evidence".into(),
+                ));
+            }
+            validate_tool_reconciliation_authority(self, proposal, job_id, authorized_at)?;
+            if authorized_at < existing.permit.issued_at
+                || authorized_at >= existing.permit.expires_at
+            {
+                return Err(StorageError::Conflict(
+                    "reconciliation Tool authority replay is outside its active time window".into(),
+                ));
+            }
+            return Ok(existing);
+        }
+
+        validate_tool_immutable_evidence(self, proposal, permit)?;
+        validate_tool_reconciliation_authority(self, proposal, job_id, authorized_at)?;
+        let receipt = ToolCapabilityAuthorizationReceipt {
+            proposal: proposal.clone(),
+            proposal_hash,
+            permit: permit.clone(),
+            permit_hash: permit_hash.clone(),
+            permit_ref: tool_permit_source_ref(permit, &permit_hash)?,
+            secret_handles: bindings,
+        };
+        persist_tool_authorization(&mut self.connection, &receipt, authorized_at)?;
+        Ok(receipt)
+    }
+
     /// Loads and canonically revalidates one complete Tool authorization by action identity.
     ///
     /// # Errors
@@ -961,15 +1033,94 @@ fn validate_tool_active_authority(
     let attempt = store
         .workflow_attempt(proposal.attempt_id)?
         .ok_or(StorageError::WorkflowAttemptNotFound(proposal.attempt_id))?;
+    let ordinary_active = attempt.revision == proposal.attempt_revision
+        && attempt.lease_generation == proposal.lease_generation
+        && attempt.lease_owner == Some(proposal.runtime_actor)
+        && attempt.task_contract == proposal.task_contract
+        && attempt.state == WorkflowState::Running
+        && attempt.lease_expires_at.is_some_and(|expiry| expiry > now);
+    if ordinary_active {
+        return Ok(());
+    }
+    let action = store.action_envelope(proposal.action_id)?.ok_or_else(|| {
+        StorageError::InvalidData("Tool action envelope is missing during active validation".into())
+    })?;
+    let reconciliation_job_id = action
+        .preconditions
+        .as_slice()
+        .first()
+        .filter(|_| action.preconditions.len() == 1)
+        .filter(|binding| binding.type_id.as_str() == RECONCILIATION_PROBE_BINDING_TYPE)
+        .and_then(|binding| decode_canonical_cbor_v1(&binding.bytes).ok())
+        .and_then(|value| value.get("job_id").cloned())
+        .and_then(|value| serde_json::from_value::<ReconciliationJobId>(value).ok());
+    if let Some(job_id) = reconciliation_job_id {
+        return validate_tool_reconciliation_authority(store, proposal, job_id, now);
+    }
+    Err(StorageError::Conflict(
+        "Tool authorization does not belong to active workflow or reconciliation authority".into(),
+    ))
+}
+
+fn validate_tool_reconciliation_authority(
+    store: &SqliteEventStore,
+    proposal: &ToolInvocationProposal,
+    job_id: ReconciliationJobId,
+    now: DateTime<Utc>,
+) -> Result<(), StorageError> {
+    let attempt = store
+        .workflow_attempt(proposal.attempt_id)?
+        .ok_or(StorageError::WorkflowAttemptNotFound(proposal.attempt_id))?;
+    let job = store
+        .reconciliation_job(job_id)?
+        .ok_or_else(|| StorageError::Conflict("reconciliation Tool job was not found".into()))?;
+    let target = store.action_execution(job.execution_id)?.ok_or_else(|| {
+        StorageError::InvalidData("reconciliation Tool target execution disappeared".into())
+    })?;
+    let target_envelope = store.action_envelope(job.action_id)?.ok_or_else(|| {
+        StorageError::InvalidData("reconciliation Tool target intent disappeared".into())
+    })?;
+    let probe = store.action_envelope(proposal.action_id)?.ok_or_else(|| {
+        StorageError::InvalidData("reconciliation Tool probe intent disappeared".into())
+    })?;
+    let probe_execution = store
+        .action_execution_for_action(proposal.action_id)?
+        .ok_or_else(|| {
+            StorageError::InvalidData("reconciliation Tool probe execution disappeared".into())
+        })?;
     if attempt.revision != proposal.attempt_revision
         || attempt.lease_generation != proposal.lease_generation
-        || attempt.lease_owner != Some(proposal.runtime_actor)
         || attempt.task_contract != proposal.task_contract
-        || attempt.state != WorkflowState::Running
-        || attempt.lease_expires_at.is_none_or(|expiry| expiry <= now)
+        || attempt.state != WorkflowState::Waiting(WaitReason::Reconciliation)
+        || attempt.lease_owner.is_some()
+        || attempt.lease_expires_at.is_some()
+        || job.state != ReconciliationJobState::Running
+        || job.lease_owner != Some(proposal.runtime_actor)
+        || job.lease_expires_at.is_none_or(|expiry| expiry <= now)
+        || proposal.deadline > job.deadline
+        || proposal.deadline
+            > job.lease_expires_at.ok_or_else(|| {
+                StorageError::Conflict("reconciliation Tool job has no lease".into())
+            })?
+        || target.state != ActionExecutionState::Reconciling
+        || target.executor != Some(proposal.runtime_actor)
+        || target.action_id != target_envelope.id
+        || target_envelope.workflow_id != attempt.workflow_id
+        || target_envelope.attempt_id != attempt.attempt_id
+        || probe.workflow_id != attempt.workflow_id
+        || probe.attempt_id != attempt.attempt_id
+        || probe.actor != proposal.runtime_actor
+        || probe.effect_class != EffectClass::Observational
+        || probe.operation != job.adapter
+        || probe.compensation.is_some()
+        || probe.compensates_action.is_some()
+        || probe.reconciler.is_some()
+        || probe.reconciliation_deadline.is_some()
+        || probe_execution.state != ActionExecutionState::Authorized
+        || probe_execution.executor.is_some()
     {
         return Err(StorageError::Conflict(
-            "Tool authorization does not belong to the active workflow authority".into(),
+            "Tool reconciliation authority does not bind the exact observational probe".into(),
         ));
     }
     Ok(())

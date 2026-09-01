@@ -3817,6 +3817,37 @@ impl AppRuntime {
         )?)
     }
 
+    /// Persists one observational-only action for an exact running reconciliation job while the
+    /// workflow remains fenced from ordinary execution.
+    ///
+    /// # Errors
+    /// Returns a runtime error for stale or substituted reconciliation authority.
+    #[allow(clippy::too_many_arguments)]
+    pub fn authorize_canonical_reconciliation_probe(
+        &self,
+        envelope: &ActionEnvelope,
+        execution: &ActionExecution,
+        job_id: ReconciliationJobId,
+        expected_job_revision: u64,
+        expected_job_generation: u64,
+        expected_target_revision: u64,
+        expected_target_generation: u64,
+        correlation_id: CorrelationId,
+        now: DateTime<Utc>,
+    ) -> Result<ActionAuthorizationReceipt, RuntimeError> {
+        Ok(self.store()?.authorize_reconciliation_probe_action(
+            envelope,
+            execution,
+            job_id,
+            expected_job_revision,
+            expected_job_generation,
+            expected_target_revision,
+            expected_target_generation,
+            correlation_id,
+            now,
+        )?)
+    }
+
     /// Loads immutable intent and mutable execution for one canonical action attempt.
     ///
     /// # Errors
@@ -3855,6 +3886,30 @@ impl AppRuntime {
             expected_revision,
             expected_generation,
             executor,
+            correlation_id,
+            idempotency_key,
+            now,
+        )?)
+    }
+
+    /// Settles an undispatched observational action as proven no-effect.
+    ///
+    /// # Errors
+    /// Returns a runtime error for stale, effectful, or already-dispatched intent.
+    #[allow(clippy::too_many_arguments)]
+    pub fn abandon_authorized_observational_action(
+        &self,
+        execution_id: ActionExecutionId,
+        expected_revision: u64,
+        expected_generation: u64,
+        correlation_id: CorrelationId,
+        idempotency_key: &str,
+        now: DateTime<Utc>,
+    ) -> Result<ActionExecution, RuntimeError> {
+        Ok(self.store()?.abandon_authorized_observational_action(
+            execution_id,
+            expected_revision,
+            expected_generation,
             correlation_id,
             idempotency_key,
             now,
@@ -4170,6 +4225,21 @@ impl AppRuntime {
         )?)
     }
 
+    /// Root-only settlement of a terminal plugin authority workflow after effect reconciliation.
+    ///
+    /// # Errors
+    /// Returns a runtime error for contradictory plugin state, unresolved/damaged action evidence,
+    /// or unreadable durable state.
+    pub fn root_settle_reconciled_plugin_invocation_workflow(
+        &self,
+        invocation_id: PluginInvocationId,
+        settled_at: DateTime<Utc>,
+    ) -> Result<Option<WorkflowAttempt>, RuntimeError> {
+        Ok(self
+            .store()?
+            .settle_reconciled_plugin_invocation_workflow(invocation_id, settled_at)?)
+    }
+
     /// Root-only load of exact completed compatibility Work evidence awaiting Verify.
     ///
     /// # Errors
@@ -4374,6 +4444,23 @@ impl AppRuntime {
         Ok(self
             .store()?
             .authorize_tool_capability(proposal, policy, permit, now)?)
+    }
+
+    /// Persists an observational Tool permit for one exact running reconciliation probe.
+    ///
+    /// # Errors
+    /// Returns a runtime error for stale, effectful, substituted, or expired authority.
+    pub fn authorize_tool_reconciliation_capability(
+        &self,
+        proposal: &ToolInvocationProposal,
+        policy: &ToolPolicy,
+        permit: &ToolInvocationPermit,
+        job_id: ReconciliationJobId,
+        now: DateTime<Utc>,
+    ) -> Result<ToolCapabilityAuthorizationReceipt, RuntimeError> {
+        Ok(self
+            .store()?
+            .authorize_tool_reconciliation_capability(proposal, policy, permit, job_id, now)?)
     }
 
     /// Loads a Tool authorization only while its exact workflow generation and permit remain

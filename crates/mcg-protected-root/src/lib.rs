@@ -24,11 +24,12 @@ use chrono::{Duration, Utc};
 use futures_core::Stream;
 use futures_util::StreamExt as _;
 use mcg_action_runner::{
-    ActionRunnerAuthorization, ActionRunnerCapabilityEvidence, ActionRunnerClient,
-    ActionRunnerClientError, ActionRunnerProtocolError, ActionRunnerRequest, ActionRunnerResponse,
-    GOVERNED_ACTION_OPERATION_HASH_DOMAIN, GOVERNED_FILESYSTEM_AUTHORITY_HASH_DOMAIN,
-    GOVERNED_FILESYSTEM_OPERATION_TYPE, GovernedFilesystemAuthority, GovernedFilesystemObservation,
-    GovernedFilesystemOperation, RunnerEffectOutcome, decode_governed_filesystem_authority,
+    ACTION_RUNNER_CONTENT_MAX_BYTES, ActionRunnerAuthorization, ActionRunnerCapabilityEvidence,
+    ActionRunnerClient, ActionRunnerClientError, ActionRunnerProtocolError, ActionRunnerRequest,
+    ActionRunnerResponse, GOVERNED_ACTION_OPERATION_HASH_DOMAIN,
+    GOVERNED_FILESYSTEM_AUTHORITY_HASH_DOMAIN, GOVERNED_FILESYSTEM_OPERATION_TYPE,
+    GovernedFilesystemAuthority, GovernedFilesystemObservation, GovernedFilesystemOperation,
+    RunnerEffectOutcome, decode_governed_filesystem_authority,
     decode_governed_filesystem_observation, decode_governed_filesystem_operation,
     governed_filesystem_authority_binding, governed_filesystem_tool_manifest,
     governed_filesystem_tool_policy, request_from_authorized_action,
@@ -38,11 +39,11 @@ use mcg_agents::{EvaluationOutcome, EvaluationReport};
 use mcg_config::AppConfig;
 use mcg_contracts::{
     ActionCompensationReceipt, ActionEnvelope, ActionExecution, ActionExecutionId,
-    ActionExecutionState, ActionId, ActionOrigin, ActionReceipt, ActionReceiptId, ArtifactRef,
-    AuthenticatedRpcRequest, CompletionCertificate, CompletionCertificateId, CompletionVerdict,
-    ContentHash, ContextManifest, ContextManifestId, ContextSelection, ContractError,
-    CorrelationId, DeterministicCriterionEvidence, DeterministicVerifyInput, EffectClass,
-    EffectOutcome, FilesystemAccess, HashAlgorithm, InvocationId, InvocationManifest,
+    ActionExecutionState, ActionId, ActionOrigin, ActionReceipt, ActionReceiptId, ActionValidation,
+    ArtifactRef, AuthenticatedRpcRequest, CompletionCertificate, CompletionCertificateId,
+    CompletionVerdict, ContentHash, ContextManifest, ContextManifestId, ContextSelection,
+    ContractError, CorrelationId, DeterministicCriterionEvidence, DeterministicVerifyInput,
+    EffectClass, EffectOutcome, FilesystemAccess, HashAlgorithm, InvocationId, InvocationManifest,
     InvocationRole, ModelBudget, ModelDataClassification, ModelDestinationClass,
     ModelDisclosureManifest, ModelEgressPolicy, ModelEgressRoute, ModelInvocationPermit,
     ModelInvocationProposal, ModelRunCostProvenance, ModelRunErrorClass, ModelRunId, ModelUsage,
@@ -103,13 +104,13 @@ use mcg_runtime::{
 use mcg_storage::{
     AgentTurnVerificationTarget, AgentTurnWorkflowAttachment, ConsumerEvaluationCompletion,
     ModelEgressAuthorizationReceipt, ModelSecretHandleBinding, ModelSecretSlot,
-    ReconciliationResolutionReceipt, RootMigrationReceipt, STORAGE_SCHEMA_VERSION, StorageError,
-    ToolCapabilityAuthorizationReceipt, acquire_data_directory_lock,
-    create_backup_bundle_from_snapshot, evaluation_report_source_ref, inspect_database_before_root,
-    model_descriptor_source_ref, model_destination_source_ref, model_disclosure_hash,
-    model_egress_policy_binding, model_egress_route_payload, model_proposal_hash,
-    model_provider_source_ref, model_secret_slots_for_auth, snapshot_database_before_root,
-    tool_policy_binding,
+    ReconciliationClaimReceipt, ReconciliationResolutionReceipt, RootMigrationReceipt,
+    STORAGE_SCHEMA_VERSION, StorageError, ToolCapabilityAuthorizationReceipt,
+    acquire_data_directory_lock, create_backup_bundle_from_snapshot, evaluation_report_source_ref,
+    inspect_database_before_root, model_descriptor_source_ref, model_destination_source_ref,
+    model_disclosure_hash, model_egress_policy_binding, model_egress_route_payload,
+    model_proposal_hash, model_provider_source_ref, model_secret_slots_for_auth,
+    snapshot_database_before_root, tool_policy_binding,
 };
 use mcg_tools::{
     TOOL_SCHEMA_VERSION, ToolError, ToolOutcome, ToolOutcomeStatus, VerificationEvidence,
@@ -604,6 +605,39 @@ pub fn authorize_and_persist_runtime_tool_capability(
         now,
     )?;
     Ok(runtime.authorize_tool_capability(proposal, policy, &permit, now)?)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn authorize_and_persist_reconciliation_tool_capability(
+    runtime: &AppRuntime,
+    proposal: &ToolInvocationProposal,
+    expected_runtime_identity: &RuntimeIdentity,
+    manifest: &ToolManifest,
+    policy: &ToolPolicy,
+    available_sandbox: SandboxCapabilityProfile,
+    platform: mcg_contracts::ExecutionPlatform,
+    job_id: ReconciliationJobId,
+    now: chrono::DateTime<Utc>,
+) -> Result<RuntimeToolCapabilityAuthorizationReceipt, ProtectedRootError> {
+    let registered = runtime
+        .tool_manifest(manifest.id, manifest.version)?
+        .ok_or_else(|| StorageError::InvalidData("Tool manifest is not registered".into()))?;
+    if registered != *manifest {
+        return Err(StorageError::Conflict(
+            "reconciliation Tool manifest differs from durable evidence".into(),
+        )
+        .into());
+    }
+    let permit = authorize_runtime_tool_capability(
+        proposal,
+        expected_runtime_identity,
+        manifest,
+        policy,
+        available_sandbox,
+        platform,
+        now,
+    )?;
+    Ok(runtime.authorize_tool_reconciliation_capability(proposal, policy, &permit, job_id, now)?)
 }
 
 /// Canonically binds the exact provider request bytes authorized by Root.
@@ -1335,6 +1369,27 @@ async fn execute_protected_plugin_capability(
         }
     }
 
+    let filesystem_write = match request.operation.clone() {
+        PluginCapabilityOperation::FilesystemWrite {
+            path,
+            content,
+            create_new,
+        } => Some((path, content, create_new)),
+        _ => None,
+    };
+    if let Some((path, content, create_new)) = filesystem_write {
+        require_create_only_plugin_write(create_new)?;
+        return execute_plugin_filesystem_create(
+            dispatcher,
+            runtime.as_ref(),
+            &authority,
+            request,
+            path,
+            content,
+            now,
+        )
+        .await;
+    }
     let (relative_path, max_bytes) = match &request.operation {
         PluginCapabilityOperation::FilesystemRead { path, max_bytes } => (path.clone(), *max_bytes),
         _ => {
@@ -1488,6 +1543,15 @@ async fn execute_protected_plugin_capability(
     Ok(outcome)
 }
 
+fn require_create_only_plugin_write(create_new: bool) -> Result<(), ToolError> {
+    if create_new {
+        return Ok(());
+    }
+    Err(ToolError::Denied(
+        "plugin filesystem replacement is awaiting exact reversible preimage authority".into(),
+    ))
+}
+
 fn require_plugin_task_project_read(grants: &[PluginCapabilityGrant]) -> Result<(), ToolError> {
     let granted = grants.iter().any(|grant| {
         grant.capability == PluginCapability::FilesystemRead
@@ -1499,6 +1563,304 @@ fn require_plugin_task_project_read(grants: &[PluginCapabilityGrant]) -> Result<
         Err(ToolError::Denied(
             "plugin filesystem read is not granted for its task project".into(),
         ))
+    }
+}
+
+fn require_plugin_task_project_write(grants: &[PluginCapabilityGrant]) -> Result<(), ToolError> {
+    let granted = grants.iter().any(|grant| {
+        grant.capability == PluginCapability::FilesystemWrite
+            && grant.scopes.contains(&PluginCapabilityScope::TaskProject)
+    });
+    if granted {
+        Ok(())
+    } else {
+        Err(ToolError::Denied(
+            "plugin filesystem write is not granted for its task project".into(),
+        ))
+    }
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+async fn execute_plugin_filesystem_create(
+    dispatcher: &RootPluginDispatcher,
+    runtime: &AppRuntime,
+    authority: &mcg_storage::PluginInvocationWorkflowAuthority,
+    request: PluginCapabilityRequest,
+    relative_path: String,
+    content: String,
+    now: chrono::DateTime<Utc>,
+) -> Result<PluginCapabilityOutcome, ToolError> {
+    require_plugin_task_project_write(&authority.installation.capability_grants)?;
+    let task = authority
+        .task
+        .as_ref()
+        .ok_or_else(|| ToolError::Denied("plugin capability has no source-bound task".into()))?;
+    let project = authority
+        .project
+        .as_ref()
+        .ok_or_else(|| ToolError::Denied("plugin capability has no source-bound project".into()))?;
+    if task.project_id != Some(project.project_id) {
+        return Err(ToolError::Denied(
+            "plugin capability task and project authority diverge".into(),
+        ));
+    }
+    let content_bytes = content.as_bytes();
+    if u64::try_from(content_bytes.len()).unwrap_or(u64::MAX) > ACTION_RUNNER_CONTENT_MAX_BYTES {
+        return Err(ToolError::Denied(
+            "plugin filesystem write exceeds the governed action-runner bound".into(),
+        ));
+    }
+    let content_sha256 = format!("{:x}", Sha256::digest(content_bytes));
+    let operation = GovernedFilesystemOperation::CreateFile {
+        relative_path: relative_path.clone(),
+        content_base64: STANDARD.encode(content_bytes),
+    };
+    let compensation = GovernedFilesystemOperation::RemoveCreatedFile {
+        relative_path: relative_path.clone(),
+        expected_sha256: content_sha256.clone(),
+    };
+    let reconciler = GovernedFilesystemOperation::InspectFile {
+        relative_path,
+        max_bytes: ACTION_RUNNER_CONTENT_MAX_BYTES,
+    };
+    let (operation, operation_hash) =
+        mcg_action_runner::governed_filesystem_operation_payload(&operation)
+            .map_err(ToolError::Denied)?;
+    let compensation = mcg_action_runner::governed_filesystem_operation_payload(&compensation)
+        .map_err(ToolError::Denied)?
+        .0;
+    let reconciler = mcg_action_runner::governed_filesystem_operation_payload(&reconciler)
+        .map_err(ToolError::Denied)?
+        .0;
+    let attempt = &authority.workflow.attempt;
+    let lease_expiry = attempt.lease_expires_at.ok_or_else(|| {
+        ToolError::Denied("plugin capability workflow has no active lease".into())
+    })?;
+    let deadline = lease_expiry.min(now + Duration::seconds(PLUGIN_PERMIT_SECONDS));
+    let action_id = ActionId::new();
+    let execution = ActionExecution {
+        id: ActionExecutionId::new(),
+        action_id,
+        attempt_number: 1,
+        state: ActionExecutionState::Authorized,
+        revision: 1,
+        lease_generation: 0,
+        executor: None,
+        outcome: None,
+        created_at: now,
+        updated_at: now,
+    };
+    let action_authority = policy_binding(
+        "mcg.plugin_capability_authority.v1",
+        "MetaCog.PluginCapabilityAuthority",
+        &serde_json::json!({
+            "invocation_id": authority.invocation.id,
+            "plugin_revision_id": authority.revision.id,
+            "capability_request": request,
+            "source": authority.workflow.attachment.source,
+        }),
+    )
+    .map_err(protected_plugin_tool_denied)?;
+    let budget = policy_binding(
+        "mcg.plugin_capability_budget.v1",
+        "MetaCog.PluginCapabilityBudget",
+        &serde_json::json!({
+            "maximum_write_bytes": content_bytes.len(),
+            "create_new": true,
+        }),
+    )
+    .map_err(protected_plugin_tool_denied)?;
+    let filesystem_authority =
+        governed_filesystem_authority_binding(&GovernedFilesystemAuthority {
+            action_id,
+            actor: dispatcher.runtime_actor,
+            capability_root: PathBuf::from(&project.root),
+            operation_hash: operation_hash.clone(),
+            effect_class: EffectClass::Reversible,
+            expires_at: deadline,
+        })
+        .map_err(ToolError::Denied)?;
+    let envelope = ActionEnvelope {
+        id: action_id,
+        workflow_id: attempt.workflow_id,
+        attempt_id: attempt.attempt_id,
+        task_contract: attempt.task_contract.clone(),
+        actor: dispatcher.runtime_actor,
+        origin: Some(ActionOrigin {
+            conversation: None,
+            invocation: Some(authority.workflow.attachment.source.clone()),
+            command: None,
+            approval: None,
+            agent: None,
+            evidence: Vec::new(),
+        }),
+        authority: filesystem_authority,
+        elevated_authority: Some(action_authority),
+        expected_versions: Vec::new(),
+        operation,
+        operation_hash,
+        effect_class: EffectClass::Reversible,
+        preconditions: Vec::new(),
+        budget_reservation: budget,
+        idempotency_key: format!(
+            "plugin-capability:{}:{}",
+            authority.invocation.id, request.id
+        ),
+        compensation: Some(compensation),
+        compensates_action: None,
+        reconciler: Some(reconciler),
+        reconciliation_deadline: Some(deadline),
+        created_at: now,
+    };
+    runtime
+        .authorize_canonical_action(
+            &envelope,
+            &execution,
+            attempt.revision,
+            attempt.lease_generation,
+            CorrelationId::new(),
+            now,
+        )
+        .map_err(protected_plugin_tool_denied)?;
+
+    #[cfg(test)]
+    let client: Arc<dyn GovernedActionRunnerGateway> =
+        if let Some(gateway) = &dispatcher.test_action_gateway {
+            gateway.clone()
+        } else {
+            Arc::new(
+                ActionRunnerClient::adjacent_to(&dispatcher.root_executable)
+                    .map_err(|error| ToolError::Execution(error.to_string()))?,
+            )
+        };
+    #[cfg(not(test))]
+    let client: Arc<dyn GovernedActionRunnerGateway> = Arc::new(
+        ActionRunnerClient::adjacent_to(&dispatcher.root_executable)
+            .map_err(|error| ToolError::Execution(error.to_string()))?,
+    );
+    let receipt = execute_authorized_filesystem_action(
+        runtime,
+        client.as_ref(),
+        execution.id,
+        execution.revision,
+        execution.lease_generation,
+        dispatcher.runtime_actor,
+        now,
+    )
+    .await
+    .map_err(|error| ToolError::Execution(error.to_string()))?;
+    let receipt =
+        commit_confirmed_plugin_filesystem_effect(runtime, dispatcher.runtime_actor, receipt)?;
+    let outcome = plugin_filesystem_create_outcome(&request.id, &content_sha256, receipt)?;
+    let mut sessions = dispatcher
+        .capability_sessions
+        .lock()
+        .map_err(|_| ToolError::Execution("plugin capability session is unavailable".into()))?;
+    let session = sessions.get_mut(&authority.invocation.id).ok_or_else(|| {
+        ToolError::Execution("plugin capability session disappeared during dispatch".into())
+    })?;
+    session.outcomes.push(outcome.clone());
+    Ok(outcome)
+}
+
+fn commit_confirmed_plugin_filesystem_effect(
+    runtime: &AppRuntime,
+    validator: RuntimeActorId,
+    mut receipt: GovernedActionDispatchReceipt,
+) -> Result<GovernedActionDispatchReceipt, ToolError> {
+    if !matches!(
+        receipt.execution.outcome,
+        Some(EffectOutcome::EffectConfirmed { .. })
+    ) {
+        return Ok(receipt);
+    }
+    let postcondition = receipt
+        .runner_response
+        .as_ref()
+        .and_then(|response| response.observation.clone())
+        .ok_or_else(|| ToolError::Execution("filesystem write postcondition is missing".into()))?;
+    let now = Utc::now();
+    let validation = ActionValidation {
+        action_id: receipt.execution.action_id,
+        execution_id: receipt.execution.id,
+        validator,
+        evidence: Vec::new(),
+        postconditions: vec![postcondition],
+        validated_at: now,
+    };
+    let validated = runtime
+        .validate_canonical_action_effect(
+            receipt.execution.id,
+            receipt.execution.revision,
+            receipt.execution.lease_generation,
+            &validation,
+            CorrelationId::new(),
+            &format!("validate-plugin-filesystem:{}", receipt.execution.action_id),
+            now,
+        )
+        .map_err(|error| ToolError::Execution(error.to_string()))?;
+    let validation_event = runtime
+        .canonical_action(validated.action_id, 32)
+        .map_err(|error| ToolError::Execution(error.to_string()))?
+        .and_then(|inspection| inspection.events.last().cloned())
+        .ok_or_else(|| {
+            ToolError::Execution("filesystem write validation event is missing".into())
+        })?;
+    receipt.execution = runtime
+        .commit_canonical_action_effect(
+            validated.id,
+            validated.revision,
+            validated.lease_generation,
+            validation_event.id,
+            CorrelationId::new(),
+            &format!("commit-plugin-filesystem:{}", validated.action_id),
+            Utc::now(),
+        )
+        .map_err(|error| ToolError::Execution(error.to_string()))?
+        .execution;
+    Ok(receipt)
+}
+
+fn plugin_filesystem_create_outcome(
+    capability_request_id: &str,
+    expected_sha256: &str,
+    receipt: GovernedActionDispatchReceipt,
+) -> Result<PluginCapabilityOutcome, ToolError> {
+    match (&receipt.execution.state, &receipt.execution.outcome) {
+        (ActionExecutionState::Committed, Some(EffectOutcome::EffectConfirmed { evidence })) => {
+            Ok(PluginCapabilityOutcome::Succeeded {
+                request_id: capability_request_id.into(),
+                outcome: serde_json::json!({
+                    "status": ToolOutcomeStatus::Succeeded,
+                    "summary": "created governed project file",
+                    "exit_code": null,
+                    "stdout": null,
+                    "stderr": null,
+                    "artifacts": [],
+                    "verification": [{
+                        "method": "protected-root-filesystem-permit",
+                        "passed": true,
+                        "detail": format!(
+                            "sha256={expected_sha256} evidence_count={}",
+                            evidence.len()
+                        ),
+                    }],
+                }),
+            })
+        }
+        (
+            ActionExecutionState::NoEffectConfirmed | ActionExecutionState::Denied,
+            Some(EffectOutcome::NoEffectConfirmed),
+        ) => Ok(PluginCapabilityOutcome::Failed {
+            request_id: capability_request_id.into(),
+            error_code: receipt
+                .runner_response
+                .and_then(|response| response.error_code)
+                .unwrap_or_else(|| "filesystem_write_failed".into()),
+        }),
+        _ => Err(ToolError::Execution(
+            "governed filesystem write outcome requires reconciliation".into(),
+        )),
     }
 }
 
@@ -3625,6 +3987,281 @@ fn ensure_filesystem_tool_authorization(
     })
 }
 
+const RECONCILIATION_PROBE_BINDING_TYPE: &str = "mcg.reconciliation_probe_binding.v1";
+const RECONCILIATION_PROBE_BUDGET_TYPE: &str = "mcg.reconciliation_probe_budget.v1";
+
+fn reconciliation_probe_ids(
+    job_id: ReconciliationJobId,
+    job_generation: u64,
+) -> (ActionId, ActionExecutionId) {
+    let mut action_hasher = Sha256::new();
+    action_hasher.update(b"MetaCog.ReconciliationProbe.Action.v1\0");
+    action_hasher.update(job_id.0.as_bytes());
+    action_hasher.update(job_generation.to_be_bytes());
+    let action_digest = action_hasher.finalize();
+    let mut action_bytes = [0_u8; 16];
+    action_bytes.copy_from_slice(&action_digest[..16]);
+    action_bytes[6] = (action_bytes[6] & 0x0f) | 0x40;
+    action_bytes[8] = (action_bytes[8] & 0x3f) | 0x80;
+
+    let mut execution_hasher = Sha256::new();
+    execution_hasher.update(b"MetaCog.ReconciliationProbe.Execution.v1\0");
+    execution_hasher.update(job_id.0.as_bytes());
+    execution_hasher.update(job_generation.to_be_bytes());
+    let execution_digest = execution_hasher.finalize();
+    let mut execution_bytes = [0_u8; 16];
+    execution_bytes.copy_from_slice(&execution_digest[..16]);
+    execution_bytes[6] = (execution_bytes[6] & 0x0f) | 0x40;
+    execution_bytes[8] = (execution_bytes[8] & 0x3f) | 0x80;
+
+    (
+        ActionId(Uuid::from_bytes(action_bytes)),
+        ActionExecutionId(Uuid::from_bytes(execution_bytes)),
+    )
+}
+
+fn retire_previous_reconciliation_probe(
+    runtime: &AppRuntime,
+    job: &ReconciliationJob,
+    now: chrono::DateTime<Utc>,
+) -> Result<(), ProtectedRootError> {
+    let Some(previous_generation) = job
+        .lease_generation
+        .checked_sub(1)
+        .filter(|value| *value > 0)
+    else {
+        return Ok(());
+    };
+    let (action_id, _) = reconciliation_probe_ids(job.id, previous_generation);
+    let Some(probe) = runtime.canonical_action(action_id, 32)? else {
+        return Ok(());
+    };
+    let execution = latest_action_execution(&probe)?;
+    if execution.state == ActionExecutionState::Authorized {
+        runtime.abandon_authorized_observational_action(
+            execution.id,
+            execution.revision,
+            execution.lease_generation,
+            CorrelationId::new(),
+            &format!(
+                "abandon-reconciliation-probe:{}:{previous_generation}",
+                job.id
+            ),
+            now,
+        )?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_lines)]
+fn authorize_filesystem_reconciliation_probe(
+    runtime: &AppRuntime,
+    client: &dyn GovernedActionRunnerGateway,
+    target_envelope: &ActionEnvelope,
+    claimed: &ReconciliationClaimReceipt,
+    now: chrono::DateTime<Utc>,
+) -> Result<(ActionEnvelope, ActionExecution, ActionRunnerAuthorization), ProtectedRootError> {
+    let target_authority = decode_original_filesystem_authority(target_envelope)?;
+    let worker = claimed.job.lease_owner.ok_or_else(|| {
+        StorageError::Conflict("reconciliation probe job has no current owner".into())
+    })?;
+    let lease_expiry = claimed.job.lease_expires_at.ok_or_else(|| {
+        StorageError::Conflict("reconciliation probe job has no current lease".into())
+    })?;
+    let workflow = runtime
+        .canonical_workflow(target_envelope.workflow_id)?
+        .ok_or_else(|| StorageError::InvalidData("reconciliation workflow disappeared".into()))?;
+    if workflow.attempt.attempt_id != target_envelope.attempt_id
+        || workflow.attempt.task_contract != target_envelope.task_contract
+        || workflow.attempt.state
+            != WorkflowState::Waiting(mcg_contracts::WaitReason::Reconciliation)
+        || workflow.attempt.lease_owner.is_some()
+        || workflow.attempt.lease_expires_at.is_some()
+    {
+        return Err(StorageError::Conflict(
+            "reconciliation probe workflow is not exactly fenced".into(),
+        )
+        .into());
+    }
+    let operation = claimed.job.adapter.clone();
+    let operation_hash = operation.content_hash(GOVERNED_ACTION_OPERATION_HASH_DOMAIN)?;
+    let deadline = std::cmp::min(
+        std::cmp::min(lease_expiry, claimed.job.deadline),
+        now + Duration::seconds(PLUGIN_PERMIT_SECONDS),
+    );
+    if deadline <= now {
+        return Err(StorageError::Conflict("reconciliation probe authority expired".into()).into());
+    }
+    let (action_id, execution_id) =
+        reconciliation_probe_ids(claimed.job.id, claimed.job.lease_generation);
+    let binding = VersionedPayload::canonical_v1(
+        StableTypeId::parse(RECONCILIATION_PROBE_BINDING_TYPE)?,
+        &serde_json::json!({
+            "job_id": claimed.job.id,
+            "job_revision": claimed.job.revision,
+            "job_generation": claimed.job.lease_generation,
+            "target_action_id": claimed.job.action_id,
+            "target_execution_id": claimed.job.execution_id,
+            "target_revision": claimed.execution.revision,
+            "target_generation": claimed.execution.lease_generation,
+            "adapter_hash": operation_hash,
+        }),
+    )?;
+    let target_hash = canonical_contract_hash(
+        ActionEnvelope::TYPE_ID,
+        ACTION_ENVELOPE_HASH_DOMAIN,
+        target_envelope,
+    )?;
+    let job_hash = canonical_contract_hash(
+        ReconciliationJob::TYPE_ID,
+        "MetaCog.ReconciliationJob",
+        &claimed.job,
+    )?;
+    let envelope = ActionEnvelope {
+        id: action_id,
+        workflow_id: target_envelope.workflow_id,
+        attempt_id: target_envelope.attempt_id,
+        task_contract: target_envelope.task_contract.clone(),
+        actor: worker,
+        origin: Some(ActionOrigin {
+            conversation: None,
+            invocation: None,
+            command: None,
+            approval: None,
+            agent: None,
+            evidence: vec![
+                SourceRef {
+                    source_type: StableTypeId::parse(ActionEnvelope::TYPE_ID)?,
+                    locator: target_envelope.id.to_string(),
+                    content_hash: target_hash,
+                },
+                SourceRef {
+                    source_type: StableTypeId::parse(ReconciliationJob::TYPE_ID)?,
+                    locator: claimed.job.id.to_string(),
+                    content_hash: job_hash,
+                },
+            ],
+        }),
+        authority: governed_filesystem_authority_binding(&GovernedFilesystemAuthority {
+            action_id,
+            actor: worker,
+            capability_root: target_authority.capability_root.clone(),
+            operation_hash: operation_hash.clone(),
+            effect_class: EffectClass::Observational,
+            expires_at: deadline,
+        })
+        .map_err(|_| ActionRunnerProtocolError::Invalid("reconciliation probe authority"))?,
+        elevated_authority: None,
+        expected_versions: Vec::new(),
+        operation,
+        operation_hash: operation_hash.clone(),
+        effect_class: EffectClass::Observational,
+        preconditions: vec![binding],
+        budget_reservation: policy_binding(
+            RECONCILIATION_PROBE_BUDGET_TYPE,
+            "MetaCog.ReconciliationProbeBudget",
+            &serde_json::json!({
+                "job_id": claimed.job.id,
+                "job_generation": claimed.job.lease_generation,
+                "maximum_observations": 1,
+            }),
+        )?,
+        idempotency_key: format!(
+            "reconciliation-probe:{}:{}",
+            claimed.job.id, claimed.job.lease_generation
+        ),
+        compensation: None,
+        compensates_action: None,
+        reconciler: None,
+        reconciliation_deadline: None,
+        created_at: now,
+    };
+    let execution = ActionExecution {
+        id: execution_id,
+        action_id,
+        attempt_number: 1,
+        state: ActionExecutionState::Authorized,
+        revision: 1,
+        lease_generation: 0,
+        executor: None,
+        outcome: None,
+        created_at: now,
+        updated_at: now,
+    };
+    runtime.authorize_canonical_reconciliation_probe(
+        &envelope,
+        &execution,
+        claimed.job.id,
+        claimed.job.revision,
+        claimed.job.lease_generation,
+        claimed.execution.revision,
+        claimed.execution.lease_generation,
+        CorrelationId::new(),
+        now,
+    )?;
+
+    let evidence = client.capability_evidence()?;
+    let manifest = governed_filesystem_tool_manifest(
+        &evidence,
+        &target_authority.capability_root,
+        FilesystemAccess::Read,
+    )
+    .map_err(StorageError::InvalidData)?;
+    runtime.register_tool_manifest(&manifest, now)?;
+    let root_identity = runtime
+        .root_ownership()?
+        .ok_or_else(|| StorageError::InvalidData("Root ownership identity is missing".into()))?
+        .runtime_identity;
+    let proposal = ToolInvocationProposal {
+        action_id,
+        attempt_id: envelope.attempt_id,
+        attempt_revision: workflow.attempt.revision,
+        lease_generation: workflow.attempt.lease_generation,
+        runtime_actor: worker,
+        runtime_identity: root_identity.clone(),
+        task_contract: envelope.task_contract.clone(),
+        tool_manifest: manifest.versioned_ref()?,
+        arguments: ArtifactRef {
+            content_hash: operation_hash.clone(),
+            media_type: "application/vnd.metacog.governed-filesystem-operation+cbor".into(),
+            byte_length: u64::try_from(envelope.operation.bytes.len())
+                .map_err(|_| StorageError::InvalidData("Tool argument length overflowed".into()))?,
+        },
+        argument_hash: operation_hash,
+        requested_effect_class: EffectClass::Observational,
+        requested_capabilities: manifest.required_capabilities.clone(),
+        requested_limits: manifest.resource_ceiling,
+        required_sandbox: manifest.sandbox_requirement,
+        platform: evidence.platform,
+        deadline,
+    };
+    let policy = governed_filesystem_tool_policy(&manifest).map_err(StorageError::InvalidData)?;
+    let receipt = authorize_and_persist_reconciliation_tool_capability(
+        runtime,
+        &proposal,
+        &root_identity,
+        &manifest,
+        &policy,
+        evidence.available_sandbox,
+        evidence.platform,
+        claimed.job.id,
+        now,
+    )?;
+    Ok((
+        envelope,
+        execution,
+        ActionRunnerAuthorization {
+            manifest,
+            proposal: receipt.proposal,
+            proposal_hash: receipt.proposal_hash,
+            policy,
+            permit: receipt.permit,
+            permit_hash: receipt.permit_hash,
+            permit_ref: receipt.permit_ref,
+        },
+    ))
+}
+
 /// Executes one already-authorized filesystem action and durably classifies its physical result.
 ///
 /// Root persists dispatch before process launch. A lost/invalid/late response after possible
@@ -4115,7 +4752,26 @@ pub async fn reconcile_filesystem_action(
         )));
     }
     validate_governed_filesystem_envelope(&envelope, now)?;
-    let authorization = ensure_filesystem_tool_authorization(runtime, client, &envelope, now)?;
+    let workflow = runtime
+        .canonical_workflow(envelope.workflow_id)?
+        .ok_or_else(|| StorageError::InvalidData("reconciliation workflow disappeared".into()))?;
+    let active_authorization = match workflow.attempt.state {
+        WorkflowState::Running => Some(ensure_filesystem_tool_authorization(
+            runtime, client, &envelope, now,
+        )?),
+        WorkflowState::Waiting(mcg_contracts::WaitReason::Reconciliation)
+            if workflow.attempt.lease_owner.is_none()
+                && workflow.attempt.lease_expires_at.is_none() =>
+        {
+            None
+        }
+        _ => {
+            return Err(StorageError::Conflict(
+                "filesystem reconciliation workflow is neither active nor exactly fenced".into(),
+            )
+            .into());
+        }
+    };
     let lease_expires_at = std::cmp::min(now + Duration::minutes(2), job.deadline);
     let correlation_id = CorrelationId::new();
     let claimed = runtime.claim_canonical_reconciliation(
@@ -4133,15 +4789,71 @@ pub async fn reconcile_filesystem_action(
         now,
     )?;
     let request_id = Uuid::new_v4();
-    let request = request_from_reconciliation_job(
-        &envelope,
-        &claimed.execution,
-        &claimed.job,
-        authorization,
-        request_id,
-        now,
-    )?;
+    let (request, probe_dispatch) = if let Some(authorization) = active_authorization {
+        (
+            request_from_reconciliation_job(
+                &envelope,
+                &claimed.execution,
+                &claimed.job,
+                authorization,
+                request_id,
+                now,
+            )?,
+            None,
+        )
+    } else {
+        retire_previous_reconciliation_probe(runtime, &claimed.job, now)?;
+        let (probe_envelope, probe_execution, authorization) =
+            authorize_filesystem_reconciliation_probe(runtime, client, &envelope, &claimed, now)?;
+        let probe_correlation_id = CorrelationId::new();
+        let dispatched_probe = runtime.dispatch_canonical_action(
+            probe_execution.id,
+            probe_execution.revision,
+            probe_execution.lease_generation,
+            worker,
+            probe_correlation_id,
+            &format!(
+                "filesystem-reconcile-probe-dispatch:{}:{}",
+                claimed.job.id, claimed.job.lease_generation
+            ),
+            now,
+        )?;
+        (
+            request_from_authorized_action(
+                &probe_envelope,
+                &dispatched_probe,
+                authorization,
+                request_id,
+                now,
+            )?,
+            Some((probe_envelope, dispatched_probe, probe_correlation_id)),
+        )
+    };
     let runner_result = client.invoke(&request).await;
+    if let Some((probe_envelope, dispatched_probe, probe_correlation_id)) = probe_dispatch {
+        match &runner_result {
+            Ok(response) => {
+                classify_runner_response(
+                    runtime,
+                    &probe_envelope,
+                    &dispatched_probe,
+                    probe_correlation_id,
+                    request_id,
+                    response.clone(),
+                )?;
+            }
+            Err(error) => {
+                classify_runner_failure(
+                    runtime,
+                    &probe_envelope,
+                    &dispatched_probe,
+                    probe_correlation_id,
+                    request_id,
+                    error,
+                )?;
+            }
+        }
+    }
     let resolved_at = Utc::now();
     let (observation, runner_response) = match runner_result {
         Ok(response) if response.outcome == RunnerEffectOutcome::Observational => {
@@ -4716,12 +5428,41 @@ fn start_filesystem_reconciliation_worker(runtime: Arc<AppRuntime>) -> Option<Jo
                 )
                 .await
                 {
-                    Ok(receipt) => debug!(
-                        job_id = %receipt.resolution.job.id,
-                        action_id = %receipt.resolution.job.action_id,
-                        state = ?receipt.resolution.job.state,
-                        "completed governed filesystem reconciliation attempt"
-                    ),
+                    Ok(receipt) => {
+                        debug!(
+                            job_id = %receipt.resolution.job.id,
+                            action_id = %receipt.resolution.job.action_id,
+                            state = ?receipt.resolution.job.state,
+                            "completed governed filesystem reconciliation attempt"
+                        );
+                        if let Err(error) = commit_reconciled_plugin_filesystem_effect(
+                            &runtime,
+                            &receipt.resolution,
+                            worker,
+                            Utc::now(),
+                        ) {
+                            warn!(
+                                action_id = %receipt.resolution.job.action_id,
+                                %error,
+                                "could not validate and commit reconciled plugin effect"
+                            );
+                            continue;
+                        }
+                        if receipt.resolution.job.state
+                            == mcg_contracts::ReconciliationJobState::Resolved
+                            && let Err(error) = settle_reconciled_plugin_action_workflow(
+                                &runtime,
+                                receipt.resolution.job.action_id,
+                                Utc::now(),
+                            )
+                        {
+                            warn!(
+                                action_id = %receipt.resolution.job.action_id,
+                                %error,
+                                "could not settle reconciled plugin authority workflow"
+                            );
+                        }
+                    }
                     Err(error) => debug!(
                         job_id = %job.id,
                         %error,
@@ -4731,6 +5472,119 @@ fn start_filesystem_reconciliation_worker(runtime: Arc<AppRuntime>) -> Option<Jo
             }
         }
     }))
+}
+
+fn settle_reconciled_plugin_action_workflow(
+    runtime: &AppRuntime,
+    action_id: ActionId,
+    settled_at: chrono::DateTime<Utc>,
+) -> Result<(), RuntimeError> {
+    let Some(action) = runtime.canonical_action(action_id, 32)? else {
+        return Ok(());
+    };
+    let Some(source) = action
+        .envelope
+        .origin
+        .as_ref()
+        .and_then(|origin| origin.invocation.as_ref())
+    else {
+        return Ok(());
+    };
+    if source.source_type.as_str() != "mcg.plugin_invocation_source.v1" {
+        return Ok(());
+    }
+    let invocation_id = source
+        .locator
+        .parse::<PluginInvocationId>()
+        .map_err(|error| RuntimeError::Storage(StorageError::InvalidData(error.to_string())))?;
+    runtime.root_settle_reconciled_plugin_invocation_workflow(invocation_id, settled_at)?;
+    Ok(())
+}
+
+fn commit_reconciled_plugin_filesystem_effect(
+    runtime: &AppRuntime,
+    resolution: &ReconciliationResolutionReceipt,
+    validator: RuntimeActorId,
+    validated_at: chrono::DateTime<Utc>,
+) -> Result<(), RuntimeError> {
+    if resolution.job.state != mcg_contracts::ReconciliationJobState::Resolved
+        || resolution.execution.state != ActionExecutionState::EffectConfirmed
+    {
+        return Ok(());
+    }
+    let Some(action) = runtime.canonical_action(resolution.job.action_id, 32)? else {
+        return Ok(());
+    };
+    let Some(source) = action
+        .envelope
+        .origin
+        .as_ref()
+        .and_then(|origin| origin.invocation.as_ref())
+    else {
+        return Ok(());
+    };
+    if source.source_type.as_str() != "mcg.plugin_invocation_source.v1" {
+        return Ok(());
+    }
+    if !matches!(
+        decode_governed_filesystem_operation(&action.envelope.operation)
+            .map_err(|error| RuntimeError::Storage(StorageError::InvalidData(error.to_string())))?,
+        GovernedFilesystemOperation::CreateFile { .. }
+    ) {
+        return Err(RuntimeError::Storage(StorageError::InvalidData(
+            "reconciled plugin effect is not an exact create-only filesystem action".into(),
+        )));
+    }
+    let postcondition = resolution
+        .receipt
+        .as_ref()
+        .map(|receipt| receipt.observation.clone())
+        .ok_or_else(|| {
+            RuntimeError::Storage(StorageError::InvalidData(
+                "reconciled plugin effect has no independent observation".into(),
+            ))
+        })?;
+    let validation = ActionValidation {
+        action_id: resolution.execution.action_id,
+        execution_id: resolution.execution.id,
+        validator,
+        evidence: Vec::new(),
+        postconditions: vec![postcondition],
+        validated_at,
+    };
+    let validated = runtime.validate_canonical_action_effect(
+        resolution.execution.id,
+        resolution.execution.revision,
+        resolution.execution.lease_generation,
+        &validation,
+        CorrelationId::new(),
+        &format!(
+            "validate-reconciled-plugin-filesystem:{}",
+            resolution.execution.action_id
+        ),
+        validated_at,
+    )?;
+    let validation_event = runtime
+        .canonical_action(validated.action_id, 32)?
+        .and_then(|inspection| inspection.events.last().cloned())
+        .ok_or_else(|| {
+            RuntimeError::Storage(StorageError::InvalidData(
+                "reconciled plugin validation event is missing".into(),
+            ))
+        })?;
+    runtime.commit_canonical_action_effect(
+        validated.id,
+        validated.revision,
+        validated.lease_generation,
+        validation_event.id,
+        CorrelationId::new(),
+        &format!(
+            "commit-reconciled-plugin-filesystem:{}",
+            validated.action_id
+        ),
+        validated_at,
+    )?;
+    Ok(())
 }
 
 const RUNTIME_WORKER_HEALTH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
@@ -5419,6 +6273,19 @@ mod tests {
     };
     use mcg_storage::{SqliteEventStore, task_contract_content_hash, verify_backup_bundle};
 
+    #[test]
+    fn plugin_filesystem_replacement_fails_closed_without_preimage_authority() {
+        require_create_only_plugin_write(true).expect("create-only writes are eligible");
+        let error = require_create_only_plugin_write(false)
+            .expect_err("replacement must require exact reversible preimage authority");
+        assert!(matches!(
+            error,
+            ToolError::Denied(ref message)
+                if message
+                    == "plugin filesystem replacement is awaiting exact reversible preimage authority"
+        ));
+    }
+
     fn workflow_hash(label: &str) -> ContentHash {
         VersionedPayload::canonical_v1(
             StableTypeId::parse("test.root_workflow_ref.v1").expect("reference type"),
@@ -5749,6 +6616,162 @@ mod tests {
                 started_at: now,
                 finished_at: now,
             })
+        }
+    }
+
+    struct PluginCreateActionGateway {
+        calls: Arc<Mutex<Vec<ActionRunnerRequest>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl GovernedActionRunnerGateway for PluginCreateActionGateway {
+        fn capability_evidence(
+            &self,
+        ) -> Result<ActionRunnerCapabilityEvidence, ActionRunnerClientError> {
+            Ok(scripted_action_capability_evidence())
+        }
+
+        async fn invoke(
+            &self,
+            request: &ActionRunnerRequest,
+        ) -> Result<ActionRunnerResponse, ActionRunnerClientError> {
+            assert_eq!(request.authorization.proposal.action_id, request.action_id);
+            assert_eq!(request.authorization.permit.action_id, request.action_id);
+            assert_eq!(
+                request.authorization.proposal.requested_effect_class,
+                EffectClass::Reversible
+            );
+            assert_eq!(
+                request.authorization.permit.allowed_effect_class,
+                EffectClass::Reversible
+            );
+            let GovernedFilesystemOperation::CreateFile {
+                relative_path,
+                content_base64,
+            } = decode_governed_filesystem_operation(&request.operation)
+                .expect("governed plugin create operation")
+            else {
+                panic!("plugin create gateway received another operation")
+            };
+            let bytes = STANDARD
+                .decode(content_base64)
+                .expect("decode protected create bytes");
+            let path = request.capability_root.join(&relative_path);
+            let mut options = fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            std::io::Write::write_all(
+                &mut options
+                    .open(&path)
+                    .expect("create protected plugin fixture"),
+                &bytes,
+            )
+            .expect("write protected plugin fixture");
+            self.calls
+                .lock()
+                .expect("plugin create calls")
+                .push(request.clone());
+            let now = Utc::now();
+            let observation = VersionedPayload::canonical_v1(
+                StableTypeId::parse(GOVERNED_FILESYSTEM_OBSERVATION_TYPE)
+                    .expect("observation type"),
+                &serde_json::json!({
+                    "relative_path": relative_path,
+                    "exists": true,
+                    "sha256": format!("{:x}", Sha256::digest(&bytes)),
+                    "size_bytes": bytes.len(),
+                    "content_base64": null,
+                }),
+            )
+            .expect("observation payload");
+            Ok(ActionRunnerResponse {
+                protocol_version: mcg_action_runner::ACTION_RUNNER_PROTOCOL_VERSION,
+                request_id: Some(request.request_id),
+                action_id: Some(request.action_id),
+                execution_id: Some(request.execution_id),
+                outcome: RunnerEffectOutcome::EffectConfirmed,
+                observation: Some(observation),
+                error_code: None,
+                detail: "created protected plugin fixture".into(),
+                started_at: now,
+                finished_at: now,
+            })
+        }
+    }
+
+    struct PluginLostCreateResponseGateway {
+        calls: Arc<Mutex<Vec<ActionRunnerRequest>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl GovernedActionRunnerGateway for PluginLostCreateResponseGateway {
+        fn capability_evidence(
+            &self,
+        ) -> Result<ActionRunnerCapabilityEvidence, ActionRunnerClientError> {
+            Ok(scripted_action_capability_evidence())
+        }
+
+        async fn invoke(
+            &self,
+            request: &ActionRunnerRequest,
+        ) -> Result<ActionRunnerResponse, ActionRunnerClientError> {
+            self.calls
+                .lock()
+                .expect("lost create calls")
+                .push(request.clone());
+            match decode_governed_filesystem_operation(&request.operation)
+                .expect("lost create or reconciliation operation")
+            {
+                GovernedFilesystemOperation::CreateFile {
+                    relative_path,
+                    content_base64,
+                } => {
+                    let bytes = STANDARD
+                        .decode(content_base64)
+                        .map_err(|_| ActionRunnerClientError::InvalidResponse)?;
+                    fs::write(request.capability_root.join(relative_path), bytes)
+                        .map_err(|_| ActionRunnerClientError::Process)?;
+                    Err(ActionRunnerClientError::Process)
+                }
+                GovernedFilesystemOperation::InspectFile { relative_path, .. } => {
+                    assert_eq!(
+                        request.authorization.proposal.requested_effect_class,
+                        EffectClass::Observational
+                    );
+                    assert_eq!(
+                        request.authorization.permit.allowed_effect_class,
+                        EffectClass::Observational
+                    );
+                    let bytes = fs::read(request.capability_root.join(&relative_path))
+                        .map_err(|_| ActionRunnerClientError::Process)?;
+                    let now = Utc::now();
+                    Ok(ActionRunnerResponse {
+                        protocol_version: mcg_action_runner::ACTION_RUNNER_PROTOCOL_VERSION,
+                        request_id: Some(request.request_id),
+                        action_id: Some(request.action_id),
+                        execution_id: Some(request.execution_id),
+                        outcome: RunnerEffectOutcome::Observational,
+                        observation: Some(
+                            VersionedPayload::canonical_v1(
+                                StableTypeId::parse(GOVERNED_FILESYSTEM_OBSERVATION_TYPE)
+                                    .expect("observation type"),
+                                &serde_json::json!({
+                                    "relative_path": relative_path,
+                                    "exists": true,
+                                    "sha256": format!("{:x}", Sha256::digest(&bytes)),
+                                    "size_bytes": bytes.len(),
+                                    "content_base64": null,
+                                }),
+                            )
+                            .expect("reconciliation observation"),
+                        ),
+                        error_code: None,
+                        detail: "inspected lost plugin create".into(),
+                        started_at: now,
+                        finished_at: now,
+                    })
+                }
+                _ => Err(ActionRunnerClientError::InvalidResponse),
+            }
         }
     }
 
@@ -8468,6 +9491,462 @@ mod tests {
                 .filter(|capability| capability.filesystem_scope_count > 0)
                 .count(),
             1
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn root_creates_plugin_project_file_with_reconciliation_and_compensation_authority() {
+        let temporary = tempfile::tempdir().expect("temporary Root data directory");
+        let project_root = tempfile::tempdir().expect("plugin project root");
+        let config = AppConfig::default().with_data_directory(temporary.path());
+        let runtime = Arc::new(AppRuntime::open(config).expect("runtime"));
+        let project_id = ProjectId::new();
+        runtime
+            .discover_project(project_root.path(), project_id)
+            .expect("discover plugin project");
+        let mut task = TaskEnvelope::new("exercise a protected plugin create");
+        task.project_id = Some(project_id);
+        runtime.create_task(&task).expect("create plugin task");
+        let identity = current_runtime_identity().expect("Root identity");
+        runtime
+            .initialize_root_ownership(
+                identity.clone(),
+                RootMigrationReceipt {
+                    schema_version: PROTOCOL_V1,
+                    from_storage_schema: STORAGE_SCHEMA_VERSION,
+                    to_storage_schema: STORAGE_SCHEMA_VERSION,
+                    backup_path: None,
+                    backup_sha256: None,
+                    migrated_at: Utc::now(),
+                },
+            )
+            .expect("Root ownership");
+        let plugin_requests = Arc::new(Mutex::new(Vec::new()));
+        let action_requests = Arc::new(Mutex::new(Vec::new()));
+        let runner = SourceRef {
+            source_type: StableTypeId::parse("mcg.plugin_runner_executable.v1")
+                .expect("runner type"),
+            locator: "mcg-plugin-runner".into(),
+            content_hash: ContentHash {
+                algorithm: HashAlgorithm::Sha256,
+                domain: "MetaCog.PluginRunnerExecutable".into(),
+                digest_hex: "e".repeat(64),
+            },
+        };
+        runtime
+            .install_protected_plugin_dispatcher(Arc::new(RootPluginDispatcher {
+                runtime: Arc::downgrade(&runtime),
+                root_executable: PathBuf::from("unused-in-injected-test"),
+                runtime_actor: RuntimeActorId(identity.instance_id.0),
+                runtime_identity: identity,
+                capability_sessions: Mutex::new(BTreeMap::new()),
+                test_gateway: Some(Arc::new(ScriptedProtectedPluginGateway {
+                    runner,
+                    requests: plugin_requests.clone(),
+                    turns: Mutex::new(VecDeque::from([
+                        PluginGuestTurn::CapabilityRequest {
+                            request: PluginCapabilityRequest {
+                                schema_version: PLUGIN_SCHEMA_VERSION,
+                                id: "create-proof".into(),
+                                operation: PluginCapabilityOperation::FilesystemWrite {
+                                    path: "created.txt".into(),
+                                    content: "protected create proof".into(),
+                                    create_new: true,
+                                },
+                            },
+                        },
+                        PluginGuestTurn::Completed {
+                            output: serde_json::json!({"created": true}),
+                        },
+                    ])),
+                })),
+                test_action_gateway: Some(Arc::new(PluginCreateActionGateway {
+                    calls: action_requests.clone(),
+                })),
+            }))
+            .expect("install protected plugin dispatcher");
+        let module = br#"(module (func (export "_start")))"#;
+        let revision = PluginRevision {
+            schema_version: PLUGIN_CATALOG_SCHEMA_VERSION,
+            id: PluginRevisionId::new(),
+            manifest: PluginManifest {
+                schema_version: PLUGIN_SCHEMA_VERSION,
+                id: "example.protected-create".into(),
+                display_name: "Protected create fixture".into(),
+                version: "1.0.0".into(),
+                class: PluginClass::SandboxedWasi,
+                requested_capabilities: vec![PluginCapability::FilesystemWrite],
+            },
+            module_sha256: format!("{:x}", Sha256::digest(module)),
+            module_size_bytes: u64::try_from(module.len()).expect("module size"),
+            source: PluginInstallSource::LocalImport,
+            signature: PluginSignature {
+                state: PluginSignatureState::Unsigned,
+                scheme: None,
+                signer: None,
+                signature_sha256: None,
+            },
+            installed_at: Utc::now(),
+        };
+        let installation = runtime
+            .install_sandboxed_plugin(&revision, module)
+            .expect("install protected create plugin");
+        let installation = runtime
+            .set_plugin_capability_grants(
+                &revision.manifest.id,
+                installation.revision,
+                vec![PluginCapabilityGrant {
+                    schema_version: PLUGIN_CATALOG_SCHEMA_VERSION,
+                    capability: PluginCapability::FilesystemWrite,
+                    scopes: vec![PluginCapabilityScope::TaskProject],
+                }],
+            )
+            .expect("grant protected project write");
+        runtime
+            .set_plugin_enabled(&revision.manifest.id, installation.revision, true)
+            .expect("enable protected create plugin");
+
+        let result = runtime
+            .invoke_sandboxed_plugin(
+                PluginInvocationId::new(),
+                &revision.manifest.id,
+                Some(task.id),
+                serde_json::json!({"goal": "create proof"}),
+            )
+            .await
+            .expect("invoke protected create plugin");
+
+        assert_eq!(
+            result.invocation.state,
+            mcg_domain::PluginInvocationState::Succeeded
+        );
+        assert_eq!(
+            result.result.expect("plugin result").output,
+            serde_json::json!({"created": true})
+        );
+        assert_eq!(
+            fs::read_to_string(project_root.path().join("created.txt"))
+                .expect("created project file"),
+            "protected create proof"
+        );
+        let captured = plugin_requests.lock().expect("plugin requests");
+        assert_eq!(captured.len(), 2);
+        let second: PluginHostTurn =
+            serde_json::from_value(captured[1].input.clone()).expect("protected host turn");
+        assert!(matches!(
+            second.outcomes[0],
+            PluginCapabilityOutcome::Succeeded { .. }
+        ));
+        drop(captured);
+        let action_requests = action_requests.lock().expect("action requests");
+        assert_eq!(action_requests.len(), 1);
+        assert!(action_requests[0].envelope.compensation.is_some());
+        assert!(action_requests[0].envelope.reconciler.is_some());
+        assert_eq!(
+            action_requests[0].capability_root,
+            fs::canonicalize(project_root.path()).expect("canonical project root")
+        );
+        drop(action_requests);
+        let actions = runtime.canonical_actions(10).expect("plugin actions");
+        assert_eq!(actions.len(), 3);
+        assert_eq!(
+            actions
+                .iter()
+                .filter(|action| action.state == ActionExecutionState::Committed)
+                .count(),
+            1
+        );
+        assert_eq!(
+            actions
+                .iter()
+                .filter(|action| action.state == ActionExecutionState::NoEffectConfirmed)
+                .count(),
+            2
+        );
+        assert_eq!(
+            runtime
+                .canonical_workflows()
+                .expect("plugin workflow")
+                .into_iter()
+                .next()
+                .expect("canonical plugin workflow")
+                .state,
+            WorkflowState::Succeeded
+        );
+        let capabilities = runtime
+            .tool_authorizations(10, Utc::now())
+            .expect("plugin Tool permits");
+        assert_eq!(capabilities.len(), 3);
+        assert_eq!(
+            capabilities
+                .iter()
+                .filter(|capability| capability.filesystem_scope_count > 0)
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn lost_plugin_create_response_waits_for_reconciliation_without_redispatch() {
+        let temporary = tempfile::tempdir().expect("temporary Root data directory");
+        let project_root = tempfile::tempdir().expect("plugin project root");
+        let config = AppConfig::default().with_data_directory(temporary.path());
+        let runtime = Arc::new(AppRuntime::open(config.clone()).expect("runtime"));
+        let project_id = ProjectId::new();
+        runtime
+            .discover_project(project_root.path(), project_id)
+            .expect("discover plugin project");
+        let mut task = TaskEnvelope::new("exercise an uncertain protected plugin create");
+        task.project_id = Some(project_id);
+        runtime.create_task(&task).expect("create plugin task");
+        let identity = current_runtime_identity().expect("Root identity");
+        runtime
+            .initialize_root_ownership(
+                identity.clone(),
+                RootMigrationReceipt {
+                    schema_version: PROTOCOL_V1,
+                    from_storage_schema: STORAGE_SCHEMA_VERSION,
+                    to_storage_schema: STORAGE_SCHEMA_VERSION,
+                    backup_path: None,
+                    backup_sha256: None,
+                    migrated_at: Utc::now(),
+                },
+            )
+            .expect("Root ownership");
+        let plugin_requests = Arc::new(Mutex::new(Vec::new()));
+        let action_requests = Arc::new(Mutex::new(Vec::new()));
+        runtime
+            .install_protected_plugin_dispatcher(Arc::new(RootPluginDispatcher {
+                runtime: Arc::downgrade(&runtime),
+                root_executable: PathBuf::from("unused-in-injected-test"),
+                runtime_actor: RuntimeActorId(identity.instance_id.0),
+                runtime_identity: identity,
+                capability_sessions: Mutex::new(BTreeMap::new()),
+                test_gateway: Some(Arc::new(ScriptedProtectedPluginGateway {
+                    runner: SourceRef {
+                        source_type: StableTypeId::parse("mcg.plugin_runner_executable.v1")
+                            .expect("runner type"),
+                        locator: "mcg-plugin-runner".into(),
+                        content_hash: ContentHash {
+                            algorithm: HashAlgorithm::Sha256,
+                            domain: "MetaCog.PluginRunnerExecutable".into(),
+                            digest_hex: "f".repeat(64),
+                        },
+                    },
+                    requests: plugin_requests,
+                    turns: Mutex::new(VecDeque::from([PluginGuestTurn::CapabilityRequest {
+                        request: PluginCapabilityRequest {
+                            schema_version: PLUGIN_SCHEMA_VERSION,
+                            id: "lost-create-proof".into(),
+                            operation: PluginCapabilityOperation::FilesystemWrite {
+                                path: "uncertain.txt".into(),
+                                content: "effect survives response loss".into(),
+                                create_new: true,
+                            },
+                        },
+                    }])),
+                })),
+                test_action_gateway: Some(Arc::new(PluginLostCreateResponseGateway {
+                    calls: action_requests.clone(),
+                })),
+            }))
+            .expect("install protected plugin dispatcher");
+        let module = br#"(module (func (export "_start")))"#;
+        let revision = PluginRevision {
+            schema_version: PLUGIN_CATALOG_SCHEMA_VERSION,
+            id: PluginRevisionId::new(),
+            manifest: PluginManifest {
+                schema_version: PLUGIN_SCHEMA_VERSION,
+                id: "example.uncertain-create".into(),
+                display_name: "Uncertain create fixture".into(),
+                version: "1.0.0".into(),
+                class: PluginClass::SandboxedWasi,
+                requested_capabilities: vec![PluginCapability::FilesystemWrite],
+            },
+            module_sha256: format!("{:x}", Sha256::digest(module)),
+            module_size_bytes: u64::try_from(module.len()).expect("module size"),
+            source: PluginInstallSource::LocalImport,
+            signature: PluginSignature {
+                state: PluginSignatureState::Unsigned,
+                scheme: None,
+                signer: None,
+                signature_sha256: None,
+            },
+            installed_at: Utc::now(),
+        };
+        let installation = runtime
+            .install_sandboxed_plugin(&revision, module)
+            .expect("install uncertain create plugin");
+        let installation = runtime
+            .set_plugin_capability_grants(
+                &revision.manifest.id,
+                installation.revision,
+                vec![PluginCapabilityGrant {
+                    schema_version: PLUGIN_CATALOG_SCHEMA_VERSION,
+                    capability: PluginCapability::FilesystemWrite,
+                    scopes: vec![PluginCapabilityScope::TaskProject],
+                }],
+            )
+            .expect("grant protected project write");
+        runtime
+            .set_plugin_enabled(&revision.manifest.id, installation.revision, true)
+            .expect("enable uncertain create plugin");
+
+        let result = runtime
+            .invoke_sandboxed_plugin(
+                PluginInvocationId::new(),
+                &revision.manifest.id,
+                Some(task.id),
+                serde_json::json!({"goal": "lose the response"}),
+            )
+            .await
+            .expect("settle uncertain plugin invocation");
+
+        assert_eq!(
+            result.invocation.state,
+            mcg_domain::PluginInvocationState::Uncertain
+        );
+        assert_eq!(
+            result.invocation.error_code.as_deref(),
+            Some("capability_execution_uncertain")
+        );
+        assert_eq!(
+            fs::read_to_string(project_root.path().join("uncertain.txt"))
+                .expect("uncertain effect remains inspectable"),
+            "effect survives response loss"
+        );
+        assert_eq!(action_requests.lock().expect("action requests").len(), 1);
+        let workflow = runtime
+            .canonical_workflows()
+            .expect("plugin workflow")
+            .into_iter()
+            .next()
+            .expect("canonical plugin workflow");
+        assert_eq!(
+            workflow.state,
+            WorkflowState::Waiting(WaitReason::Reconciliation)
+        );
+        let actions = runtime.canonical_actions(10).expect("plugin actions");
+        assert_eq!(actions.len(), 2);
+        assert_eq!(
+            actions
+                .iter()
+                .filter(|action| action.state == ActionExecutionState::OutcomeUnknown)
+                .count(),
+            1
+        );
+        let jobs = runtime
+            .due_canonical_reconciliations(Utc::now(), 10)
+            .expect("due plugin reconciliation");
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(
+            decode_governed_filesystem_operation(&jobs[0].adapter)
+                .expect("exact inspection reconciler"),
+            GovernedFilesystemOperation::InspectFile {
+                relative_path: "uncertain.txt".into(),
+                max_bytes: ACTION_RUNNER_CONTENT_MAX_BYTES,
+            }
+        );
+        let job = jobs[0].clone();
+        let target = runtime
+            .canonical_action_for_execution(job.execution_id)
+            .expect("uncertain target query")
+            .expect("uncertain target")
+            .1;
+        drop(runtime);
+
+        let runtime = Arc::new(AppRuntime::open(config).expect("reopen runtime"));
+        let worker = RuntimeActorId::new();
+        let reconciled = reconcile_filesystem_action(
+            &runtime,
+            &PluginLostCreateResponseGateway {
+                calls: action_requests.clone(),
+            },
+            job.id,
+            job.revision,
+            job.lease_generation,
+            target.revision,
+            target.lease_generation,
+            worker,
+            std::cmp::max(Utc::now(), job.next_attempt_at),
+        )
+        .await
+        .expect("reconcile plugin create after runtime reopen");
+        assert_eq!(
+            reconciled.resolution.job.state,
+            mcg_contracts::ReconciliationJobState::Resolved
+        );
+        commit_reconciled_plugin_filesystem_effect(
+            &runtime,
+            &reconciled.resolution,
+            worker,
+            Utc::now(),
+        )
+        .expect("commit independently reconciled plugin effect");
+        settle_reconciled_plugin_action_workflow(
+            &runtime,
+            reconciled.resolution.job.action_id,
+            Utc::now(),
+        )
+        .expect("settle reconciled plugin workflow");
+        assert_eq!(
+            runtime
+                .canonical_workflows()
+                .expect("settled plugin workflow")
+                .into_iter()
+                .next()
+                .expect("canonical plugin workflow")
+                .state,
+            WorkflowState::Failed
+        );
+        let actions = runtime
+            .canonical_actions(10)
+            .expect("reconciled plugin actions");
+        assert_eq!(actions.len(), 3);
+        assert_eq!(
+            actions
+                .iter()
+                .filter(|action| action.state == ActionExecutionState::Committed)
+                .count(),
+            1
+        );
+        assert_eq!(
+            actions
+                .iter()
+                .filter(|action| action.state == ActionExecutionState::NoEffectConfirmed)
+                .count(),
+            2
+        );
+        let requests = action_requests.lock().expect("action requests");
+        assert_eq!(requests.len(), 2);
+        assert_ne!(requests[0].action_id, requests[1].action_id);
+        assert_eq!(
+            requests[0].execution_mode,
+            mcg_action_runner::ActionRunnerExecutionMode::Effect
+        );
+        assert_eq!(
+            requests[1].execution_mode,
+            mcg_action_runner::ActionRunnerExecutionMode::Effect
+        );
+        assert_eq!(requests[0].envelope.effect_class, EffectClass::Reversible);
+        assert_eq!(
+            requests[1].envelope.effect_class,
+            EffectClass::Observational
+        );
+        assert!(matches!(
+            decode_governed_filesystem_operation(&requests[1].operation)
+                .expect("exact reconciliation probe"),
+            GovernedFilesystemOperation::InspectFile { .. }
+        ));
+        drop(requests);
+        assert_eq!(
+            runtime
+                .tool_authorizations(10, Utc::now())
+                .expect("reconciliation Tool permits")
+                .len(),
+            3
         );
     }
 

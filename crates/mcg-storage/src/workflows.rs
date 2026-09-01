@@ -480,9 +480,12 @@ impl SqliteEventStore {
 
     /// Atomically settles one terminal plugin invocation and its internal authority workflow.
     ///
-    /// A successful adapter workflow requires the exact observational plugin action to have
-    /// reached `NoEffectConfirmed`. This internal compatibility workflow is not an ordinary
-    /// cognitive task and therefore does not fabricate model Work/Verify invocations or a
+    /// A successful adapter workflow requires every exact source-bound action to have reached a
+    /// definitive state. Observational actions must be `NoEffectConfirmed`; reversible actions
+    /// must be committed from validated `EffectConfirmed` evidence. A failed invocation with an
+    /// unresolved effect atomically waits for reconciliation instead of falsely closing its
+    /// authority workflow. This internal compatibility workflow is not an ordinary cognitive task
+    /// and therefore does not fabricate model Work/Verify invocations or a
     /// `CompletionCertificate`.
     ///
     /// # Errors
@@ -510,24 +513,32 @@ impl SqliteEventStore {
         let attempt = load_attempt(&transaction, workflow.attempt.attempt_id)?.ok_or(
             StorageError::WorkflowAttemptNotFound(workflow.attempt.attempt_id),
         )?;
-        let expected_terminal = if completed.state == PluginInvocationState::Succeeded {
-            WorkflowState::Succeeded
-        } else if matches!(
-            completed.state,
-            PluginInvocationState::Failed | PluginInvocationState::Uncertain
-        ) {
-            WorkflowState::Failed
-        } else {
+        let successful = completed.state == PluginInvocationState::Succeeded;
+        if !successful
+            && !matches!(
+                completed.state,
+                PluginInvocationState::Failed | PluginInvocationState::Uncertain
+            )
+        {
             return Err(StorageError::InvalidData(
                 "plugin workflow settlement requires a terminal invocation".into(),
             ));
+        }
+        let effects = cancellation_effect_status(&transaction, attempt.attempt_id)?;
+        let target_state = if successful {
+            WorkflowState::Succeeded
+        } else if effects.unresolved == 0 {
+            WorkflowState::Failed
+        } else if effects.reconciliation_required > 0 && effects.quarantined == 0 {
+            WorkflowState::Waiting(WaitReason::Reconciliation)
+        } else {
+            WorkflowState::Quarantined
         };
-        if attempt.state.is_terminal() {
-            if attempt.state != expected_terminal {
-                return Err(StorageError::Conflict(
-                    "terminal plugin workflow contradicts the durable invocation".into(),
-                ));
-            }
+        let exact_state_replay = attempt.state == target_state
+            && (attempt.state.is_terminal()
+                || attempt.state == WorkflowState::Waiting(WaitReason::Reconciliation));
+        if exact_state_replay {
+            // Exact terminal/wait replay is validated by the plugin record mutation below.
         } else if attempt.state != WorkflowState::Running
             || attempt.lease_owner != Some(lease_owner)
             || attempt
@@ -539,11 +550,13 @@ impl SqliteEventStore {
                 "plugin workflow is not held by the settling Root actor".into(),
             ));
         }
-        if completed.state == PluginInvocationState::Succeeded {
+        if successful {
             validate_successful_plugin_action(&transaction, &workflow.attachment, &attempt)?;
         }
         let completed = complete_plugin_invocation_in_transaction(&transaction, completed)?;
-        let settled = if expected_terminal == WorkflowState::Succeeded {
+        let settled = if exact_state_replay {
+            attempt
+        } else if target_state == WorkflowState::Succeeded {
             let verifying = transition_workflow_attempt_in_transaction(
                 &transaction,
                 attempt.attempt_id,
@@ -570,7 +583,7 @@ impl SqliteEventStore {
                 attempt.attempt_id,
                 attempt.revision,
                 attempt.lease_generation,
-                WorkflowState::Failed,
+                target_state,
                 CorrelationId::new(),
                 &format!("fail-plugin-invocation:{}", completed.id),
                 settled_at,
@@ -578,6 +591,73 @@ impl SqliteEventStore {
         };
         transaction.commit()?;
         Ok((completed, settled))
+    }
+
+    /// Closes a failed plugin authority workflow after every uncertain effect is definitively
+    /// reconciled.
+    ///
+    /// The terminal plugin invocation is already durable. This method only advances its internal
+    /// compatibility workflow from `Waiting(Reconciliation)` to `Failed` once no governed action
+    /// remains unresolved; it never redispatches plugin or effect work.
+    ///
+    /// # Errors
+    /// Returns a storage error for substituted source attachment, contradictory invocation state,
+    /// damaged action evidence, or transaction failure.
+    pub fn settle_reconciled_plugin_invocation_workflow(
+        &mut self,
+        invocation_id: PluginInvocationId,
+        settled_at: DateTime<Utc>,
+    ) -> Result<Option<WorkflowAttempt>, StorageError> {
+        let transaction = self.connection.transaction()?;
+        let source_type = stable_type_id("mcg.plugin_invocation_source.v1")?;
+        let Some(attachment) = load_workflow_source_attachment_by_source(
+            &transaction,
+            source_type.as_str(),
+            &invocation_id.to_string(),
+        )?
+        else {
+            return Ok(None);
+        };
+        let workflow = load_agent_turn_workflow_attachment(&transaction, attachment)?;
+        let invocation = load_plugin_invocation(&transaction, invocation_id)?.ok_or_else(|| {
+            StorageError::InvalidData("plugin workflow source invocation is missing".into())
+        })?;
+        if !matches!(
+            invocation.state,
+            PluginInvocationState::Failed | PluginInvocationState::Uncertain
+        ) {
+            return Err(StorageError::Conflict(
+                "reconciled plugin workflow does not have a failed terminal invocation".into(),
+            ));
+        }
+        let attempt = load_attempt(&transaction, workflow.attempt.attempt_id)?.ok_or(
+            StorageError::WorkflowAttemptNotFound(workflow.attempt.attempt_id),
+        )?;
+        if attempt.state == WorkflowState::Failed {
+            transaction.commit()?;
+            return Ok(Some(attempt));
+        }
+        if attempt.state != WorkflowState::Waiting(WaitReason::Reconciliation) {
+            transaction.commit()?;
+            return Ok(None);
+        }
+        let effects = cancellation_effect_status(&transaction, attempt.attempt_id)?;
+        if effects.unresolved > 0 {
+            transaction.commit()?;
+            return Ok(None);
+        }
+        let settled = transition_workflow_attempt_in_transaction(
+            &transaction,
+            attempt.attempt_id,
+            attempt.revision,
+            attempt.lease_generation,
+            WorkflowState::Failed,
+            CorrelationId::new(),
+            &format!("settle-reconciled-plugin-invocation:{invocation_id}"),
+            settled_at,
+        )?;
+        transaction.commit()?;
+        Ok(Some(settled))
     }
 
     /// Lists every completed compatibility lease in one run that is durably attached to an exact
@@ -1090,13 +1170,27 @@ fn validate_successful_plugin_action(
             == Some(&attachment.source);
         runner_action_present |=
             envelope.operation.type_id.as_str() == "mcg.plugin_runner_invocation.v1";
+        let definitive_outcome = match envelope.effect_class {
+            EffectClass::Observational => {
+                execution.state == ActionExecutionState::NoEffectConfirmed
+                    && execution.outcome == Some(EffectOutcome::NoEffectConfirmed)
+            }
+            EffectClass::Reversible => {
+                execution.state == ActionExecutionState::Committed
+                    && matches!(
+                        execution.outcome,
+                        Some(EffectOutcome::EffectConfirmed { .. })
+                    )
+                    && envelope.compensation.is_some()
+                    && envelope.reconciler.is_some()
+            }
+            EffectClass::Consequential | EffectClass::Irreversible => false,
+        };
         if envelope.workflow_id != attempt.workflow_id
             || envelope.attempt_id != attempt.attempt_id
             || envelope.task_contract != attempt.task_contract
-            || envelope.effect_class != EffectClass::Observational
             || execution.action_id != envelope.id
-            || execution.state != ActionExecutionState::NoEffectConfirmed
-            || execution.outcome != Some(EffectOutcome::NoEffectConfirmed)
+            || !definitive_outcome
             || !exact_source
         {
             return Err(StorageError::Conflict(

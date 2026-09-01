@@ -20,6 +20,8 @@ const ACTION_VALIDATED_TYPE_ID: &str = "mcg.action_validated.v1";
 const ACTION_COMMITTED_TYPE_ID: &str = "mcg.action_committed.v1";
 const ACTION_COMPENSATED_TYPE_ID: &str = "mcg.action_compensated.v1";
 const ACTION_EXECUTION_RECOVERED_TYPE_ID: &str = "mcg.action_execution_recovered.v1";
+const ACTION_ABANDONED_TYPE_ID: &str = "mcg.action_abandoned_before_dispatch.v1";
+const RECONCILIATION_PROBE_BINDING_TYPE_ID: &str = "mcg.reconciliation_probe_binding.v1";
 const RECONCILIATION_CLAIMED_TYPE_ID: &str = "mcg.reconciliation_claimed.v1";
 const RECONCILIATION_RESOLVED_TYPE_ID: &str = "mcg.reconciliation_resolved.v1";
 const RECONCILIATION_DEFERRED_TYPE_ID: &str = "mcg.reconciliation_deferred.v1";
@@ -184,6 +186,161 @@ impl SqliteEventStore {
         })
     }
 
+    /// Atomically authorizes one observational-only probe for an exact running reconciliation
+    /// job while the owning workflow remains fenced in `Waiting(Reconciliation)`.
+    ///
+    /// This path cannot authorize the original effect operation. The probe must contain exactly
+    /// the immutable reconciliation adapter and bind the current job/action/execution generation
+    /// in its sole precondition.
+    ///
+    /// # Errors
+    /// Returns a storage error for stale job or workflow state, substituted probe intent,
+    /// non-observational authority, replay substitution, or transaction failure.
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    pub fn authorize_reconciliation_probe_action(
+        &mut self,
+        envelope: &ActionEnvelope,
+        execution: &ActionExecution,
+        job_id: ReconciliationJobId,
+        expected_job_revision: u64,
+        expected_job_generation: u64,
+        expected_target_revision: u64,
+        expected_target_generation: u64,
+        correlation_id: CorrelationId,
+        now: DateTime<Utc>,
+    ) -> Result<ActionAuthorizationReceipt, StorageError> {
+        validate_action_authorization(envelope, execution, now)?;
+        let transaction = self.connection.transaction()?;
+        let existing = if let Some(existing_envelope) = load_envelope_by_idempotency(
+            &transaction,
+            envelope.workflow_id,
+            &envelope.idempotency_key,
+        )? {
+            let existing_execution = load_initial_execution(&transaction, envelope.id)?
+                .ok_or_else(|| {
+                    StorageError::InvalidData(
+                        "reconciliation probe exists without its initial execution".into(),
+                    )
+                })?;
+            let event = load_action_event_by_idempotency(
+                &transaction,
+                existing_envelope.id,
+                &envelope.idempotency_key,
+            )?
+            .ok_or_else(|| {
+                StorageError::InvalidData(
+                    "reconciliation probe exists without its immutable event".into(),
+                )
+            })?;
+            if existing_envelope != *envelope
+                || existing_execution != *execution
+                || event.type_id.as_str() != ACTION_AUTHORIZED_TYPE_ID
+            {
+                return Err(StorageError::Conflict(
+                    "reconciliation probe idempotency key was replayed with different intent"
+                        .into(),
+                ));
+            }
+            Some((existing_envelope, existing_execution, event))
+        } else {
+            None
+        };
+
+        let job = load_reconciliation_job(&transaction, job_id)?.ok_or_else(|| {
+            StorageError::Conflict("reconciliation probe job was not found".into())
+        })?;
+        let target = load_action_execution(&transaction, job.execution_id)?.ok_or_else(|| {
+            StorageError::InvalidData("reconciliation probe target disappeared".into())
+        })?;
+        let target_envelope =
+            load_action_envelope(&transaction, job.action_id)?.ok_or_else(|| {
+                StorageError::InvalidData("reconciliation probe target intent disappeared".into())
+            })?;
+        let workflow = load_workflow_attempt(&transaction, envelope.attempt_id)?
+            .ok_or(StorageError::WorkflowAttemptNotFound(envelope.attempt_id))?;
+        let binding = VersionedPayload::canonical_v1(
+            StableTypeId::parse(RECONCILIATION_PROBE_BINDING_TYPE_ID)
+                .map_err(|error| StorageError::InvalidData(error.to_string()))?,
+            &serde_json::json!({
+                "job_id": job.id,
+                "job_revision": job.revision,
+                "job_generation": job.lease_generation,
+                "target_action_id": job.action_id,
+                "target_execution_id": job.execution_id,
+                "target_revision": target.revision,
+                "target_generation": target.lease_generation,
+                "adapter_hash": envelope.operation_hash,
+            }),
+        )
+        .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        if job.revision != expected_job_revision
+            || job.lease_generation != expected_job_generation
+            || job.state != ReconciliationJobState::Running
+            || job.lease_owner != Some(envelope.actor)
+            || job.lease_expires_at.is_none_or(|expiry| expiry <= now)
+            || target.revision != expected_target_revision
+            || target.lease_generation != expected_target_generation
+            || target.state != ActionExecutionState::Reconciling
+            || target.executor != Some(envelope.actor)
+            || target.action_id != target_envelope.id
+            || target_envelope.workflow_id != envelope.workflow_id
+            || target_envelope.attempt_id != envelope.attempt_id
+            || target_envelope.task_contract != envelope.task_contract
+            || workflow.workflow_id != envelope.workflow_id
+            || workflow.task_contract != envelope.task_contract
+            || workflow.state != WorkflowState::Waiting(mcg_contracts::WaitReason::Reconciliation)
+            || workflow.lease_owner.is_some()
+            || workflow.lease_expires_at.is_some()
+            || envelope.effect_class != EffectClass::Observational
+            || envelope.operation != job.adapter
+            || envelope.preconditions.as_slice() != [binding]
+            || envelope.compensation.is_some()
+            || envelope.compensates_action.is_some()
+            || envelope.reconciler.is_some()
+            || envelope.reconciliation_deadline.is_some()
+        {
+            return Err(StorageError::Conflict(
+                "reconciliation probe does not bind the exact fenced workflow and running job"
+                    .into(),
+            ));
+        }
+
+        if let Some((existing_envelope, existing_execution, event)) = existing {
+            transaction.commit()?;
+            return Ok(ActionAuthorizationReceipt {
+                envelope: existing_envelope,
+                execution: existing_execution,
+                event,
+            });
+        }
+
+        insert_action_envelope(&transaction, envelope)?;
+        insert_action_execution(&transaction, execution)?;
+        let event = action_event(
+            envelope.id,
+            Some(execution.id),
+            1,
+            correlation_id,
+            None,
+            &envelope.idempotency_key,
+            ACTION_AUTHORIZED_TYPE_ID,
+            now,
+            &serde_json::json!({
+                "envelope": envelope,
+                "execution": execution,
+                "reconciliation_job": job,
+                "target_execution": target,
+            }),
+        )?;
+        insert_action_event(&transaction, &event)?;
+        transaction.commit()?;
+        Ok(ActionAuthorizationReceipt {
+            envelope: envelope.clone(),
+            execution: execution.clone(),
+            event,
+        })
+    }
+
     /// Loads immutable action intent.
     ///
     /// # Errors
@@ -212,6 +369,26 @@ impl SqliteEventStore {
         execution_id: ActionExecutionId,
     ) -> Result<Option<ActionExecution>, StorageError> {
         load_action_execution(&self.connection, execution_id)
+    }
+
+    /// Loads the initial execution projection for one immutable action identity.
+    ///
+    /// # Errors
+    /// Returns a storage error for query or stored-data failures.
+    pub fn action_execution_for_action(
+        &self,
+        action_id: mcg_contracts::ActionId,
+    ) -> Result<Option<ActionExecution>, StorageError> {
+        self.connection
+            .query_row(
+                "SELECT execution_json FROM action_executions
+                 WHERE action_id = ?1 ORDER BY attempt_number LIMIT 1",
+                [action_id.to_string()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .map(|json| serde_json::from_str(&json).map_err(StorageError::from))
+            .transpose()
     }
 
     /// Returns immutable ordered action history.
@@ -397,6 +574,57 @@ impl SqliteEventStore {
                 execution.executor = Some(executor);
                 execution.updated_at = now;
                 Ok(serde_json::json!({"executor": executor}))
+            },
+        )
+    }
+
+    /// Settles an authorized observational action as proven no-effect before dispatch.
+    ///
+    /// This is used to retire a reconciliation probe whose job lease was fenced before the probe
+    /// could be dispatched. Effectful or already-dispatched actions are never eligible.
+    ///
+    /// # Errors
+    /// Returns a storage error for stale state, effectful intent, replay substitution, or commit
+    /// failure.
+    #[allow(clippy::too_many_arguments)]
+    pub fn abandon_authorized_observational_action(
+        &mut self,
+        execution_id: ActionExecutionId,
+        expected_revision: u64,
+        expected_generation: u64,
+        correlation_id: CorrelationId,
+        idempotency_key: &str,
+        now: DateTime<Utc>,
+    ) -> Result<ActionExecution, StorageError> {
+        mutate_action_execution(
+            &mut self.connection,
+            execution_id,
+            expected_revision,
+            expected_generation,
+            correlation_id,
+            idempotency_key,
+            ACTION_ABANDONED_TYPE_ID,
+            now,
+            |original| {
+                original.state == ActionExecutionState::NoEffectConfirmed
+                    && original.outcome == Some(EffectOutcome::NoEffectConfirmed)
+            },
+            |execution, envelope| {
+                if execution.state != ActionExecutionState::Authorized
+                    || envelope.effect_class != EffectClass::Observational
+                {
+                    return Err(StorageError::Conflict(
+                        "only an undispatched observational action can be abandoned".into(),
+                    ));
+                }
+                execution.state = ActionExecutionState::NoEffectConfirmed;
+                execution.revision = increment(execution.revision, "action revision")?;
+                execution.lease_generation =
+                    increment(execution.lease_generation, "action generation")?;
+                execution.executor = None;
+                execution.outcome = Some(EffectOutcome::NoEffectConfirmed);
+                execution.updated_at = now;
+                Ok(serde_json::json!({"reason": "reconciliation probe lease was fenced"}))
             },
         )
     }
