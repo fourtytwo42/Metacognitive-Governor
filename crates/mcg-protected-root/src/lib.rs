@@ -47,9 +47,11 @@ use mcg_contracts::{
     PermitId, PolicyBinding, RUNTIME_INVOCATION_REQUEST_HASH_DOMAIN, ReconciliationJob,
     ReconciliationJobId, ReconciliationObservation, RequestId, RootStatus, RpcEnvelope,
     RuntimeActorId, RuntimeIdentity, RuntimeInstanceId, RuntimeInvocationRequest,
-    RuntimeInvocationResult, SecretHandleId, SourceRef, StableTypeId, VersionedPayload,
-    WorkflowAttempt, WorkflowCancelRequest, WorkflowId, WorkflowState, canonical_contract_hash,
-    decode_canonical_cbor_v1,
+    RuntimeInvocationResult, SandboxCapabilityProfile, SecretHandleId, SourceRef, StableTypeId,
+    TOOL_POLICY_HASH_DOMAIN, ToolInvocationPermit, ToolInvocationProposal, ToolManifest,
+    ToolPolicy, VersionedPayload, WorkflowAttempt, WorkflowCancelRequest, WorkflowId,
+    WorkflowState, canonical_contract_hash, decode_canonical_cbor_v1,
+    tool_invocation_proposal_hash,
 };
 use mcg_domain::{AgentLeaseId, EvaluationId};
 use mcg_platform::{
@@ -402,6 +404,128 @@ pub fn authorize_runtime_model_egress(
         })
         .collect::<Vec<_>>();
     Ok(runtime.authorize_model_egress(proposal, policy, &permit, &bindings, now)?)
+}
+
+/// Applies the Stage 6 Tool manifest and capability-intersection kernel inside Protected Root.
+///
+/// This function issues no ambient authority: the exact manifest version, argument artifact,
+/// action/workflow fences, Runtime identity, effect, scopes, resource ceilings, sandbox
+/// guarantees, platform, Root policy, and expiry are all bound into one immutable permit.
+/// Registration or capability-index presence alone is never sufficient.
+///
+/// # Errors
+/// Returns an error for malformed, substituted, over-scoped, under-isolated, unsupported,
+/// expired, or unauthenticated proposals.
+pub fn authorize_runtime_tool_capability(
+    proposal: &ToolInvocationProposal,
+    expected_runtime_identity: &RuntimeIdentity,
+    manifest: &ToolManifest,
+    policy: &ToolPolicy,
+    available_sandbox: SandboxCapabilityProfile,
+    platform: mcg_contracts::ExecutionPlatform,
+    now: chrono::DateTime<Utc>,
+) -> Result<ToolInvocationPermit, ProtectedRootError> {
+    proposal.validate()?;
+    expected_runtime_identity.validate()?;
+    manifest.validate()?;
+    policy.validate()?;
+    if proposal.runtime_identity != *expected_runtime_identity {
+        return Err(StorageError::Conflict(
+            "tool proposal does not belong to the authenticated Runtime identity".into(),
+        )
+        .into());
+    }
+
+    let manifest_ref = manifest.versioned_ref()?;
+    if proposal.tool_manifest != manifest_ref
+        || !policy.allowed_manifests.contains(&manifest_ref)
+        || !manifest.platform_support.contains(&platform)
+    {
+        return Err(StorageError::Conflict(
+            "tool proposal does not resolve to an exact Root-allowed manifest and platform".into(),
+        )
+        .into());
+    }
+    if !manifest.allows_effect(proposal.requested_effect_class)
+        || !policy.allows_effect(proposal.requested_effect_class)
+    {
+        return Err(StorageError::Conflict(
+            "tool proposal effect exceeds manifest or Root policy".into(),
+        )
+        .into());
+    }
+    if proposal.requested_capabilities != manifest.required_capabilities
+        || !proposal
+            .requested_capabilities
+            .is_subset_of(&policy.maximum_capabilities)
+    {
+        return Err(StorageError::Conflict(
+            "tool proposal capabilities differ from the manifest or exceed Root policy".into(),
+        )
+        .into());
+    }
+    if !proposal
+        .requested_limits
+        .fits_within(manifest.resource_ceiling)
+        || !proposal.requested_limits.fits_within(policy.maximum_limits)
+    {
+        return Err(StorageError::Conflict(
+            "tool proposal resource limits exceed the manifest or Root policy".into(),
+        )
+        .into());
+    }
+    if proposal.required_sandbox != manifest.sandbox_requirement
+        || !available_sandbox.satisfies(proposal.required_sandbox)
+    {
+        return Err(StorageError::Conflict(
+            "host sandbox guarantees do not satisfy the exact Tool manifest".into(),
+        )
+        .into());
+    }
+    let maximum_lifetime = i64::try_from(policy.maximum_permit_lifetime_seconds)
+        .map_err(|_| StorageError::InvalidData("tool permit lifetime is invalid".into()))?;
+    if proposal.deadline <= now || proposal.deadline > now + Duration::seconds(maximum_lifetime) {
+        return Err(
+            StorageError::Conflict("tool proposal deadline exceeds Root policy".into()).into(),
+        );
+    }
+
+    let policy_payload = VersionedPayload::canonical_v1(
+        StableTypeId::parse(ToolPolicy::TYPE_ID)?,
+        &serde_json::to_value(policy)?,
+    )?;
+    let policy_binding = PolicyBinding {
+        content_hash: policy_payload.content_hash(TOOL_POLICY_HASH_DOMAIN)?,
+        payload: policy_payload,
+    };
+    let permit = ToolInvocationPermit {
+        id: PermitId::new(),
+        action_id: proposal.action_id,
+        attempt_id: proposal.attempt_id,
+        attempt_revision: proposal.attempt_revision,
+        lease_generation: proposal.lease_generation,
+        runtime_actor: proposal.runtime_actor,
+        runtime_identity: proposal.runtime_identity.clone(),
+        task_contract: proposal.task_contract.clone(),
+        tool_manifest: manifest_ref,
+        proposal_hash: tool_invocation_proposal_hash(proposal)?,
+        argument_hash: proposal.argument_hash.clone(),
+        allowed_effect_class: proposal.requested_effect_class,
+        capabilities: proposal.requested_capabilities.clone(),
+        limits: proposal.requested_limits,
+        sandbox: available_sandbox,
+        policy: policy_binding,
+        expires_at: proposal.deadline,
+        secret_handles: proposal
+            .requested_capabilities
+            .secret_slots
+            .iter()
+            .map(|_| SecretHandleId::new())
+            .collect(),
+        issued_at: now,
+    };
+    permit.validate()?;
+    Ok(permit)
 }
 
 /// Canonically binds the exact provider request bytes authorized by Root.
@@ -6435,6 +6559,181 @@ mod tests {
                 &under_disclosed,
                 &runtime_identity,
                 &policy,
+                at,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn root_tool_capability_kernel_intersects_manifest_policy_and_host_guarantees() {
+        use mcg_contracts::{
+            ExecutionPlatform, FilesystemAccess, FilesystemCapability, IsolationGuarantee,
+            NetworkCapability, SandboxCapabilityProfile, ToolCapabilitySet, ToolInvocationProposal,
+            ToolManifest, ToolManifestId, ToolPolicy, ToolResourceLimits,
+        };
+
+        let at = Utc::now();
+        let runtime_identity = RuntimeIdentity {
+            instance_id: RuntimeInstanceId::new(),
+            build_hash: workflow_hash("tool-kernel-runtime"),
+            protocol_version: PROTOCOL_V1,
+            started_at: at - chrono::Duration::seconds(1),
+        };
+        let required_capabilities = ToolCapabilitySet {
+            filesystem: vec![FilesystemCapability {
+                root: "workspace".into(),
+                access: FilesystemAccess::Read,
+            }],
+            network: vec![NetworkCapability {
+                destination: "https://tool.example.test".into(),
+            }],
+            secret_slots: vec![
+                StableTypeId::parse("mcg.tool_secret.fixture.v1").expect("secret slot"),
+            ],
+            process_spawn: false,
+        };
+        let required_sandbox = SandboxCapabilityProfile {
+            filesystem_scope: IsolationGuarantee::Hard,
+            network: IsolationGuarantee::Hard,
+            process_tree: IsolationGuarantee::BestEffort,
+            secrets: IsolationGuarantee::Hard,
+            environment: IsolationGuarantee::Hard,
+            resources: IsolationGuarantee::BestEffort,
+            protected_paths: IsolationGuarantee::Hard,
+        };
+        let limits = ToolResourceLimits {
+            timeout_ms: 30_000,
+            max_output_bytes: 1_048_576,
+            max_memory_bytes: 256 * 1_048_576,
+            max_child_processes: 1,
+        };
+        let manifest = ToolManifest {
+            id: ToolManifestId::new(),
+            version: 1,
+            name: "fixture.read".into(),
+            summary: "Read one governed resource".into(),
+            runner: root_invocation_source("tool-runner"),
+            input_schema: root_invocation_source("tool-input-schema"),
+            output_schema: root_invocation_source("tool-output-schema"),
+            maximum_effect_class: EffectClass::Reversible,
+            required_capabilities: required_capabilities.clone(),
+            resource_ceiling: limits,
+            sandbox_requirement: required_sandbox,
+            platform_support: vec![ExecutionPlatform::Windows, ExecutionPlatform::Linux],
+            receipt_semantics: StableTypeId::parse("mcg.tool_receipt.fixture.v1")
+                .expect("receipt type"),
+            reconciler: Some(root_invocation_source("tool-reconciler")),
+        };
+        let argument_hash = workflow_hash("tool-arguments");
+        let proposal = ToolInvocationProposal {
+            action_id: ActionId::new(),
+            attempt_id: AttemptId::new(),
+            attempt_revision: 4,
+            lease_generation: 2,
+            runtime_actor: RuntimeActorId::new(),
+            runtime_identity: runtime_identity.clone(),
+            task_contract: VersionedRef {
+                id: TaskContractId::new(),
+                version: 1,
+                content_hash: workflow_hash("tool-task-contract"),
+            },
+            tool_manifest: manifest.versioned_ref().expect("manifest ref"),
+            arguments: ArtifactRef {
+                content_hash: argument_hash.clone(),
+                media_type: "application/json".into(),
+                byte_length: 2,
+            },
+            argument_hash,
+            requested_effect_class: EffectClass::Observational,
+            requested_capabilities: required_capabilities.clone(),
+            requested_limits: limits,
+            required_sandbox,
+            deadline: at + chrono::Duration::minutes(2),
+        };
+        let policy = ToolPolicy {
+            allowed_manifests: vec![manifest.versioned_ref().expect("allowed manifest")],
+            maximum_effect_class: EffectClass::Consequential,
+            maximum_capabilities: ToolCapabilitySet {
+                filesystem: vec![FilesystemCapability {
+                    root: "workspace".into(),
+                    access: FilesystemAccess::Write,
+                }],
+                network: required_capabilities.network.clone(),
+                secret_slots: required_capabilities.secret_slots.clone(),
+                process_spawn: false,
+            },
+            maximum_limits: ToolResourceLimits {
+                timeout_ms: 60_000,
+                max_output_bytes: 2 * 1_048_576,
+                max_memory_bytes: 512 * 1_048_576,
+                max_child_processes: 2,
+            },
+            maximum_permit_lifetime_seconds: 300,
+        };
+        let available = SandboxCapabilityProfile {
+            filesystem_scope: IsolationGuarantee::Hard,
+            network: IsolationGuarantee::Hard,
+            process_tree: IsolationGuarantee::Hard,
+            secrets: IsolationGuarantee::Hard,
+            environment: IsolationGuarantee::Hard,
+            resources: IsolationGuarantee::Hard,
+            protected_paths: IsolationGuarantee::Hard,
+        };
+        let permit = authorize_runtime_tool_capability(
+            &proposal,
+            &runtime_identity,
+            &manifest,
+            &policy,
+            available,
+            ExecutionPlatform::Windows,
+            at,
+        )
+        .expect("Root tool permit");
+        assert_eq!(permit.action_id, proposal.action_id);
+        assert_eq!(permit.tool_manifest, proposal.tool_manifest);
+        assert_eq!(permit.capabilities, required_capabilities);
+        assert_eq!(permit.secret_handles.len(), 1);
+        assert_eq!(permit.sandbox, available);
+
+        let mut weak_host = available;
+        weak_host.network = IsolationGuarantee::BestEffort;
+        assert!(
+            authorize_runtime_tool_capability(
+                &proposal,
+                &runtime_identity,
+                &manifest,
+                &policy,
+                weak_host,
+                ExecutionPlatform::Windows,
+                at,
+            )
+            .is_err(),
+            "a host below any required sandbox dimension must fail closed"
+        );
+
+        let mut substituted = proposal.clone();
+        substituted.tool_manifest.content_hash = workflow_hash("substituted-tool-manifest");
+        assert!(
+            authorize_runtime_tool_capability(
+                &substituted,
+                &runtime_identity,
+                &manifest,
+                &policy,
+                available,
+                ExecutionPlatform::Windows,
+                at,
+            )
+            .is_err()
+        );
+        assert!(
+            authorize_runtime_tool_capability(
+                &proposal,
+                &runtime_identity,
+                &manifest,
+                &policy,
+                available,
+                ExecutionPlatform::Macos,
                 at,
             )
             .is_err()

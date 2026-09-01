@@ -85,12 +85,27 @@ stable_uuid!(CompletionCertificateId);
 stable_uuid!(ModelRunId);
 stable_uuid!(PermitId);
 stable_uuid!(SecretHandleId);
+stable_uuid!(ToolManifestId);
+stable_uuid!(SkillManifestId);
 stable_uuid!(RecordId);
 stable_uuid!(EvaluationSeedId);
 stable_uuid!(ExperimentSpecId);
 stable_uuid!(RequestId);
 stable_uuid!(CorrelationId);
 stable_uuid!(SessionId);
+
+mod capabilities;
+
+pub use capabilities::{
+    CAPABILITY_PROFILE_HASH_DOMAIN, CapabilityEstimate, CapabilityKind, CapabilityProfile,
+    ExecutionPlatform, FilesystemAccess, FilesystemCapability, IsolationGuarantee,
+    NetworkCapability, SKILL_MANIFEST_HASH_DOMAIN, SandboxCapabilityProfile, SkillManifest,
+    SkillStatus, TOOL_INVOCATION_PERMIT_HASH_DOMAIN, TOOL_INVOCATION_PROPOSAL_HASH_DOMAIN,
+    TOOL_MANIFEST_HASH_DOMAIN, TOOL_POLICY_HASH_DOMAIN, ToolCapabilitySet, ToolInvocationPermit,
+    ToolInvocationProposal, ToolManifest, ToolPolicy, ToolResourceLimits, capability_profile_hash,
+    skill_manifest_hash, tool_invocation_permit_hash, tool_invocation_proposal_hash,
+    tool_manifest_hash,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
