@@ -63,6 +63,15 @@ pub struct AgentTurnWorkflowAuthority {
     pub legacy_lease: AgentLease,
 }
 
+/// Canonical state proposed by the compatibility-agent transaction that owns the
+/// corresponding legacy projection update.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AgentTurnWorkflowSettlement {
+    WaitingForApproval,
+    WorkCompleted,
+    Failed,
+}
+
 /// Computes the authoritative canonical hash for a task-contract version.
 ///
 /// # Errors
@@ -278,6 +287,11 @@ impl SqliteEventStore {
         let current = load_attempt(&transaction, workflow.attempt.attempt_id)?.ok_or(
             StorageError::WorkflowAttemptNotFound(workflow.attempt.attempt_id),
         )?;
+        let current = if current.state == WorkflowState::Waiting(WaitReason::Approval) {
+            resume_approval_wait_in_transaction(&transaction, current, lease_id, now)?
+        } else {
+            current
+        };
         let attempt = match current.state {
             WorkflowState::Ready => claim_workflow_attempt_in_transaction(
                 &transaction,
@@ -287,7 +301,10 @@ impl SqliteEventStore {
                 lease_owner,
                 lease_expires_at,
                 CorrelationId::new(),
-                &format!("claim-agent-lease:{lease_id}:{lease_owner}"),
+                &format!(
+                    "claim-agent-lease:{lease_id}:{lease_owner}:{}:{}",
+                    current.revision, current.lease_generation
+                ),
                 now,
             )?,
             WorkflowState::Running
@@ -347,6 +364,131 @@ fn attach_active_agent_lease_workflow_in_transaction(
         attachment,
         creation_event,
     })
+}
+
+fn resume_approval_wait_in_transaction(
+    transaction: &Transaction<'_>,
+    mut attempt: WorkflowAttempt,
+    lease_id: AgentLeaseId,
+    now: DateTime<Utc>,
+) -> Result<WorkflowAttempt, StorageError> {
+    if attempt.state != WorkflowState::Waiting(WaitReason::Approval) {
+        return Err(StorageError::Conflict(
+            "only an approval-waiting workflow can resume through this path".into(),
+        ));
+    }
+    let expected_revision = attempt.revision;
+    let expected_generation = attempt.lease_generation;
+    let previous_state = attempt.state;
+    attempt.state = WorkflowState::Ready;
+    attempt.revision = increment(attempt.revision, "workflow revision")?;
+    attempt.updated_at = now;
+    update_attempt_cas(
+        transaction,
+        &attempt,
+        expected_revision,
+        expected_generation,
+    )?;
+    let (sequence, cause) = next_event_position(transaction, attempt.workflow_id)?;
+    let event = workflow_event(
+        &attempt,
+        sequence,
+        CorrelationId::new(),
+        cause,
+        &format!("resume-agent-lease:{lease_id}:{expected_revision}:{expected_generation}"),
+        WORKFLOW_TRANSITIONED_TYPE_ID,
+        now,
+        &serde_json::json!({
+            "attempt_id": attempt.attempt_id,
+            "from": previous_state,
+            "to": attempt.state,
+            "cancellation_effects": null,
+            "compatibility_agent_lease_id": lease_id,
+            "attempt": attempt,
+        }),
+    )?;
+    insert_event(transaction, &event)?;
+    Ok(attempt)
+}
+
+/// Advances an attached compatibility-agent workflow inside the caller's legacy
+/// settlement transaction. Absence of an attachment preserves pre-cutover
+/// compatibility behavior; a present attachment is authoritative and therefore
+/// fails the entire transaction if its canonical lease is stale or substituted.
+pub(crate) fn settle_attached_agent_turn_workflow_in_transaction(
+    transaction: &Transaction<'_>,
+    lease_id: AgentLeaseId,
+    settlement: AgentTurnWorkflowSettlement,
+    now: DateTime<Utc>,
+) -> Result<Option<WorkflowAttempt>, StorageError> {
+    let source_type = stable_type_id("mcg.agent_turn_source.v1")?;
+    let Some(attachment) = load_workflow_source_attachment_by_source(
+        transaction,
+        source_type.as_str(),
+        &lease_id.to_string(),
+    )?
+    else {
+        return Ok(None);
+    };
+    let mut workflow = load_agent_turn_workflow_attachment(transaction, attachment)?;
+    let attempt = &mut workflow.attempt;
+    let active_running_authority = attempt.state == WorkflowState::Running
+        && attempt.lease_owner.is_some()
+        && attempt.lease_expires_at.is_some_and(|expiry| expiry > now);
+    let approval_wait_authority = settlement == AgentTurnWorkflowSettlement::Failed
+        && attempt.state == WorkflowState::Waiting(WaitReason::Approval)
+        && attempt.lease_owner.is_none()
+        && attempt.lease_expires_at.is_none();
+    if !active_running_authority && !approval_wait_authority {
+        return Err(StorageError::Conflict(
+            "attached canonical workflow authority changed before agent-turn settlement".into(),
+        ));
+    }
+    let expected_revision = attempt.revision;
+    let expected_generation = attempt.lease_generation;
+    let previous_state = attempt.state;
+    let (next_state, label) = match settlement {
+        AgentTurnWorkflowSettlement::WaitingForApproval => {
+            (WorkflowState::Waiting(WaitReason::Approval), "approval")
+        }
+        AgentTurnWorkflowSettlement::WorkCompleted => (WorkflowState::Verifying, "work-completed"),
+        AgentTurnWorkflowSettlement::Failed => (WorkflowState::Failed, "failed"),
+    };
+    if !previous_state.can_transition_to(next_state) {
+        return Err(StorageError::Conflict(format!(
+            "attached compatibility workflow cannot settle {previous_state:?} -> {next_state:?}"
+        )));
+    }
+    attempt.state = next_state;
+    attempt.revision = increment(attempt.revision, "workflow revision")?;
+    if next_state != WorkflowState::Verifying {
+        attempt.lease_owner = None;
+        attempt.lease_expires_at = None;
+        attempt.heartbeat_at = None;
+    }
+    attempt.updated_at = now;
+    update_attempt_cas(transaction, attempt, expected_revision, expected_generation)?;
+    let (sequence, cause) = next_event_position(transaction, attempt.workflow_id)?;
+    let event = workflow_event(
+        attempt,
+        sequence,
+        CorrelationId::new(),
+        cause,
+        &format!("settle-agent-lease:{lease_id}:{label}:{expected_revision}:{expected_generation}"),
+        WORKFLOW_TRANSITIONED_TYPE_ID,
+        now,
+        &serde_json::json!({
+            "attempt_id": attempt.attempt_id,
+            "from": previous_state,
+            "to": next_state,
+            "cancellation_effects": null,
+            "compatibility_agent_lease_id": lease_id,
+            "settlement": label,
+            "attempt": attempt,
+        }),
+    )?;
+    insert_event(transaction, &event)?;
+    Ok(Some(attempt.clone()))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2335,17 +2477,22 @@ fn increment(value: u64, label: &str) -> Result<u64, StorageError> {
 
 #[cfg(test)]
 mod tests {
+    use crate::AgentTurnDisposition;
     use chrono::TimeZone;
     use mcg_agents::{
-        AGENT_RUN_SCHEMA_VERSION, ConfidenceEstimate, ExecutivePlanner, LeaseBudget,
-        OrganizationGenome, OrganizationalMetrics, PlannedWork, PlanningRequest, RoleKind,
-        SuccessCondition, TaskComplexity,
+        AGENT_RUN_SCHEMA_VERSION, AgentTurnResult, ConfidenceEstimate, ExecutivePlanner,
+        LeaseBudget, ModelCallEvidence, OrganizationGenome, OrganizationalMetrics, PlannedWork,
+        PlanningRequest, RoleKind, SuccessCondition, TaskComplexity,
     };
     use mcg_contracts::{
         ConfigurationId, ContractClause, HashAlgorithm, PolicyBinding, RetryPolicy, SourceRef,
         VersionedRef, WORKFLOW_SOURCE_SNAPSHOT_HASH_DOMAIN, WaitReason,
     };
     use mcg_domain::{AgentInstanceId, RunId};
+    use mcg_providers::{
+        CONTRACT_VERSION, CostEstimate, ModelResponse, PlannedRoute, PriceProvenance,
+        ProviderModelRef, Usage,
+    };
 
     use super::*;
 
@@ -2656,13 +2803,29 @@ mod tests {
             run_id: RunId::new(),
             task: task.clone(),
             complexity: TaskComplexity::Atomic,
-            work: vec![PlannedWork::atomic(
-                "produce one governed answer",
-                RoleKind::Coder,
-                vec![SuccessCondition::Custom {
-                    description: "return verified output".into(),
-                }],
-            )],
+            work: vec![
+                PlannedWork::atomic(
+                    "produce one governed answer",
+                    RoleKind::Coder,
+                    vec![SuccessCondition::Custom {
+                        description: "return verified output".into(),
+                    }],
+                ),
+                PlannedWork::atomic(
+                    "exercise a governed failure",
+                    RoleKind::Coder,
+                    vec![SuccessCondition::Custom {
+                        description: "retain exact failure evidence".into(),
+                    }],
+                ),
+                PlannedWork::atomic(
+                    "reject a stale governed settlement",
+                    RoleKind::Coder,
+                    vec![SuccessCondition::Custom {
+                        description: "preserve the legacy authority on rollback".into(),
+                    }],
+                ),
+            ],
             require_independent_evaluation: false,
         };
         let plan = ExecutivePlanner::default()
@@ -2799,6 +2962,238 @@ mod tests {
             authority.workflow.attempt,
             "failed revalidation cannot mutate canonical authority"
         );
+
+        store
+            .settle_agent_turn_error(
+                instance.id,
+                lease.id,
+                AgentTurnDisposition::Waiting,
+                "approval_required",
+                observed_at + chrono::Duration::seconds(2),
+            )
+            .expect("atomically wait in both projections");
+        let waiting = store
+            .workflow_attempt(authority.workflow.attempt.attempt_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(waiting.state, WorkflowState::Waiting(WaitReason::Approval));
+        assert_eq!(waiting.revision, 3);
+        assert_eq!(waiting.lease_generation, 1);
+        assert!(waiting.lease_owner.is_none());
+
+        store
+            .transition_task(task.id, TaskState::Active)
+            .expect("resume compatibility task");
+        store
+            .transition_agent_run(
+                run.id,
+                AgentRunState::Running,
+                OrganizationalMetrics::default(),
+                observed_at + chrono::Duration::seconds(3),
+            )
+            .expect("resume compatibility run");
+        store
+            .transition_agent_instance(
+                instance.id,
+                AgentState::Running,
+                instance.confidence,
+                observed_at + chrono::Duration::seconds(3),
+            )
+            .expect("resume compatibility instance");
+        let resumed = store
+            .claim_active_agent_lease_workflow(
+                lease.id,
+                owner,
+                120,
+                observed_at + chrono::Duration::seconds(3),
+            )
+            .expect("atomically resume and reclaim canonical work");
+        assert_eq!(resumed.workflow.attempt.state, WorkflowState::Running);
+        assert_eq!(resumed.workflow.attempt.revision, 5);
+        assert_eq!(resumed.workflow.attempt.lease_generation, 2);
+        assert_eq!(resumed.workflow.attempt.lease_owner, Some(owner));
+
+        let target = ProviderModelRef {
+            provider_id: "fixture-provider".into(),
+            model_id: "fixture-model".into(),
+        };
+        let response = ModelResponse {
+            contract_version: CONTRACT_VERSION,
+            id: "fixture-response".into(),
+            model: target.model_id.clone(),
+            status: Some("completed".into()),
+            output: Vec::new(),
+            usage: Usage {
+                input_tokens: 8,
+                output_tokens: 4,
+                total_tokens: 12,
+                ..Usage::default()
+            },
+            provider_metadata: serde_json::Value::Null,
+        };
+        let result = AgentTurnResult {
+            pinned_route: PlannedRoute {
+                target: target.clone(),
+                estimated_cost: CostEstimate {
+                    amount_usd: None,
+                    provenance: PriceProvenance::Unknown,
+                },
+            },
+            response: response.clone(),
+            model_calls: vec![ModelCallEvidence {
+                target,
+                response_id: response.id.clone(),
+                usage: response.usage.clone(),
+                cost_usd: None,
+                duration_ms: 10,
+            }],
+            tool_outcomes: Vec::new(),
+        };
+        store
+            .commit_agent_turn(
+                instance.id,
+                lease.id,
+                &result,
+                instance.confidence,
+                None,
+                observed_at + chrono::Duration::seconds(4),
+            )
+            .expect("atomically persist Work and begin Verify");
+        let verifying = store
+            .workflow_attempt(authority.workflow.attempt.attempt_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(verifying.state, WorkflowState::Verifying);
+        assert_eq!(verifying.revision, 6);
+        assert_eq!(verifying.lease_generation, 2);
+        assert_eq!(verifying.lease_owner, Some(owner));
+        assert_eq!(
+            store.workflow_events(verifying.workflow_id).unwrap().len(),
+            6
+        );
+
+        let stale_instance = AgentInstance {
+            id: AgentInstanceId::new(),
+            role_id: plan.items[2].assigned_role,
+            state: AgentState::Created,
+            model: None,
+            created_at: observed_at + chrono::Duration::seconds(5),
+            updated_at: observed_at + chrono::Duration::seconds(5),
+            ..instance.clone()
+        };
+        let stale_lease = AgentLease {
+            id: AgentLeaseId::new(),
+            instance_id: stale_instance.id,
+            work_item_id: plan.items[2].id,
+            goal: plan.items[2].goal.clone(),
+            state: AgentLeaseState::Active,
+            acquired_at: observed_at + chrono::Duration::seconds(5),
+            expires_at: observed_at + chrono::Duration::minutes(5),
+            heartbeat_at: observed_at + chrono::Duration::seconds(5),
+            ..lease.clone()
+        };
+        store
+            .dispatch_agent_work(
+                &stale_instance,
+                &stale_lease,
+                observed_at + chrono::Duration::seconds(5),
+            )
+            .expect("dispatch stale-settlement fixture");
+        let stale_authority = store
+            .claim_active_agent_lease_workflow(
+                stale_lease.id,
+                owner,
+                120,
+                observed_at + chrono::Duration::seconds(5),
+            )
+            .expect("claim stale-settlement fixture");
+        store
+            .transition_workflow_attempt(
+                stale_authority.workflow.attempt.attempt_id,
+                stale_authority.workflow.attempt.revision,
+                stale_authority.workflow.attempt.lease_generation,
+                WorkflowState::Failed,
+                CorrelationId::new(),
+                "advance-before-legacy-settlement",
+                observed_at + chrono::Duration::seconds(6),
+            )
+            .expect("advance canonical authority first");
+        assert!(matches!(
+            store.settle_agent_turn_error(
+                stale_instance.id,
+                stale_lease.id,
+                AgentTurnDisposition::Failed,
+                "late_provider_failure",
+                observed_at + chrono::Duration::seconds(7),
+            ),
+            Err(StorageError::Conflict(_))
+        ));
+        assert_eq!(
+            store
+                .agent_instance(stale_instance.id)
+                .unwrap()
+                .unwrap()
+                .state,
+            AgentState::Running,
+            "canonical conflict must roll back the legacy instance settlement"
+        );
+        assert_eq!(
+            store.agent_lease(stale_lease.id).unwrap().unwrap().state,
+            AgentLeaseState::Active,
+            "canonical conflict must retain the legacy lease for recovery"
+        );
+
+        let failed_instance = AgentInstance {
+            id: AgentInstanceId::new(),
+            role_id: plan.items[1].assigned_role,
+            state: AgentState::Created,
+            model: None,
+            created_at: observed_at + chrono::Duration::seconds(8),
+            updated_at: observed_at + chrono::Duration::seconds(8),
+            ..instance.clone()
+        };
+        let failed_lease = AgentLease {
+            id: AgentLeaseId::new(),
+            instance_id: failed_instance.id,
+            work_item_id: plan.items[1].id,
+            goal: plan.items[1].goal.clone(),
+            state: AgentLeaseState::Active,
+            acquired_at: observed_at + chrono::Duration::seconds(8),
+            expires_at: observed_at + chrono::Duration::minutes(5),
+            heartbeat_at: observed_at + chrono::Duration::seconds(8),
+            ..lease.clone()
+        };
+        store
+            .dispatch_agent_work(
+                &failed_instance,
+                &failed_lease,
+                observed_at + chrono::Duration::seconds(8),
+            )
+            .expect("dispatch second compatibility item");
+        let failed_authority = store
+            .claim_active_agent_lease_workflow(
+                failed_lease.id,
+                owner,
+                120,
+                observed_at + chrono::Duration::seconds(8),
+            )
+            .expect("claim second canonical item");
+        store
+            .settle_agent_turn_error(
+                failed_instance.id,
+                failed_lease.id,
+                AgentTurnDisposition::Failed,
+                "provider_failure",
+                observed_at + chrono::Duration::seconds(9),
+            )
+            .expect("atomically fail both projections");
+        let failed = store
+            .workflow_attempt(failed_authority.workflow.attempt.attempt_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(failed.state, WorkflowState::Failed);
+        assert_eq!(failed.revision, 3);
+        assert!(failed.lease_owner.is_none());
     }
 
     #[test]

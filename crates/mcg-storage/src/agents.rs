@@ -17,7 +17,10 @@ use mcg_tools::{ApprovalRequest, ApprovalResolution, ApprovalState, ToolOutcome}
 use rusqlite::{OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 
-use crate::{SqliteEventStore, StorageError};
+use crate::{
+    SqliteEventStore, StorageError,
+    workflows::{AgentTurnWorkflowSettlement, settle_attached_agent_turn_workflow_in_transaction},
+};
 
 fn ensure_assignable_organization(
     store: &SqliteEventStore,
@@ -666,6 +669,12 @@ impl SqliteEventStore {
             "approval_cancelled"
         };
         let transaction = self.connection.transaction()?;
+        settle_attached_agent_turn_workflow_in_transaction(
+            &transaction,
+            lease.id,
+            AgentTurnWorkflowSettlement::Failed,
+            at,
+        )?;
         let mut events = Vec::new();
         for record in &usage {
             insert_agent_usage(&transaction, record)?;
@@ -2806,6 +2815,12 @@ impl SqliteEventStore {
         }
 
         let transaction = self.connection.transaction()?;
+        settle_attached_agent_turn_workflow_in_transaction(
+            &transaction,
+            lease.id,
+            AgentTurnWorkflowSettlement::WorkCompleted,
+            at,
+        )?;
         let mut events = Vec::new();
         for record in &usage {
             insert_agent_usage(&transaction, record)?;
@@ -3078,6 +3093,15 @@ impl SqliteEventStore {
             task_transition = Some((task, next));
         }
         let transaction = self.connection.transaction()?;
+        settle_attached_agent_turn_workflow_in_transaction(
+            &transaction,
+            lease.id,
+            match disposition {
+                AgentTurnDisposition::Waiting => AgentTurnWorkflowSettlement::WaitingForApproval,
+                AgentTurnDisposition::Failed => AgentTurnWorkflowSettlement::Failed,
+            },
+            at,
+        )?;
         let mut events = Vec::new();
         for record in &usage {
             insert_agent_usage(&transaction, record)?;
