@@ -4,12 +4,13 @@ use mcg_agents::{
     SuccessCondition, WorkItem, WorkPlan,
 };
 use mcg_contracts::{
-    ArtifactRef, AttemptId, ConfigurationId, ContentHash, ContractClause, CorrelationId, EventId,
-    InvocationId, InvocationManifest, InvocationRole, ModelRun, ModelRunState, PolicyBinding,
-    RetryPolicy, RuntimeActorId, SourceRef, StableTypeId, TaskContract, TaskContractId,
-    TaskContractStatus, VersionedPayload, VersionedRef, WORKFLOW_SOURCE_SNAPSHOT_HASH_DOMAIN,
-    WaitReason, WorkflowAttempt, WorkflowEvent, WorkflowId, WorkflowSourceAttachment,
-    WorkflowState, decode_canonical_cbor_v1,
+    ActionEnvelope, ActionExecution, ActionExecutionState, ArtifactRef, AttemptId, ConfigurationId,
+    ContentHash, ContractClause, CorrelationId, EffectClass, EffectOutcome, EventId, InvocationId,
+    InvocationManifest, InvocationRole, ModelRun, ModelRunState, PolicyBinding, RetryPolicy,
+    RuntimeActorId, SourceRef, StableTypeId, TaskContract, TaskContractId, TaskContractStatus,
+    VersionedPayload, VersionedRef, WORKFLOW_SOURCE_SNAPSHOT_HASH_DOMAIN, WaitReason,
+    WorkflowAttempt, WorkflowEvent, WorkflowId, WorkflowSourceAttachment, WorkflowState,
+    decode_canonical_cbor_v1,
 };
 use mcg_domain::{
     AgentLeaseId, PluginInstallation, PluginInvocationId, PluginInvocationRecord,
@@ -22,8 +23,9 @@ use crate::{
     SqliteEventStore, StorageError,
     actions::{cancellation_effect_status, fence_actions_for_workflow_cancellation},
     plugins::{
-        load_plugin_installation, load_plugin_invocation, load_plugin_revision,
-        validate_plugin_revision, validate_running_invocation,
+        complete_plugin_invocation_in_transaction, load_plugin_installation,
+        load_plugin_invocation, load_plugin_revision, validate_plugin_revision,
+        validate_running_invocation,
     },
 };
 
@@ -453,6 +455,108 @@ impl SqliteEventStore {
         })
     }
 
+    /// Atomically settles one terminal plugin invocation and its internal authority workflow.
+    ///
+    /// A successful adapter workflow requires the exact observational plugin action to have
+    /// reached `NoEffectConfirmed`. This internal compatibility workflow is not an ordinary
+    /// cognitive task and therefore does not fabricate model Work/Verify invocations or a
+    /// `CompletionCertificate`.
+    ///
+    /// # Errors
+    /// Returns a storage error for missing attachment, stale Root ownership, substituted action
+    /// evidence, nonterminal invocation data, replay mismatch, or transaction failure.
+    pub fn complete_plugin_invocation_workflow(
+        &mut self,
+        completed: &PluginInvocationRecord,
+        lease_owner: RuntimeActorId,
+        settled_at: DateTime<Utc>,
+    ) -> Result<(PluginInvocationRecord, WorkflowAttempt), StorageError> {
+        let transaction = self.connection.transaction()?;
+        let source_type = stable_type_id("mcg.plugin_invocation_source.v1")?;
+        let attachment = load_workflow_source_attachment_by_source(
+            &transaction,
+            source_type.as_str(),
+            &completed.id.to_string(),
+        )?
+        .ok_or_else(|| {
+            StorageError::Conflict(
+                "terminal plugin invocation has no canonical authority workflow".into(),
+            )
+        })?;
+        let workflow = load_agent_turn_workflow_attachment(&transaction, attachment)?;
+        let attempt = load_attempt(&transaction, workflow.attempt.attempt_id)?.ok_or(
+            StorageError::WorkflowAttemptNotFound(workflow.attempt.attempt_id),
+        )?;
+        let expected_terminal = if completed.state == PluginInvocationState::Succeeded {
+            WorkflowState::Succeeded
+        } else if matches!(
+            completed.state,
+            PluginInvocationState::Failed | PluginInvocationState::Uncertain
+        ) {
+            WorkflowState::Failed
+        } else {
+            return Err(StorageError::InvalidData(
+                "plugin workflow settlement requires a terminal invocation".into(),
+            ));
+        };
+        if attempt.state.is_terminal() {
+            if attempt.state != expected_terminal {
+                return Err(StorageError::Conflict(
+                    "terminal plugin workflow contradicts the durable invocation".into(),
+                ));
+            }
+        } else if attempt.state != WorkflowState::Running
+            || attempt.lease_owner != Some(lease_owner)
+            || attempt
+                .lease_expires_at
+                .is_none_or(|expires_at| expires_at <= settled_at)
+            || completed.completed_at != Some(settled_at)
+        {
+            return Err(StorageError::Conflict(
+                "plugin workflow is not held by the settling Root actor".into(),
+            ));
+        }
+        if completed.state == PluginInvocationState::Succeeded {
+            validate_successful_plugin_action(&transaction, &workflow.attachment, &attempt)?;
+        }
+        let completed = complete_plugin_invocation_in_transaction(&transaction, completed)?;
+        let settled = if expected_terminal == WorkflowState::Succeeded {
+            let verifying = transition_workflow_attempt_in_transaction(
+                &transaction,
+                attempt.attempt_id,
+                attempt.revision,
+                attempt.lease_generation,
+                WorkflowState::Verifying,
+                CorrelationId::new(),
+                &format!("verify-plugin-invocation:{}", completed.id),
+                settled_at,
+            )?;
+            transition_workflow_attempt_in_transaction(
+                &transaction,
+                verifying.attempt_id,
+                verifying.revision,
+                verifying.lease_generation,
+                WorkflowState::Succeeded,
+                CorrelationId::new(),
+                &format!("settle-plugin-invocation:{}", completed.id),
+                settled_at,
+            )?
+        } else {
+            transition_workflow_attempt_in_transaction(
+                &transaction,
+                attempt.attempt_id,
+                attempt.revision,
+                attempt.lease_generation,
+                WorkflowState::Failed,
+                CorrelationId::new(),
+                &format!("fail-plugin-invocation:{}", completed.id),
+                settled_at,
+            )?
+        };
+        transaction.commit()?;
+        Ok((completed, settled))
+    }
+
     /// Lists every completed compatibility lease in one run that is durably attached to an exact
     /// Verifying workflow, including its objectively mappable planned conditions and completed
     /// Work invocation lineage.
@@ -870,6 +974,58 @@ fn derive_plugin_invocation_workflow(
         attached_at: now,
     };
     Ok((task_contract, attempt, attachment))
+}
+
+fn validate_successful_plugin_action(
+    transaction: &Transaction<'_>,
+    attachment: &WorkflowSourceAttachment,
+    attempt: &WorkflowAttempt,
+) -> Result<(), StorageError> {
+    let rows: Vec<(String, String)> = {
+        let mut statement = transaction.prepare(
+            "SELECT action_envelopes.envelope_json, action_executions.execution_json
+             FROM action_envelopes
+             INNER JOIN action_executions
+                ON action_executions.action_id = action_envelopes.action_id
+             WHERE action_envelopes.workflow_id = ?1
+               AND action_envelopes.workflow_attempt_id = ?2
+             ORDER BY action_executions.attempt_number, action_executions.execution_id",
+        )?;
+        let rows = statement.query_map(
+            params![
+                attempt.workflow_id.to_string(),
+                attempt.attempt_id.to_string()
+            ],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        rows.collect::<Result<Vec<_>, _>>()?
+    };
+    if rows.len() != 1 {
+        return Err(StorageError::Conflict(
+            "successful plugin workflow requires exactly one observational action".into(),
+        ));
+    }
+    let envelope: ActionEnvelope = serde_json::from_str(&rows[0].0)?;
+    let execution: ActionExecution = serde_json::from_str(&rows[0].1)?;
+    let exact_source = envelope
+        .origin
+        .as_ref()
+        .and_then(|origin| origin.invocation.as_ref())
+        == Some(&attachment.source);
+    if envelope.workflow_id != attempt.workflow_id
+        || envelope.attempt_id != attempt.attempt_id
+        || envelope.task_contract != attempt.task_contract
+        || envelope.effect_class != EffectClass::Observational
+        || execution.action_id != envelope.id
+        || execution.state != ActionExecutionState::NoEffectConfirmed
+        || execution.outcome != Some(EffectOutcome::NoEffectConfirmed)
+        || !exact_source
+    {
+        return Err(StorageError::Conflict(
+            "successful plugin workflow action evidence is missing or substituted".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn resume_approval_wait_in_transaction(
@@ -3452,6 +3608,36 @@ mod tests {
                 .is_err()
         );
 
+        let mut unsupported_success = invocation.clone();
+        unsupported_success.state = PluginInvocationState::Succeeded;
+        unsupported_success.result_sha256 = Some("c".repeat(64));
+        unsupported_success.completed_at = Some(at + chrono::Duration::seconds(5));
+        assert!(
+            store
+                .complete_plugin_invocation_workflow(
+                    &unsupported_success,
+                    owner,
+                    at + chrono::Duration::seconds(5),
+                )
+                .is_err()
+        );
+        assert_eq!(
+            store
+                .plugin_invocation(invocation.id)
+                .expect("plugin invocation")
+                .expect("running plugin")
+                .state,
+            PluginInvocationState::Running
+        );
+        assert_eq!(
+            store
+                .workflow_attempt(authority.workflow.attempt.attempt_id)
+                .expect("workflow attempt")
+                .expect("running workflow")
+                .state,
+            WorkflowState::Running
+        );
+
         store
             .set_plugin_enabled(
                 &revision.manifest.id,
@@ -3469,6 +3655,30 @@ mod tests {
                     at + chrono::Duration::seconds(6),
                 )
                 .is_err()
+        );
+
+        let mut completed = invocation.clone();
+        completed.state = PluginInvocationState::Failed;
+        completed.error_code = Some("authorization_denied".into());
+        completed.completed_at = Some(at + chrono::Duration::seconds(7));
+        let (stored, settled) = store
+            .complete_plugin_invocation_workflow(
+                &completed,
+                owner,
+                at + chrono::Duration::seconds(7),
+            )
+            .expect("atomically fail plugin workflow");
+        assert_eq!(stored, completed);
+        assert_eq!(settled.state, WorkflowState::Failed);
+        assert_eq!(
+            store
+                .complete_plugin_invocation_workflow(
+                    &completed,
+                    owner,
+                    at + chrono::Duration::seconds(7),
+                )
+                .expect("exact terminal replay"),
+            (completed, settled)
         );
     }
 

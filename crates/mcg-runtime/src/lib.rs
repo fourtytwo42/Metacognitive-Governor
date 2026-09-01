@@ -16249,7 +16249,29 @@ impl AppRuntime {
         invocation.result_sha256 = result.as_ref().map(|(sha256, _)| sha256.clone());
         invocation.error_code = error_code.map(str::to_owned);
         invocation.completed_at = Some(Utc::now().max(invocation.started_at));
-        let invocation = self.store()?.complete_plugin_invocation(&invocation)?;
+        let root_ownership = self.root_ownership()?;
+        let mut store = self.store()?;
+        let plugin_source_type = StableTypeId::parse("mcg.plugin_invocation_source.v1")
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        let has_canonical_workflow = store
+            .workflow_source_attachment(&plugin_source_type, &invocation.id.to_string())?
+            .is_some();
+        let invocation = if let Some(root_ownership) = root_ownership
+            && has_canonical_workflow
+        {
+            let completed_at = invocation.completed_at.ok_or_else(|| {
+                StorageError::InvalidData("terminal plugin invocation lacks completion time".into())
+            })?;
+            store
+                .complete_plugin_invocation_workflow(
+                    &invocation,
+                    RuntimeActorId(root_ownership.runtime_identity.instance_id.0),
+                    completed_at,
+                )?
+                .0
+        } else {
+            store.complete_plugin_invocation(&invocation)?
+        };
         Ok(PluginInvocationMutation {
             invocation,
             result: result.map(|(_, result)| result),

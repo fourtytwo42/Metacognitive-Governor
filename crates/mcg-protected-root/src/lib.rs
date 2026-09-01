@@ -7632,6 +7632,9 @@ mod tests {
             result.invocation.state,
             mcg_domain::PluginInvocationState::Succeeded
         );
+        let workflows = runtime.canonical_workflows().expect("plugin workflows");
+        assert_eq!(workflows.len(), 1);
+        assert_eq!(workflows[0].state, WorkflowState::Succeeded);
         let authorization = {
             let captured = requests.lock().expect("captured requests");
             assert_eq!(captured.len(), 1);
@@ -7704,6 +7707,15 @@ mod tests {
             requests.lock().expect("captured requests").len(),
             1,
             "capability-bearing plugins must be denied before the runner is contacted"
+        );
+        let workflows = runtime.canonical_workflows().expect("plugin workflows");
+        assert_eq!(workflows.len(), 2);
+        assert_eq!(
+            workflows
+                .iter()
+                .filter(|workflow| workflow.state == WorkflowState::Failed)
+                .count(),
+            1
         );
     }
 

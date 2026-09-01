@@ -328,37 +328,10 @@ impl SqliteEventStore {
         &mut self,
         completed: &PluginInvocationRecord,
     ) -> Result<PluginInvocationRecord, StorageError> {
-        validate_terminal_invocation(completed)?;
         let transaction = self.connection.transaction()?;
-        let current = load_plugin_invocation(&transaction, completed.id)?.ok_or_else(|| {
-            StorageError::InvalidData(format!("plugin invocation {} was not found", completed.id))
-        })?;
-        if current.state.is_terminal() {
-            if current == *completed {
-                return Ok(current);
-            }
-            return Err(StorageError::Conflict(
-                "terminal plugin invocation is immutable".into(),
-            ));
-        }
-        validate_same_invocation_identity(&current, completed)?;
-        let completed_at = completed.completed_at.ok_or_else(|| {
-            StorageError::InvalidData("terminal plugin invocation lacks completion time".into())
-        })?;
-        transaction.execute(
-            "UPDATE plugin_invocations SET
-                state = ?1, invocation_json = ?2, completed_at = ?3
-             WHERE invocation_id = ?4 AND state = 'running'",
-            params![
-                invocation_state(completed.state),
-                serde_json::to_string(completed)?,
-                completed_at.to_rfc3339(),
-                completed.id.to_string(),
-            ],
-        )?;
-        insert_plugin_invocation_event(&transaction, completed, completed_at)?;
+        let completed = complete_plugin_invocation_in_transaction(&transaction, completed)?;
         transaction.commit()?;
-        Ok(completed.clone())
+        Ok(completed)
     }
 
     /// Converts every crash-interrupted running plugin invocation to terminal
@@ -431,6 +404,46 @@ impl SqliteEventStore {
             statement.query_map([invocation_id.to_string()], |row| row.get::<_, String>(0))?;
         decode_rows(rows)
     }
+}
+
+pub(crate) fn complete_plugin_invocation_in_transaction(
+    transaction: &Transaction<'_>,
+    completed: &PluginInvocationRecord,
+) -> Result<PluginInvocationRecord, StorageError> {
+    validate_terminal_invocation(completed)?;
+    let current = load_plugin_invocation(transaction, completed.id)?.ok_or_else(|| {
+        StorageError::InvalidData(format!("plugin invocation {} was not found", completed.id))
+    })?;
+    if current.state.is_terminal() {
+        if current == *completed {
+            return Ok(current);
+        }
+        return Err(StorageError::Conflict(
+            "terminal plugin invocation is immutable".into(),
+        ));
+    }
+    validate_same_invocation_identity(&current, completed)?;
+    let completed_at = completed.completed_at.ok_or_else(|| {
+        StorageError::InvalidData("terminal plugin invocation lacks completion time".into())
+    })?;
+    let updated = transaction.execute(
+        "UPDATE plugin_invocations SET
+            state = ?1, invocation_json = ?2, completed_at = ?3
+         WHERE invocation_id = ?4 AND state = 'running'",
+        params![
+            invocation_state(completed.state),
+            serde_json::to_string(completed)?,
+            completed_at.to_rfc3339(),
+            completed.id.to_string(),
+        ],
+    )?;
+    if updated != 1 {
+        return Err(StorageError::Conflict(
+            "plugin invocation changed during terminal settlement".into(),
+        ));
+    }
+    insert_plugin_invocation_event(transaction, completed, completed_at)?;
+    Ok(completed.clone())
 }
 
 pub(crate) fn validate_plugin_revision(revision: &PluginRevision) -> Result<(), StorageError> {
