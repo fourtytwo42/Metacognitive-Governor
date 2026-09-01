@@ -4285,8 +4285,10 @@ name = "mcg-process-runner"
 version = "0.4.67"
 dependencies = [
  "base64 0.22.1",
+ "chromiumoxide",
  "chrono",
  "futures-util",
+ "mcg-browser-contracts",
  "mcg-contracts",
  "mcg-mcp",
  "mcg-providers",
@@ -4332,6 +4334,7 @@ dependencies = [
  "mcg-action-runner",
  "mcg-agents",
  "mcg-api",
+ "mcg-browser-contracts",
  "mcg-config",
  "mcg-contracts",
  "mcg-domain",

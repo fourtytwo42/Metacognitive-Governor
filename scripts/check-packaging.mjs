@@ -166,7 +166,11 @@ const [windowsBuilder, linuxBuilder, macosBuilder, macosDmgBuilder, updaterSigni
   read("licenses/Apache-2.0.txt"),
   read("licenses/Wasmtime-Apache-2.0-WITH-LLVM-exception.txt"),
   read("apps/mcg-action-runner/src/lib.rs"),
-  read("apps/mcg-process-runner/src/lib.rs"),
+  Promise.all([
+    read("apps/mcg-process-runner/src/lib.rs"),
+    read("apps/mcg-process-runner/src/browser.rs"),
+    read("apps/mcg-process-runner/src/main.rs")
+  ]).then((parts) => parts.join("\n")),
   read("apps/mcg-provider-runner/src/lib.rs"),
   read("apps/mcg-shadow-runner/src/main.rs"),
   read("crates/mcg-runtime/src/shadow_verification.rs"),
@@ -181,6 +185,9 @@ const [windowsBuilder, linuxBuilder, macosBuilder, macosDmgBuilder, updaterSigni
   read("scripts/test-installed-native-accessibility-macos.swift"),
   read("scripts/capture-installed-macos-window.swift")
 ]);
+for (const invariant of ["--governed-browser", "--qualify-browser-policy", "BrowserRunnerClient", "GOVERNED_BROWSER_OPERATION_TYPE", "profile_cleanup_failed", "validate_governed_browser_observation"]) {
+  requireText(processRunner, invariant, "governed browser runner package contract");
+}
 const installedOrganizationSharing = await read("scripts/test-installed-organization-sharing.mjs");
 for (const [harness, verifier, label] of [
   [windowsPackageHarness, "test-installed-native-accessibility-windows.ps1", "Windows package harness"],

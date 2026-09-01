@@ -34,6 +34,8 @@ use uuid::Uuid;
 
 mod http;
 pub use http::*;
+mod browser;
+pub use browser::*;
 
 pub const PROCESS_RUNNER_PROTOCOL_VERSION: u32 = 1;
 pub const PROCESS_RUNNER_REQUEST_MAX_BYTES: usize = 10 * 1024 * 1024;

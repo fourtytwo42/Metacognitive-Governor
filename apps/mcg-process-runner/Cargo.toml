@@ -12,7 +12,9 @@ executor = []
 [dependencies]
 base64.workspace = true
 chrono.workspace = true
+chromiumoxide.workspace = true
 futures-util.workspace = true
+mcg-browser-contracts = { path = "../../crates/mcg-browser-contracts" }
 mcg-contracts = { path = "../../crates/mcg-contracts" }
 mcg-mcp = { path = "../../crates/mcg-mcp" }
 mcg-providers = { path = "../../crates/mcg-providers" }
@@ -23,12 +25,10 @@ serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tempfile.workspace = true
 url.workspace = true
 uuid.workspace = true
 zeroize.workspace = true
-
-[dev-dependencies]
-tempfile.workspace = true
 
 [[bin]]
 name = "mcg-process-runner"
