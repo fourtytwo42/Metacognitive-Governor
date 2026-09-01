@@ -15,7 +15,7 @@ use std::{
     fs,
     net::SocketAddr,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, Weak},
 };
 
 use chrono::{Duration, Utc};
@@ -33,12 +33,14 @@ use mcg_config::AppConfig;
 use mcg_contracts::{
     ActionCompensationReceipt, ActionEnvelope, ActionExecution, ActionExecutionId,
     ActionExecutionState, ActionId, ActionOrigin, ActionReceipt, ActionReceiptId, ArtifactRef,
-    AuthenticatedRpcRequest, ContentHash, ContextManifest, ContractError, CorrelationId,
-    EffectClass, EffectOutcome, HashAlgorithm, InvocationId, InvocationManifest,
-    ModelDestinationClass, ModelEgressPolicy, ModelInvocationPermit, ModelInvocationProposal,
-    ModelRunId, ModelUsage, OwnerActionCompensationRequest, PROTOCOL_V1, PermitId, PolicyBinding,
-    ReconciliationJob, ReconciliationJobId, ReconciliationObservation, RequestId, RootStatus,
-    RpcEnvelope, RuntimeActorId, RuntimeIdentity, RuntimeInstanceId, RuntimeInvocationRequest,
+    AuthenticatedRpcRequest, ContentHash, ContextManifest, ContextManifestId, ContextSelection,
+    ContractError, CorrelationId, EffectClass, EffectOutcome, HashAlgorithm, InvocationId,
+    InvocationManifest, InvocationRole, ModelBudget, ModelDataClassification,
+    ModelDestinationClass, ModelDisclosureManifest, ModelEgressPolicy, ModelEgressRoute,
+    ModelInvocationPermit, ModelInvocationProposal, ModelRunId, ModelUsage,
+    OwnerActionCompensationRequest, PROTOCOL_V1, PermitId, PolicyBinding, ReconciliationJob,
+    ReconciliationJobId, ReconciliationObservation, RequestId, RootStatus, RpcEnvelope,
+    RuntimeActorId, RuntimeIdentity, RuntimeInstanceId, RuntimeInvocationRequest,
     RuntimeInvocationResult, SecretHandleId, SourceRef, StableTypeId, VersionedPayload,
     WorkflowAttempt, WorkflowCancelRequest, WorkflowId, WorkflowState, canonical_contract_hash,
     decode_canonical_cbor_v1,
@@ -67,14 +69,14 @@ use mcg_providers::{
     CONTRACT_VERSION, ModelDescriptor, ModelRequest, ModelResponse, ProviderAuthMode,
     ProviderConnection, ProviderError, ProviderKind,
 };
-use mcg_runtime::{AppRuntime, RuntimeError};
+use mcg_runtime::{AppRuntime, ProtectedAgentModelDispatcher, RuntimeError};
 use mcg_storage::{
     AgentTurnWorkflowAttachment, ModelEgressAuthorizationReceipt, ModelSecretHandleBinding,
     ModelSecretSlot, ReconciliationResolutionReceipt, RootMigrationReceipt, STORAGE_SCHEMA_VERSION,
     StorageError, acquire_data_directory_lock, create_backup_bundle_from_snapshot,
     inspect_database_before_root, model_descriptor_source_ref, model_destination_source_ref,
-    model_disclosure_hash, model_egress_policy_binding, model_proposal_hash,
-    model_provider_source_ref, snapshot_database_before_root,
+    model_disclosure_hash, model_egress_policy_binding, model_egress_route_payload,
+    model_proposal_hash, model_provider_source_ref, snapshot_database_before_root,
 };
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -166,6 +168,26 @@ pub fn attach_active_agent_lease_workflow(
     now: chrono::DateTime<Utc>,
 ) -> Result<AgentTurnWorkflowAttachment, ProtectedRootError> {
     Ok(runtime.root_attach_active_agent_lease_workflow(lease_id, now)?)
+}
+
+/// Atomically creates/reloads and claims canonical authority for one live compatibility lease.
+///
+/// # Errors
+/// Returns an error when the legacy chain is stale, the canonical attempt is not Ready or already
+/// owned by another actor, or durable evidence cannot be validated.
+pub fn claim_active_agent_lease_workflow(
+    runtime: &AppRuntime,
+    lease_id: AgentLeaseId,
+    lease_owner: RuntimeActorId,
+    maximum_lease_seconds: u64,
+    now: chrono::DateTime<Utc>,
+) -> Result<mcg_storage::AgentTurnWorkflowAuthority, ProtectedRootError> {
+    Ok(runtime.root_claim_active_agent_lease_workflow(
+        lease_id,
+        lease_owner,
+        maximum_lease_seconds,
+        now,
+    )?)
 }
 
 #[derive(Debug, Clone)]
@@ -442,6 +464,370 @@ impl GovernedModelProviderGateway for IsolatedProviderRunnerGateway {
                 retriable: false,
             })
     }
+}
+
+const COMPATIBILITY_AGENT_WORKFLOW_LEASE_SECONDS: u64 = 5 * 60;
+const COMPATIBILITY_AGENT_PERMIT_SECONDS: i64 = 2 * 60;
+const COMPATIBILITY_AGENT_CALL_MAX_COST_MICROUSD: u64 = 5_000_000;
+
+struct RootAgentModelDispatcher {
+    runtime: Weak<AppRuntime>,
+    root_executable: PathBuf,
+    runtime_actor: RuntimeActorId,
+    runtime_identity: RuntimeIdentity,
+}
+
+#[async_trait::async_trait]
+impl ProtectedAgentModelDispatcher for RootAgentModelDispatcher {
+    async fn create_response(
+        &self,
+        lease_id: AgentLeaseId,
+        target: &mcg_providers::ProviderModelRef,
+        request: ModelRequest,
+    ) -> Result<ModelResponse, ProviderError> {
+        let runtime = self.runtime.upgrade().ok_or_else(|| {
+            ProviderError::Configuration("Protected Root runtime is unavailable".into())
+        })?;
+        let (connection, catalog) = runtime
+            .model_egress_route_state(&target.provider_id)
+            .map_err(protected_agent_provider_error)?
+            .ok_or_else(|| ProviderError::Configuration("provider route is unavailable".into()))?;
+        let model = catalog
+            .models
+            .into_iter()
+            .find(|model| model.id == target.model_id)
+            .ok_or_else(|| ProviderError::Configuration("provider model is unavailable".into()))?;
+        let gateway = IsolatedProviderRunnerGateway::adjacent_to(
+            &self.root_executable,
+            connection.clone(),
+            model.clone(),
+        )
+        .map_err(protected_agent_provider_error)?;
+        execute_compatibility_agent_model_invocation(
+            &runtime,
+            &gateway,
+            &connection,
+            &model,
+            self.runtime_actor,
+            &self.runtime_identity,
+            lease_id,
+            target,
+            request,
+            Utc::now(),
+        )
+        .await
+        .map_err(protected_agent_provider_error)
+    }
+}
+
+fn protected_agent_provider_error(error: impl std::fmt::Display) -> ProviderError {
+    ProviderError::Request {
+        message: error.to_string(),
+        retriable: false,
+    }
+}
+
+fn agent_provider_payload(
+    type_id: &str,
+    value: &serde_json::Value,
+) -> Result<VersionedPayload, ProtectedRootError> {
+    Ok(VersionedPayload::canonical_v1(
+        StableTypeId::parse(type_id)?,
+        value,
+    )?)
+}
+
+fn agent_provider_hash(domain: &str, bytes: &[u8]) -> ContentHash {
+    let mut hasher = Sha256::new();
+    hasher.update(b"MetaCog.CompatibilityAgentProviderEvidence:v1\0");
+    hasher.update(domain.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(bytes);
+    ContentHash {
+        algorithm: HashAlgorithm::Sha256,
+        domain: domain.into(),
+        digest_hex: format!("{:x}", hasher.finalize()),
+    }
+}
+
+fn remaining_compatibility_cost_micro_usd(
+    maximum_cost_usd: Option<f64>,
+    consumed_cost_usd: f64,
+) -> Result<u64, ProtectedRootError> {
+    if !consumed_cost_usd.is_finite() || consumed_cost_usd < 0.0 {
+        return Err(
+            StorageError::InvalidData("agent lease consumed cost is invalid".into()).into(),
+        );
+    }
+    let Some(maximum_cost_usd) = maximum_cost_usd else {
+        return Ok(COMPATIBILITY_AGENT_CALL_MAX_COST_MICROUSD);
+    };
+    let remaining = maximum_cost_usd - consumed_cost_usd;
+    if !maximum_cost_usd.is_finite() || maximum_cost_usd < 0.0 || remaining <= 0.0 {
+        return Err(
+            StorageError::Conflict("agent lease has no remaining cost authority".into()).into(),
+        );
+    }
+    let micro_usd = (remaining * 1_000_000.0).floor();
+    if !micro_usd.is_finite() || micro_usd < 1.0 {
+        return Err(StorageError::Conflict(
+            "agent lease cost authority is below one micro-USD".into(),
+        )
+        .into());
+    }
+    if micro_usd >= 5_000_000.0 {
+        return Ok(COMPATIBILITY_AGENT_CALL_MAX_COST_MICROUSD);
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let bounded = micro_usd as u64;
+    Ok(bounded)
+}
+
+/// Executes one compatibility-agent model request through canonical workflow authority only.
+///
+/// Every physical call receives a distinct invocation, permit, stable client request ID, and model
+/// run. Root derives disclosure and budgets from persisted source authority and the exact request;
+/// the supplied gateway cannot be reached before all durable authorization evidence is committed.
+///
+/// # Errors
+/// Returns a protected-root error for stale source/workflow/provider authority, invalid budgets,
+/// request substitution, gateway failure, invalid response, or durable settlement failure.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+pub async fn execute_compatibility_agent_model_invocation(
+    runtime: &AppRuntime,
+    gateway: &dyn GovernedModelProviderGateway,
+    connection: &ProviderConnection,
+    model: &ModelDescriptor,
+    runtime_actor: RuntimeActorId,
+    runtime_identity: &RuntimeIdentity,
+    lease_id: AgentLeaseId,
+    target: &mcg_providers::ProviderModelRef,
+    mut request: ModelRequest,
+    now: chrono::DateTime<Utc>,
+) -> Result<ModelResponse, ProtectedRootError> {
+    runtime_identity.validate()?;
+    if connection.id != target.provider_id
+        || model.id != target.model_id
+        || request.model != model.id
+    {
+        return Err(StorageError::Conflict(
+            "compatibility agent provider route or request model was substituted".into(),
+        )
+        .into());
+    }
+    let authority = claim_active_agent_lease_workflow(
+        runtime,
+        lease_id,
+        runtime_actor,
+        COMPATIBILITY_AGENT_WORKFLOW_LEASE_SECONDS,
+        now,
+    )?;
+    let attempt = &authority.workflow.attempt;
+    let invocation_id = InvocationId::new();
+    request.client_request_id = Some(format!("mcg-governed-{invocation_id}"));
+    let request_artifact = model_provider_request_artifact(&request)?;
+    let approximate_input_tokens = request_artifact.byte_length.saturating_add(3) / 4;
+    let output_tokens = request
+        .max_output_tokens
+        .filter(|tokens| *tokens > 0)
+        .ok_or_else(|| {
+            StorageError::InvalidData(
+                "compatibility agent request requires a nonzero output-token limit".into(),
+            )
+        })?;
+    let mut maximum_input_tokens = model
+        .context_window
+        .unwrap_or_else(|| request_artifact.byte_length.max(1));
+    if let Some(maximum_tokens) = authority.legacy_lease.budget.limit.max_tokens {
+        let remaining = maximum_tokens
+            .checked_sub(authority.legacy_lease.budget.consumed_tokens)
+            .ok_or_else(|| {
+                StorageError::Conflict("agent lease token authority is exhausted".into())
+            })?;
+        maximum_input_tokens =
+            maximum_input_tokens.min(remaining.checked_sub(output_tokens).ok_or_else(|| {
+                StorageError::Conflict("agent lease token authority is exhausted".into())
+            })?);
+    }
+    if maximum_input_tokens == 0 || approximate_input_tokens > maximum_input_tokens {
+        return Err(StorageError::Conflict(
+            "compatibility agent request exceeds its input-token authority".into(),
+        )
+        .into());
+    }
+    let maximum_cost_micro_usd = remaining_compatibility_cost_micro_usd(
+        authority.legacy_lease.budget.limit.max_cost_usd,
+        authority.legacy_lease.budget.consumed_cost_usd,
+    )?;
+    let lease_expiry = attempt.lease_expires_at.ok_or_else(|| {
+        StorageError::Conflict("canonical agent workflow has no active lease expiry".into())
+    })?;
+    let permit_expiry = lease_expiry.min(
+        now.checked_add_signed(chrono::Duration::seconds(
+            COMPATIBILITY_AGENT_PERMIT_SECONDS,
+        ))
+        .ok_or_else(|| StorageError::InvalidData("model permit expiry overflowed".into()))?,
+    );
+    if permit_expiry <= now {
+        return Err(StorageError::Conflict("canonical agent workflow lease expired".into()).into());
+    }
+    let context_source = authority.workflow.attachment.source.clone();
+    let influence = agent_provider_payload(
+        "mcg.agent_model_request_influence.v1",
+        &serde_json::json!({
+            "lease_id": lease_id,
+            "provider_id": target.provider_id,
+            "model_id": target.model_id,
+            "request_hash": request_artifact.content_hash,
+        }),
+    )?;
+    let context = ContextManifest {
+        id: ContextManifestId::new(),
+        attempt_id: attempt.attempt_id,
+        selected_sources: vec![ContextSelection {
+            source: context_source.clone(),
+            perspective: None,
+            influence,
+            transformations: Vec::new(),
+            placement: 0,
+            approximate_tokens: approximate_input_tokens,
+        }],
+        selection_policy: agent_provider_payload(
+            "mcg.agent_model_context_selection.v1",
+            &serde_json::json!({
+                "mode": "exact_compatibility_request",
+                "source_snapshot_hash": context_source.content_hash,
+                "request_hash": request_artifact.content_hash,
+            }),
+        )?,
+        expansion_steps: Vec::new(),
+        approximate_tokens: approximate_input_tokens,
+    };
+    let context_hash = canonical_contract_hash(
+        ContextManifest::TYPE_ID,
+        "MetaCog.ContextManifest",
+        &context,
+    )?;
+    let route = ModelEgressRoute {
+        provider_id: connection.id.clone(),
+        model_id: model.id.clone(),
+        destination: connection.base_url.clone(),
+        destination_class: classify_model_destination(connection)?,
+    };
+    let limits = ModelBudget {
+        max_input_tokens: maximum_input_tokens,
+        max_output_tokens: output_tokens,
+        max_cost_microusd: maximum_cost_micro_usd,
+    };
+    let proposal = ModelInvocationProposal {
+        invocation_id,
+        attempt_id: attempt.attempt_id,
+        attempt_revision: attempt.revision,
+        lease_generation: attempt.lease_generation,
+        runtime_actor,
+        runtime_identity: runtime_identity.clone(),
+        role: InvocationRole::Work,
+        task_contract: attempt.task_contract.clone(),
+        request_artifact: request_artifact.clone(),
+        request_hash: request_artifact.content_hash.clone(),
+        route: route.clone(),
+        data_classification: ModelDataClassification::Restricted,
+        disclosure: ModelDisclosureManifest {
+            context_manifest: context_hash.clone(),
+            disclosed_sources: vec![context_source.clone()],
+            approximate_input_tokens,
+        },
+        requested_limits: limits,
+        deadline: permit_expiry,
+    };
+    let policy = ModelEgressPolicy {
+        allowed_routes: vec![route.clone()],
+        minimum_data_classification: ModelDataClassification::Restricted,
+        maximum_data_classification: ModelDataClassification::Restricted,
+        maximum_limits: limits,
+        maximum_permit_lifetime_seconds: u64::try_from(COMPATIBILITY_AGENT_PERMIT_SECONDS)
+            .unwrap_or(120),
+    };
+    let authorization = authorize_runtime_model_egress(
+        runtime,
+        &context,
+        &proposal,
+        runtime_identity,
+        &policy,
+        now,
+    )?;
+    let instructions = serde_json::to_vec(&request.instructions)?;
+    let role_manifest = agent_provider_hash("MetaCog.AgentRoleManifest", &instructions);
+    let prompt_bundle = agent_provider_hash(
+        "MetaCog.AgentPromptBundle",
+        request_artifact.content_hash.digest_hex.as_bytes(),
+    );
+    let available_tool_manifests = request
+        .tools
+        .iter()
+        .map(|tool| {
+            serde_json::to_vec(tool)
+                .map(|bytes| agent_provider_hash("MetaCog.AgentToolManifest", &bytes))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let sampling = agent_provider_payload(
+        "mcg.agent_model_sampling.v1",
+        &serde_json::json!({
+            "temperature": request.temperature.map(|value| value.to_string()),
+            "top_p": request.top_p.map(|value| value.to_string()),
+            "max_output_tokens": request.max_output_tokens,
+        }),
+    )?;
+    let reasoning = request
+        .reasoning
+        .as_ref()
+        .map(|reasoning| {
+            agent_provider_payload(
+                "mcg.agent_model_reasoning.v1",
+                &serde_json::to_value(reasoning).map_err(ProtectedRootError::Serialization)?,
+            )
+        })
+        .transpose()?;
+    let manifest = InvocationManifest {
+        id: invocation_id,
+        role: InvocationRole::Work,
+        attempt_id: attempt.attempt_id,
+        task_contract: attempt.task_contract.clone(),
+        runtime_identity: runtime_identity.clone(),
+        cognitive_configuration: attempt.configuration.content_hash.clone(),
+        role_manifest,
+        prompt_bundle,
+        context_manifest: context_hash,
+        model_route: model_egress_route_payload(&route)?,
+        resolved_provider: authorization.permit.resolved_provider.clone(),
+        resolved_model: authorization.permit.resolved_model.clone(),
+        observed_model_fingerprint: None,
+        sampling,
+        reasoning,
+        available_tool_manifests,
+        selected_skill_manifests: Vec::new(),
+        authority_envelope: context_source,
+        egress_permit: Some(authorization.permit_ref),
+        repository_revision: None,
+        environment: SourceRef {
+            source_type: StableTypeId::parse("mcg.agent_turn_environment.v1")?,
+            locator: attempt.workflow_id.to_string(),
+            content_hash: attempt.environment_snapshot.clone(),
+        },
+        runtime_build: runtime_identity.build_hash.clone(),
+        request_hash: request_artifact.content_hash,
+        response_hash: None,
+    };
+    let receipt = execute_authorized_model_invocation(
+        runtime,
+        gateway,
+        &manifest,
+        ModelRunId::new(),
+        &request,
+        now,
+    )
+    .await?;
+    Ok(receipt.response)
 }
 
 fn provider_runner_authorization(
@@ -1847,7 +2233,13 @@ pub fn open(config: AppConfig) -> Result<Arc<AppRuntime>, ProtectedRootError> {
         config, data_lock,
     )?);
     let identity = current_runtime_identity()?;
-    runtime.initialize_root_ownership(identity, migration_receipt)?;
+    runtime.initialize_root_ownership(identity.clone(), migration_receipt)?;
+    runtime.install_protected_agent_model_dispatcher(Arc::new(RootAgentModelDispatcher {
+        runtime: Arc::downgrade(&runtime),
+        root_executable: std::env::current_exe()?,
+        runtime_actor: RuntimeActorId(identity.instance_id.0),
+        runtime_identity: identity,
+    }))?;
     let recovered_at = Utc::now();
     let reconciliation_recovery = runtime.recover_action_reconciliations(recovered_at)?;
     if reconciliation_recovery.requeued > 0 || reconciliation_recovery.escalated > 0 {
@@ -2581,6 +2973,12 @@ mod tests {
         GovernedFilesystemAuthority, GovernedFilesystemOperation,
         governed_filesystem_authority_binding, governed_filesystem_operation_payload,
     };
+    use mcg_agents::{
+        AGENT_RUN_SCHEMA_VERSION, AgentInstance, AgentLease, AgentLeaseState, AgentRun,
+        AgentRunState, AgentState, ConfidenceEstimate, ExecutivePlanner, LeaseBudget,
+        OrganizationGenome, OrganizationalMetrics, PlannedWork, PlanningRequest, RoleKind,
+        SuccessCondition, TaskComplexity,
+    };
     use mcg_contracts::{
         ActionEnvelope, ActionExecutionState, ActionId, ActionValidation, AttemptId,
         ConfigurationId, ContextManifest, ContextManifestId, ContextSelection, ContractClause,
@@ -2590,6 +2988,7 @@ mod tests {
         TaskContract, TaskContractId, TaskContractStatus, VersionedRef, WaitReason,
         WorkflowAttempt, WorkflowId, WorkflowState,
     };
+    use mcg_domain::{AgentInstanceId, RunId, TaskEnvelope, TaskState};
     use mcg_platform::{
         cancel_root_workflow, exchange_root_rpc, query_root_action, query_root_actions,
         query_root_invocation, query_root_invocations, query_root_status, query_root_workflow,
@@ -2644,6 +3043,132 @@ mod tests {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
+    fn seed_compatibility_agent_provider(
+        store: &mut SqliteEventStore,
+        at: chrono::DateTime<Utc>,
+    ) -> (AgentLease, ProviderConnection, ModelDescriptor) {
+        let task = TaskEnvelope::new("complete one governed compatibility model call");
+        store.create_task(&task).expect("create compatibility task");
+        let task = store
+            .transition_task(task.id, TaskState::Active)
+            .expect("activate compatibility task")
+            .0;
+        let organization = OrganizationGenome::consumer_default(at);
+        store
+            .record_organization_revision(&organization)
+            .expect("record compatibility organization");
+        let planning = PlanningRequest {
+            run_id: RunId::new(),
+            task: task.clone(),
+            complexity: TaskComplexity::Atomic,
+            work: vec![PlannedWork::atomic(
+                "produce one governed provider response",
+                RoleKind::Coder,
+                vec![SuccessCondition::Custom {
+                    description: "the response is permit bound".into(),
+                }],
+            )],
+            require_independent_evaluation: false,
+        };
+        let plan = ExecutivePlanner::default()
+            .plan(&organization, &planning, at)
+            .expect("plan compatibility work");
+        let run = AgentRun {
+            schema_version: AGENT_RUN_SCHEMA_VERSION,
+            id: planning.run_id,
+            task_id: task.id,
+            organization_revision_id: organization.revision_id,
+            state: AgentRunState::Planned,
+            metrics: OrganizationalMetrics::default(),
+            created_at: at,
+            updated_at: at,
+            completed_at: None,
+        };
+        store
+            .create_agent_run(&run, &plan)
+            .expect("create compatibility run");
+        store
+            .transition_agent_run(
+                run.id,
+                AgentRunState::Running,
+                OrganizationalMetrics::default(),
+                at,
+            )
+            .expect("start compatibility run");
+        let instance = AgentInstance {
+            schema_version: AGENT_RUN_SCHEMA_VERSION,
+            id: AgentInstanceId::new(),
+            role_id: plan.items[0].assigned_role,
+            run_id: run.id,
+            task_id: task.id,
+            state: AgentState::Created,
+            model: None,
+            context_fingerprint: "sha256:governed-provider-context".into(),
+            confidence: ConfidenceEstimate::new(5_000, 0).expect("confidence"),
+            created_at: at,
+            updated_at: at,
+        };
+        let lease = AgentLease {
+            schema_version: AGENT_RUN_SCHEMA_VERSION,
+            id: AgentLeaseId::new(),
+            instance_id: instance.id,
+            work_item_id: plan.items[0].id,
+            goal: plan.items[0].goal.clone(),
+            budget: LeaseBudget {
+                limit: plan.items[0].budget.clone(),
+                consumed_tokens: 0,
+                consumed_cost_usd: 0.0,
+                elapsed_seconds: 0,
+            },
+            tool_permissions: Vec::new(),
+            reporting_interval_seconds: 30,
+            max_retries: 2,
+            escalation_conditions: Vec::new(),
+            state: AgentLeaseState::Active,
+            acquired_at: at,
+            expires_at: at + chrono::Duration::minutes(10),
+            heartbeat_at: at,
+        };
+        store
+            .dispatch_agent_work(&instance, &lease, at)
+            .expect("dispatch compatibility agent");
+        let connection = ProviderConnection {
+            contract_version: CONTRACT_VERSION,
+            id: "compatibility_governed_fixture".into(),
+            display_name: "Compatibility governed fixture".into(),
+            kind: ProviderKind::OpenAiCompatible,
+            base_url: "https://provider.example/v1".into(),
+            auth_mode: ProviderAuthMode::None,
+            organization: None,
+            project: None,
+        };
+        let model = ModelDescriptor {
+            id: "governed-agent-model".into(),
+            display_name: "Governed agent model".into(),
+            owned_by: Some("fixture".into()),
+            context_window: Some(8_192),
+            capabilities: ModelCapabilities {
+                responses: Some(true),
+                ..ModelCapabilities::default()
+            },
+            price: None,
+            metadata: serde_json::Value::Null,
+        };
+        store
+            .record_provider_configuration(
+                &connection,
+                &ProviderModelCatalog {
+                    connection_id: connection.id.clone(),
+                    models: vec![model.clone()],
+                    discovered_at: at,
+                },
+                at,
+            )
+            .expect("record governed provider configuration");
+        (lease, connection, model)
+    }
+
     struct DeterministicModelGateway {
         calls: Mutex<usize>,
         response: ModelResponse,
@@ -2657,6 +3182,26 @@ mod tests {
             _request: &ModelRequest,
         ) -> Result<ModelResponse, ProviderError> {
             *self.calls.lock().expect("model gateway call lock") += 1;
+            Ok(self.response.clone())
+        }
+    }
+
+    struct RecordingAgentProviderGateway {
+        calls: Mutex<Vec<(RuntimeModelEgressAuthorizationReceipt, ModelRequest)>>,
+        response: ModelResponse,
+    }
+
+    #[async_trait::async_trait]
+    impl GovernedModelProviderGateway for RecordingAgentProviderGateway {
+        async fn invoke(
+            &self,
+            authorization: &RuntimeModelEgressAuthorizationReceipt,
+            request: &ModelRequest,
+        ) -> Result<ModelResponse, ProviderError> {
+            self.calls
+                .lock()
+                .expect("agent provider call lock")
+                .push((authorization.clone(), request.clone()));
             Ok(self.response.clone())
         }
     }
@@ -3025,6 +3570,130 @@ mod tests {
                 .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "mcgb"))
                 .count(),
             1
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn compatibility_agent_call_claims_canonical_authority_and_uses_one_permit_gateway() {
+        let temporary = tempfile::tempdir().expect("temporary compatibility provider directory");
+        let config = AppConfig::default().with_data_directory(temporary.path());
+        let at = Utc::now();
+        let runtime = open(config.clone()).expect("open governed compatibility Root");
+        let (lease, connection, model) = {
+            let mut store = SqliteEventStore::open(config.database_path())
+                .expect("compatibility provider store");
+            seed_compatibility_agent_provider(&mut store, at)
+        };
+        let identity = current_runtime_identity().expect("runtime identity");
+        let actor = RuntimeActorId(identity.instance_id.0);
+        let target = mcg_providers::ProviderModelRef {
+            provider_id: connection.id.clone(),
+            model_id: model.id.clone(),
+        };
+        let request = ModelRequest {
+            contract_version: CONTRACT_VERSION,
+            model: model.id.clone(),
+            client_request_id: None,
+            instructions: Some("Use only the exact bounded request.".into()),
+            messages: vec![Message {
+                role: MessageRole::User,
+                content: vec![ContentPart::Text {
+                    text: "Return the governed result.".into(),
+                }],
+                name: None,
+            }],
+            tools: Vec::new(),
+            tool_choice: None,
+            structured_output: None,
+            reasoning: None,
+            temperature: None,
+            top_p: None,
+            max_output_tokens: Some(64),
+            metadata: serde_json::json!({"agent_lease_id": lease.id}),
+        };
+        let gateway = RecordingAgentProviderGateway {
+            calls: Mutex::new(Vec::new()),
+            response: ModelResponse {
+                contract_version: CONTRACT_VERSION,
+                id: "governed-agent-response".into(),
+                model: model.id.clone(),
+                status: Some("completed".into()),
+                output: vec![OutputItem::Message {
+                    role: MessageRole::Assistant,
+                    content: vec![ContentPart::Text {
+                        text: "governed".into(),
+                    }],
+                }],
+                usage: Usage {
+                    input_tokens: 16,
+                    output_tokens: 1,
+                    total_tokens: 17,
+                    ..Usage::default()
+                },
+                provider_metadata: serde_json::Value::Null,
+            },
+        };
+
+        let response = execute_compatibility_agent_model_invocation(
+            &runtime,
+            &gateway,
+            &connection,
+            &model,
+            actor,
+            &identity,
+            lease.id,
+            &target,
+            request,
+            at,
+        )
+        .await
+        .expect("governed compatibility invocation");
+        assert_eq!(response.id, "governed-agent-response");
+        let calls = gateway.calls.lock().expect("governed gateway calls");
+        assert_eq!(calls.len(), 1);
+        let (authorization, dispatched_request) = &calls[0];
+        assert_eq!(authorization.proposal.runtime_actor, actor);
+        assert_eq!(authorization.proposal.runtime_identity, identity);
+        assert_eq!(authorization.proposal.attempt_revision, 2);
+        assert_eq!(authorization.proposal.lease_generation, 1);
+        assert_eq!(
+            authorization.proposal.request_hash,
+            model_provider_request_artifact(dispatched_request)
+                .expect("dispatched request artifact")
+                .content_hash
+        );
+        assert!(
+            dispatched_request
+                .client_request_id
+                .as_deref()
+                .is_some_and(|id| id.starts_with("mcg-governed-"))
+        );
+        assert_eq!(
+            runtime
+                .canonical_workflows()
+                .expect("canonical workflows")
+                .into_iter()
+                .map(|attempt| attempt.state)
+                .collect::<Vec<_>>(),
+            vec![WorkflowState::Running]
+        );
+        let inspection = runtime
+            .runtime_invocation(authorization.proposal.invocation_id, 10)
+            .expect("invocation inspection")
+            .expect("governed invocation exists");
+        assert_eq!(
+            inspection.manifest.egress_permit,
+            Some(authorization.permit_ref.clone())
+        );
+        assert_eq!(
+            inspection
+                .model_runs
+                .last()
+                .expect("completed model run")
+                .run
+                .state,
+            ModelRunState::Completed
         );
     }
 

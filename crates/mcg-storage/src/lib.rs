@@ -92,8 +92,8 @@ pub use plugins::PluginRecoveryReport;
 pub use scheduler::{ScheduleClaim, ScheduleWakeMutation};
 pub use shadow_workspaces::ShadowWorkspaceMutation;
 pub use workflows::{
-    AgentTurnWorkflowAttachment, TaskContractHead, WorkflowRecoveryReport,
-    task_contract_content_hash,
+    AgentTurnWorkflowAttachment, AgentTurnWorkflowAuthority, TaskContractHead,
+    WorkflowRecoveryReport, task_contract_content_hash,
 };
 
 type EventRow = (i64, String, i64, String, Option<String>, String, String);

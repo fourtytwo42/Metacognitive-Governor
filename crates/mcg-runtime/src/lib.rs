@@ -149,8 +149,8 @@ use mcg_providers::{
 };
 use mcg_storage::{
     ActionAuthorizationReceipt, ActionExecutionRecoveryReport, AgentRecoveryReport,
-    AgentTurnDisposition, AgentTurnWorkflowAttachment, BackupMcpSecret, BackupProviderSecret,
-    BackupSecretSnapshot, DataDirectoryLock, ModelEgressAuthorizationReceipt,
+    AgentTurnDisposition, AgentTurnWorkflowAttachment, AgentTurnWorkflowAuthority, BackupMcpSecret,
+    BackupProviderSecret, BackupSecretSnapshot, DataDirectoryLock, ModelEgressAuthorizationReceipt,
     ModelSecretHandleBinding, ReconciliationClaimReceipt, ReconciliationRecoveryReport,
     ReconciliationResolutionReceipt, RecoveryReport, RootMigrationReceipt, RootOwnership,
     RuntimeResponseArtifact, STORAGE_SCHEMA_VERSION, SqliteEventStore, StorageError,
@@ -1454,6 +1454,21 @@ impl ToolExecutor for RuntimeMcpExecutor {
 pub struct RuntimeProviderGateway {
     registry: Arc<tokio::sync::RwLock<ProviderRegistry>>,
     oauth_refresh: Arc<OAuthRefreshCoordinator>,
+    protected: Option<(AgentLeaseId, Arc<dyn ProtectedAgentModelDispatcher>)>,
+}
+
+/// Root-installed execution boundary for compatibility agent model calls.
+///
+/// Runtime supplies only the exact active legacy lease identity plus the selected route/request.
+/// Protected Root reloads canonical authority, issues the permit, and owns physical dispatch.
+#[async_trait]
+pub trait ProtectedAgentModelDispatcher: Send + Sync {
+    async fn create_response(
+        &self,
+        lease_id: AgentLeaseId,
+        target: &ProviderModelRef,
+        request: ModelRequest,
+    ) -> Result<ModelResponse, ProviderError>;
 }
 
 enum ProtectedProviderCredentialSnapshot {
@@ -1473,6 +1488,11 @@ impl RuntimeProviderGateway {
         target: &ProviderModelRef,
         request: ModelRequest,
     ) -> Result<mcg_providers::ProviderStream, ProviderError> {
+        if self.protected.is_some() {
+            return Err(ProviderError::Configuration(
+                "governed agent streaming requires a separately authorized invocation".into(),
+            ));
+        }
         let initial = self
             .registry
             .read()
@@ -1523,6 +1543,9 @@ impl AgentModelGateway for RuntimeProviderGateway {
         target: &ProviderModelRef,
         request: ModelRequest,
     ) -> Result<ModelResponse, ProviderError> {
+        if let Some((lease_id, dispatcher)) = &self.protected {
+            return dispatcher.create_response(*lease_id, target, request).await;
+        }
         let initial = self
             .registry
             .read()
@@ -3406,6 +3429,7 @@ pub struct AppRuntime {
     shadow_command_verifier: Arc<dyn ShadowCommandVerifier>,
     plugin_runner: Option<Arc<dyn PluginRunnerGateway>>,
     plugin_trust: Arc<PluginTrustStore>,
+    protected_agent_models: Arc<RwLock<Option<Arc<dyn ProtectedAgentModelDispatcher>>>>,
     _ephemeral_data_directory: Option<tempfile::TempDir>,
 }
 
@@ -3985,6 +4009,26 @@ impl AppRuntime {
         Ok(self
             .store()?
             .attach_active_agent_lease_workflow(lease_id, now)?)
+    }
+
+    /// Root-only atomic attachment and claim of one live compatibility agent lease.
+    ///
+    /// # Errors
+    /// Returns a runtime error for stale source authority, conflicting canonical ownership, or
+    /// unreadable durable state.
+    pub fn root_claim_active_agent_lease_workflow(
+        &self,
+        lease_id: AgentLeaseId,
+        lease_owner: RuntimeActorId,
+        maximum_lease_seconds: u64,
+        now: DateTime<Utc>,
+    ) -> Result<AgentTurnWorkflowAuthority, RuntimeError> {
+        Ok(self.store()?.claim_active_agent_lease_workflow(
+            lease_id,
+            lease_owner,
+            maximum_lease_seconds,
+            now,
+        )?)
     }
 
     /// Loads one canonical workflow with its exact TaskContract and ordered event history.
@@ -4849,6 +4893,7 @@ impl AppRuntime {
             shadow_command_verifier: default_shadow_command_verifier(),
             plugin_runner: package_plugin_runner(),
             plugin_trust: Arc::new(plugin_trust),
+            protected_agent_models: Arc::new(RwLock::new(None)),
             _ephemeral_data_directory: ephemeral_data_directory,
         };
         runtime.reconcile_cloud_diff_apply_recovery()?;
@@ -20576,7 +20621,56 @@ impl AppRuntime {
         RuntimeProviderGateway {
             registry: self.provider_registry.clone(),
             oauth_refresh: self.oauth_refresh.clone(),
+            protected: None,
         }
+    }
+
+    /// Installs the sole Protected Root dispatcher for production compatibility-agent calls.
+    ///
+    /// # Errors
+    /// Returns a conflict when a dispatcher was already installed or the lock is poisoned.
+    pub fn install_protected_agent_model_dispatcher(
+        &self,
+        dispatcher: Arc<dyn ProtectedAgentModelDispatcher>,
+    ) -> Result<(), RuntimeError> {
+        let mut slot = self
+            .protected_agent_models
+            .write()
+            .map_err(|_| RuntimeError::StorageLock)?;
+        if slot.is_some() {
+            return Err(StorageError::Conflict(
+                "Protected Root agent-model dispatcher is already installed".into(),
+            )
+            .into());
+        }
+        *slot = Some(dispatcher);
+        Ok(())
+    }
+
+    fn agent_provider_gateway(
+        &self,
+        lease_id: AgentLeaseId,
+    ) -> Result<RuntimeProviderGateway, RuntimeError> {
+        let dispatcher = self
+            .protected_agent_models
+            .read()
+            .map_err(|_| RuntimeError::StorageLock)?
+            .clone();
+        if let Some(dispatcher) = dispatcher {
+            return Ok(RuntimeProviderGateway {
+                registry: self.provider_registry.clone(),
+                oauth_refresh: self.oauth_refresh.clone(),
+                protected: Some((lease_id, dispatcher)),
+            });
+        }
+        if self.root_ownership()?.is_some() {
+            return Err(StorageError::Conflict(
+                "Protected Root agent-model dispatcher is unavailable; legacy provider bypass is refused"
+                    .into(),
+            )
+            .into());
+        }
+        Ok(self.provider_gateway())
     }
 
     /// Disconnects one provider, removes every protected credential slot, and
@@ -24291,9 +24385,10 @@ impl AppRuntime {
         let confidence = ConfidenceEstimate::new(5_000, 0)
             .map_err(|error| StorageError::InvalidData(error.to_string()))?;
         let scoped_tools = ProjectScopedAgentTools::new(&broker, root);
+        let provider_gateway = self.agent_provider_gateway(prepared.request.lease.id)?;
         self.execute_agent_turn_with_authority(
             prepared.request,
-            &self.provider_gateway(),
+            &provider_gateway,
             &scoped_tools,
             confidence,
             shadow_authority.as_ref(),
@@ -24488,6 +24583,7 @@ impl AppRuntime {
         let confidence = ConfidenceEstimate::new(5_000, 0)
             .map_err(|error| StorageError::InvalidData(error.to_string()))?;
         let scoped_tools = ProjectScopedAgentTools::new(&broker, root);
+        let provider_gateway = self.agent_provider_gateway(resumed.lease.id)?;
         self.execute_agent_turn(
             AgentTurnRequest {
                 role,
@@ -24503,7 +24599,7 @@ impl AppRuntime {
                 reasoning_effort: checkpoint.request.reasoning_effort,
                 service_tier: checkpoint.request.service_tier,
             },
-            &self.provider_gateway(),
+            &provider_gateway,
             &scoped_tools,
             confidence,
         )
@@ -29150,6 +29246,87 @@ mod tests {
     };
 
     use super::*;
+
+    struct RecordingProtectedAgentModels {
+        calls: Arc<Mutex<Vec<(AgentLeaseId, ProviderModelRef, ModelRequest)>>>,
+    }
+
+    #[async_trait]
+    impl ProtectedAgentModelDispatcher for RecordingProtectedAgentModels {
+        async fn create_response(
+            &self,
+            lease_id: AgentLeaseId,
+            target: &ProviderModelRef,
+            request: ModelRequest,
+        ) -> Result<ModelResponse, ProviderError> {
+            self.calls.lock().expect("protected call recorder").push((
+                lease_id,
+                target.clone(),
+                request,
+            ));
+            Ok(ModelResponse {
+                contract_version: mcg_providers::CONTRACT_VERSION,
+                id: "protected-response".into(),
+                model: target.model_id.clone(),
+                status: Some("completed".into()),
+                output: Vec::new(),
+                usage: mcg_providers::Usage::default(),
+                provider_metadata: serde_json::Value::Null,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn installed_protected_agent_dispatcher_prevents_registry_bypass() {
+        let runtime = AppRuntime::open_in_memory(AppConfig::default(), TEST_TOKEN.to_owned())
+            .expect("in-memory runtime");
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        runtime
+            .install_protected_agent_model_dispatcher(Arc::new(RecordingProtectedAgentModels {
+                calls: calls.clone(),
+            }))
+            .expect("install Protected Root dispatcher");
+        assert!(
+            runtime
+                .install_protected_agent_model_dispatcher(Arc::new(RecordingProtectedAgentModels {
+                    calls: Arc::new(Mutex::new(Vec::new())),
+                },))
+                .is_err(),
+            "the governed dispatcher cannot be replaced"
+        );
+        let lease_id = AgentLeaseId::new();
+        let target = ProviderModelRef {
+            provider_id: "not-in-legacy-registry".into(),
+            model_id: "governed-model".into(),
+        };
+        let request = ModelRequest {
+            contract_version: mcg_providers::CONTRACT_VERSION,
+            model: target.model_id.clone(),
+            client_request_id: None,
+            instructions: Some("bounded".into()),
+            messages: Vec::new(),
+            tools: Vec::new(),
+            tool_choice: None,
+            structured_output: None,
+            reasoning: None,
+            temperature: None,
+            top_p: None,
+            max_output_tokens: Some(32),
+            metadata: serde_json::Value::Null,
+        };
+        let gateway = runtime
+            .agent_provider_gateway(lease_id)
+            .expect("lease-scoped gateway");
+        let response = gateway
+            .create_response(&target, request.clone())
+            .await
+            .expect("governed response");
+        assert_eq!(response.id, "protected-response");
+        assert_eq!(
+            calls.lock().expect("protected calls").as_slice(),
+            &[(lease_id, target, request)]
+        );
+    }
 
     #[test]
     fn coder_report_template_preserves_every_pinned_requirement_and_readiness() {

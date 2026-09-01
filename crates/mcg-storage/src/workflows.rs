@@ -56,6 +56,13 @@ pub struct AgentTurnWorkflowAttachment {
     pub creation_event: WorkflowEvent,
 }
 
+/// Atomic authority returned when an active compatibility lease is attached and claimed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AgentTurnWorkflowAuthority {
+    pub workflow: AgentTurnWorkflowAttachment,
+    pub legacy_lease: AgentLease,
+}
+
 /// Computes the authoritative canonical hash for a task-contract version.
 ///
 /// # Errors
@@ -226,43 +233,210 @@ impl SqliteEventStore {
         lease_id: AgentLeaseId,
         now: DateTime<Utc>,
     ) -> Result<AgentTurnWorkflowAttachment, StorageError> {
-        let source_type = stable_type_id("mcg.agent_turn_source.v1")?;
-        let source_locator = lease_id.to_string();
         let transaction = self.connection.transaction()?;
-
-        if let Some(attachment) = load_workflow_source_attachment_by_source(
-            &transaction,
-            source_type.as_str(),
-            &source_locator,
-        )? {
-            let receipt = load_agent_turn_workflow_attachment(&transaction, attachment)?;
-            transaction.commit()?;
-            return Ok(receipt);
-        }
-
-        let source = load_active_agent_turn_source(&transaction, lease_id, now)?;
-        let (task_contract, mut attempt, attachment) =
-            derive_agent_turn_workflow(&source, source_type, now)?;
-        attempt.task_contract.content_hash = task_contract_content_hash(&task_contract)?;
-        let mut attachment = attachment;
-        attachment.task_contract = attempt.task_contract.clone();
-        let creation_event = create_workflow_in_transaction(
-            &transaction,
-            &task_contract,
-            &attempt,
-            CorrelationId::new(),
-            now,
-        )?;
-        insert_or_replay_workflow_source_attachment(&transaction, &attachment)?;
+        let receipt =
+            attach_active_agent_lease_workflow_in_transaction(&transaction, lease_id, now)?;
         transaction.commit()?;
-        Ok(AgentTurnWorkflowAttachment {
-            task_contract,
-            attempt,
-            attachment,
-            creation_event,
-        })
+        Ok(receipt)
     }
 
+    /// Atomically attaches and claims one currently active compatibility agent lease.
+    ///
+    /// Existing attachment evidence remains immutable, but every claim also reloads and validates
+    /// the mutable compatibility chain so an expired, completed, or reassigned lease cannot create
+    /// fresh canonical execution authority. Exact same-owner replay returns the current Running
+    /// attempt; another owner or state fails closed.
+    ///
+    /// # Errors
+    /// Returns a storage error for stale compatibility authority, conflicting ownership, invalid
+    /// lease bounds, malformed evidence, or a failed transaction.
+    pub fn claim_active_agent_lease_workflow(
+        &mut self,
+        lease_id: AgentLeaseId,
+        lease_owner: RuntimeActorId,
+        maximum_lease_seconds: u64,
+        now: DateTime<Utc>,
+    ) -> Result<AgentTurnWorkflowAuthority, StorageError> {
+        if maximum_lease_seconds == 0 || maximum_lease_seconds > 24 * 60 * 60 {
+            return Err(StorageError::InvalidData(
+                "canonical agent workflow lease bound is invalid".into(),
+            ));
+        }
+        let maximum_lease_seconds = i64::try_from(maximum_lease_seconds).map_err(|_| {
+            StorageError::InvalidData("canonical agent workflow lease bound overflowed".into())
+        })?;
+        let transaction = self.connection.transaction()?;
+        let mut workflow =
+            attach_active_agent_lease_workflow_in_transaction(&transaction, lease_id, now)?;
+        let source = load_active_agent_turn_source(&transaction, lease_id, now)?;
+        let maximum_expiry = now
+            .checked_add_signed(chrono::Duration::seconds(maximum_lease_seconds))
+            .ok_or_else(|| {
+                StorageError::InvalidData("canonical agent workflow lease expiry overflowed".into())
+            })?;
+        let lease_expires_at = source.lease.expires_at.min(maximum_expiry);
+        let current = load_attempt(&transaction, workflow.attempt.attempt_id)?.ok_or(
+            StorageError::WorkflowAttemptNotFound(workflow.attempt.attempt_id),
+        )?;
+        let attempt = match current.state {
+            WorkflowState::Ready => claim_workflow_attempt_in_transaction(
+                &transaction,
+                current.attempt_id,
+                current.revision,
+                current.lease_generation,
+                lease_owner,
+                lease_expires_at,
+                CorrelationId::new(),
+                &format!("claim-agent-lease:{lease_id}:{lease_owner}"),
+                now,
+            )?,
+            WorkflowState::Running
+                if current.lease_owner == Some(lease_owner)
+                    && current.lease_expires_at.is_some_and(|expiry| expiry > now) =>
+            {
+                current
+            }
+            _ => {
+                return Err(StorageError::Conflict(
+                    "canonical agent workflow is not claimable by this Runtime actor".into(),
+                ));
+            }
+        };
+        workflow.attempt = attempt;
+        transaction.commit()?;
+        Ok(AgentTurnWorkflowAuthority {
+            workflow,
+            legacy_lease: source.lease,
+        })
+    }
+}
+
+fn attach_active_agent_lease_workflow_in_transaction(
+    transaction: &Transaction<'_>,
+    lease_id: AgentLeaseId,
+    now: DateTime<Utc>,
+) -> Result<AgentTurnWorkflowAttachment, StorageError> {
+    let source_type = stable_type_id("mcg.agent_turn_source.v1")?;
+    let source_locator = lease_id.to_string();
+
+    if let Some(attachment) = load_workflow_source_attachment_by_source(
+        transaction,
+        source_type.as_str(),
+        &source_locator,
+    )? {
+        return load_agent_turn_workflow_attachment(transaction, attachment);
+    }
+
+    let source = load_active_agent_turn_source(transaction, lease_id, now)?;
+    let (task_contract, mut attempt, attachment) =
+        derive_agent_turn_workflow(&source, source_type, now)?;
+    attempt.task_contract.content_hash = task_contract_content_hash(&task_contract)?;
+    let mut attachment = attachment;
+    attachment.task_contract = attempt.task_contract.clone();
+    let creation_event = create_workflow_in_transaction(
+        transaction,
+        &task_contract,
+        &attempt,
+        CorrelationId::new(),
+        now,
+    )?;
+    insert_or_replay_workflow_source_attachment(transaction, &attachment)?;
+    Ok(AgentTurnWorkflowAttachment {
+        task_contract,
+        attempt,
+        attachment,
+        creation_event,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn claim_workflow_attempt_in_transaction(
+    transaction: &Transaction<'_>,
+    attempt_id: AttemptId,
+    expected_revision: u64,
+    expected_generation: u64,
+    lease_owner: RuntimeActorId,
+    lease_expires_at: DateTime<Utc>,
+    correlation_id: CorrelationId,
+    idempotency_key: &str,
+    now: DateTime<Utc>,
+) -> Result<WorkflowAttempt, StorageError> {
+    if idempotency_key.is_empty() || lease_expires_at <= now {
+        return Err(StorageError::InvalidData(
+            "workflow claim requires a nonempty key and future lease expiry".into(),
+        ));
+    }
+    let mut attempt = load_attempt(transaction, attempt_id)?
+        .ok_or(StorageError::WorkflowAttemptNotFound(attempt_id))?;
+    if let Some(event) =
+        load_event_by_idempotency(transaction, attempt.workflow_id, idempotency_key)?
+    {
+        let original = event_attempt(&event)?;
+        let expected = serde_json::json!({
+            "attempt_id": attempt.attempt_id,
+            "lease_owner": lease_owner,
+            "lease_generation": event.lease_generation,
+            "lease_expires_at": lease_expires_at,
+            "attempt": original,
+        });
+        if event.type_id.as_str() != WORKFLOW_CLAIMED_TYPE_ID
+            || event_payload_value(&event)? != expected
+        {
+            return Err(StorageError::Conflict(
+                "workflow claim idempotency key was replayed with different content".into(),
+            ));
+        }
+        return Ok(original);
+    }
+    ensure_expected(&attempt, expected_revision, expected_generation)?;
+    if attempt.state != WorkflowState::Ready {
+        return Err(StorageError::Conflict(format!(
+            "only a Ready workflow can be claimed; current state is {:?}",
+            attempt.state
+        )));
+    }
+    if !dependencies_satisfied(transaction, &attempt)? {
+        return Err(StorageError::Conflict(
+            "workflow task-contract dependencies are not yet satisfied".into(),
+        ));
+    }
+
+    attempt.state = WorkflowState::Running;
+    attempt.revision = increment(attempt.revision, "workflow revision")?;
+    attempt.lease_generation = increment(attempt.lease_generation, "lease generation")?;
+    attempt.lease_owner = Some(lease_owner);
+    attempt.lease_expires_at = Some(lease_expires_at);
+    attempt.heartbeat_at = Some(now);
+    attempt.updated_at = now;
+    update_attempt_cas(
+        transaction,
+        &attempt,
+        expected_revision,
+        expected_generation,
+    )?;
+
+    let (sequence, cause) = next_event_position(transaction, attempt.workflow_id)?;
+    let event = workflow_event(
+        &attempt,
+        sequence,
+        correlation_id,
+        cause,
+        idempotency_key,
+        WORKFLOW_CLAIMED_TYPE_ID,
+        now,
+        &serde_json::json!({
+            "attempt_id": attempt.attempt_id,
+            "lease_owner": lease_owner,
+            "lease_generation": attempt.lease_generation,
+            "lease_expires_at": lease_expires_at,
+            "attempt": attempt,
+        }),
+    )?;
+    insert_event(transaction, &event)?;
+    Ok(attempt)
+}
+
+impl SqliteEventStore {
     /// Loads the immutable canonical attachment for one exact pre-canonical source identity.
     ///
     /// # Errors
@@ -570,80 +744,18 @@ impl SqliteEventStore {
         idempotency_key: &str,
         now: DateTime<Utc>,
     ) -> Result<WorkflowAttempt, StorageError> {
-        if idempotency_key.is_empty() || lease_expires_at <= now {
-            return Err(StorageError::InvalidData(
-                "workflow claim requires a nonempty key and future lease expiry".into(),
-            ));
-        }
         let transaction = self.connection.transaction()?;
-        let mut attempt = load_attempt(&transaction, attempt_id)?
-            .ok_or(StorageError::WorkflowAttemptNotFound(attempt_id))?;
-        if let Some(event) =
-            load_event_by_idempotency(&transaction, attempt.workflow_id, idempotency_key)?
-        {
-            let original = event_attempt(&event)?;
-            let expected = serde_json::json!({
-                "attempt_id": attempt.attempt_id,
-                "lease_owner": lease_owner,
-                "lease_generation": event.lease_generation,
-                "lease_expires_at": lease_expires_at,
-                "attempt": original,
-            });
-            if event.type_id.as_str() != WORKFLOW_CLAIMED_TYPE_ID
-                || event_payload_value(&event)? != expected
-            {
-                return Err(StorageError::Conflict(
-                    "workflow claim idempotency key was replayed with different content".into(),
-                ));
-            }
-            transaction.commit()?;
-            return Ok(original);
-        }
-        ensure_expected(&attempt, expected_revision, expected_generation)?;
-        if attempt.state != WorkflowState::Ready {
-            return Err(StorageError::Conflict(format!(
-                "only a Ready workflow can be claimed; current state is {:?}",
-                attempt.state
-            )));
-        }
-        if !dependencies_satisfied(&transaction, &attempt)? {
-            return Err(StorageError::Conflict(
-                "workflow task-contract dependencies are not yet satisfied".into(),
-            ));
-        }
-
-        attempt.state = WorkflowState::Running;
-        attempt.revision = increment(attempt.revision, "workflow revision")?;
-        attempt.lease_generation = increment(attempt.lease_generation, "lease generation")?;
-        attempt.lease_owner = Some(lease_owner);
-        attempt.lease_expires_at = Some(lease_expires_at);
-        attempt.heartbeat_at = Some(now);
-        attempt.updated_at = now;
-        update_attempt_cas(
+        let attempt = claim_workflow_attempt_in_transaction(
             &transaction,
-            &attempt,
+            attempt_id,
             expected_revision,
             expected_generation,
-        )?;
-
-        let (sequence, cause) = next_event_position(&transaction, attempt.workflow_id)?;
-        let event = workflow_event(
-            &attempt,
-            sequence,
+            lease_owner,
+            lease_expires_at,
             correlation_id,
-            cause,
             idempotency_key,
-            WORKFLOW_CLAIMED_TYPE_ID,
             now,
-            &serde_json::json!({
-                "attempt_id": attempt.attempt_id,
-                "lease_owner": lease_owner,
-                "lease_generation": attempt.lease_generation,
-                "lease_expires_at": lease_expires_at,
-                "attempt": attempt,
-            }),
         )?;
-        insert_event(&transaction, &event)?;
         transaction.commit()?;
         Ok(attempt)
     }
@@ -1590,8 +1702,21 @@ fn load_agent_turn_workflow_attachment(
                     "workflow source attachment references a missing creation event".into(),
                 )
             })?;
+    let created_attempt = event_attempt(&creation_event)?;
+    validate_initial_workflow(&task_contract, &created_attempt)?;
+    validate_workflow_source_attachment(&task_contract, &created_attempt, &attachment)?;
     if creation_event.type_id.as_str() != WORKFLOW_CREATED_TYPE_ID
-        || event_attempt(&creation_event)? != attempt
+        || created_attempt.workflow_id != attempt.workflow_id
+        || created_attempt.attempt_id != attempt.attempt_id
+        || created_attempt.task_contract != attempt.task_contract
+        || created_attempt.parent_attempt_id != attempt.parent_attempt_id
+        || created_attempt.attempt_number != attempt.attempt_number
+        || created_attempt.environment_snapshot != attempt.environment_snapshot
+        || created_attempt.configuration != attempt.configuration
+        || created_attempt.idempotency_key != attempt.idempotency_key
+        || created_attempt.retry_policy != attempt.retry_policy
+        || created_attempt.compensation_policy != attempt.compensation_policy
+        || created_attempt.created_at != attempt.created_at
     {
         return Err(StorageError::InvalidData(
             "workflow source attachment creation evidence is inconsistent".into(),
@@ -2629,6 +2754,50 @@ mod tests {
                 )
                 .unwrap(),
             receipt
+        );
+
+        let owner = RuntimeActorId::new();
+        let authority = store
+            .claim_active_agent_lease_workflow(lease.id, owner, 120, observed_at)
+            .unwrap();
+        assert_eq!(authority.legacy_lease, lease);
+        assert_eq!(authority.workflow.attempt.state, WorkflowState::Running);
+        assert_eq!(authority.workflow.attempt.lease_owner, Some(owner));
+        assert_eq!(authority.workflow.attempt.lease_generation, 1);
+        assert_eq!(
+            store
+                .claim_active_agent_lease_workflow(
+                    lease.id,
+                    owner,
+                    120,
+                    observed_at + chrono::Duration::seconds(1),
+                )
+                .unwrap()
+                .workflow
+                .attempt,
+            authority.workflow.attempt
+        );
+        assert!(matches!(
+            store.claim_active_agent_lease_workflow(
+                lease.id,
+                RuntimeActorId::new(),
+                120,
+                observed_at + chrono::Duration::seconds(1),
+            ),
+            Err(StorageError::Conflict(_))
+        ));
+        assert!(
+            store
+                .claim_active_agent_lease_workflow(lease.id, owner, 120, lease.expires_at)
+                .is_err()
+        );
+        assert_eq!(
+            store
+                .workflow_attempt(authority.workflow.attempt.attempt_id)
+                .unwrap()
+                .unwrap(),
+            authority.workflow.attempt,
+            "failed revalidation cannot mutate canonical authority"
         );
     }
 

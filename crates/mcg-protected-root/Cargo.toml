@@ -29,6 +29,7 @@ url.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+mcg-agents = { path = "../mcg-agents" }
 tempfile.workspace = true
 
 [[bin]]
