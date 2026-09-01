@@ -2,6 +2,14 @@
 
 Durable project context lives here. Update this file whenever information should survive chat context compression or future agent handoff.
 
+### 2026-09-01 - Plugin browser boundary audit
+
+- Context: After modern plugin MCP landed, the next Stage 6 family was browser execution. The plugin protocol and durable scopes contain no browser operation. Existing `BrowserExecutor` and `PersistentBrowserManager` run under the compatibility Runtime and do not consume schema-61 Root permits in an independently validating child.
+- Decision: Do not route plugins through either ambient Runtime browser path. Start with a bounded same-origin ephemeral `BrowserWorkflowDocument` operation and exact origin scope, then add a fixed adjacent browser runner that independently validates its executable, workflow, origin, viewport, limits, sandbox profile, action, and Tool permit before launching Chromium. Persistent sessions, owner handoff, arbitrary script/CDP, downloads, cross-origin navigation, and credential injection remain separate denied capabilities.
+- Files inspected: `crates/mcg-{plugin-protocol,domain,storage,runtime,tools,browser-contracts}` and `apps/mcg-shadow-runner`; no product files changed for this audit. The other agent's untracked Stage 3 document remains untouched.
+- Result: The next browser slice is defined without conflating presentation/session compatibility with plugin execution authority.
+- Follow-up: Add the bounded plugin workflow contract and exact origin grant first, then implement the permit-consuming child, Root settlement/recovery, adversarial same-origin/network/data-egress tests, package contracts, and native UAT.
+
 ### 2026-09-01 - Modern plugin MCP consumes exact Root authority
 
 - Context: Plugin MCP had a bounded operation and exact durable connection/tool grants, but Legacy Runtime denied it because no physical executor consumed Root authority and bearer resolution would otherwise expose ambient credential access.
