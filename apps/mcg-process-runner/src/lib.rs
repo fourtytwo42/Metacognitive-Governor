@@ -32,6 +32,9 @@ use tokio::{
 };
 use uuid::Uuid;
 
+mod http;
+pub use http::*;
+
 pub const PROCESS_RUNNER_PROTOCOL_VERSION: u32 = 1;
 pub const PROCESS_RUNNER_REQUEST_MAX_BYTES: usize = 10 * 1024 * 1024;
 pub const PROCESS_RUNNER_RESPONSE_MAX_BYTES: usize = 2 * 1024 * 1024;
@@ -912,6 +915,18 @@ fn tool_policy_binding(policy: &ToolPolicy) -> Result<PolicyBinding, String> {
         content_hash,
     })
 }
+
+#[cfg(windows)]
+fn preserve_platform_runtime_environment(command: &mut Command) {
+    for name in ["SystemRoot", "WINDIR"] {
+        if let Some(value) = std::env::var_os(name) {
+            command.env(name, value);
+        }
+    }
+}
+
+#[cfg(not(windows))]
+const fn preserve_platform_runtime_environment(_command: &mut Command) {}
 
 fn require_regular_unlinked(path: &Path) -> Result<(), ProcessRunnerClientError> {
     let metadata =

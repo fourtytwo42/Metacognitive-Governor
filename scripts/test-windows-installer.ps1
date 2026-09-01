@@ -391,6 +391,17 @@ try {
         throw "Packaged process runner qualification report is incomplete."
     }
     [IO.File]::WriteAllText((Join-Path $uatRoot "process-runner.json"), $processQualificationJson, [Text.UTF8Encoding]::new($false))
+    $httpPolicyJson = (& $processRunner --qualify-http-policy) -join "`n"
+    if ($LASTEXITCODE -ne 0) {
+        throw "Packaged HTTP runner policy qualification failed with exit code $LASTEXITCODE."
+    }
+    $httpPolicy = $httpPolicyJson | ConvertFrom-Json
+    if ($httpPolicy.outcome -ne "denied" -or
+        $httpPolicy.error_code -ne "dns_scope_denied" -or
+        $null -ne $httpPolicy.observation) {
+        throw "Packaged HTTP runner policy qualification report is incomplete."
+    }
+    [IO.File]::WriteAllText((Join-Path $uatRoot "http-runner-policy.json"), $httpPolicyJson, [Text.UTF8Encoding]::new($false))
 
     $runtimeWorker = Join-Path $installRoot "mcg-runtime-worker.exe"
     $runtimeQualificationJson = (& $runtimeWorker --qualify-runtime-worker) -join "`n"
@@ -832,6 +843,7 @@ try {
         PluginRunnerQualified = $true
         ActionRunnerQualified = $true
         ProcessRunnerQualified = $true
+        HttpPolicyQualified = $true
         AppExecutableRemoved = $true
     }
 } finally {

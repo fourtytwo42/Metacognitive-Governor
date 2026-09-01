@@ -12,14 +12,19 @@ executor = []
 [dependencies]
 base64.workspace = true
 chrono.workspace = true
+futures-util.workspace = true
 mcg-contracts = { path = "../../crates/mcg-contracts" }
+mcg-providers = { path = "../../crates/mcg-providers" }
 process-wrap.workspace = true
+reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+url.workspace = true
 uuid.workspace = true
+zeroize.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

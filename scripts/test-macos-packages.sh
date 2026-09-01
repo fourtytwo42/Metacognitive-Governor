@@ -235,6 +235,18 @@ assert report["outcome"] == "effect_confirmed"
 assert report["observation"] is not None
 assert report["error_code"] is None
 PY
+  local http_report="$uat_root/http-runner-policy.json"
+  "$executable" --qualify-http-policy >"$http_report"
+  python3 - "$http_report" <<'PY'
+import json
+import pathlib
+import sys
+
+report = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
+assert report["outcome"] == "denied"
+assert report["error_code"] == "dns_scope_denied"
+assert report["observation"] is None
+PY
 }
 
 test_runtime_worker() {
@@ -556,5 +568,6 @@ APPLICATION_REMOVED=true
 PLUGIN_RUNNERS_QUALIFIED=true
 ACTION_RUNNERS_QUALIFIED=true
 PROCESS_RUNNERS_QUALIFIED=true
+HTTP_POLICY_QUALIFIED=true
 NOTARIZATION_REQUIRED=${MCG_MACOS_UAT_REQUIRE_NOTARIZED:-0}
 EOF
