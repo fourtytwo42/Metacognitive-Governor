@@ -1754,6 +1754,31 @@ pub struct ModelUsage {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ModelRunCostProvenance {
+    Unknown,
+    NoProviderContact,
+    ProviderCatalog { pricing_source: SourceRef },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelRunErrorClass {
+    RetryableBeforeProviderContact,
+    FinalBeforeProviderContact,
+    OutcomeUnknown,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelRunOutcomeEvidence {
+    pub latency_milliseconds: u64,
+    pub actual_cost_microusd: Option<u64>,
+    pub cost_provenance: ModelRunCostProvenance,
+    pub error_class: Option<ModelRunErrorClass>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelRun {
     pub id: ModelRunId,
     pub invocation_id: InvocationId,
@@ -1764,6 +1789,8 @@ pub struct ModelRun {
     pub usage: Option<ModelUsage>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observed_model_fingerprint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome_evidence: Option<ModelRunOutcomeEvidence>,
     pub started_at: DateTime<Utc>,
     pub finished_at: Option<DateTime<Utc>>,
 }
@@ -1799,15 +1826,18 @@ impl ModelRun {
                 "observed model fingerprint is empty, oversized, or contains controls",
             )?;
         }
+        self.validate_outcome_evidence()?;
         if self.state == ModelRunState::Planned
             && (self.provider_request_id.is_some()
                 || self.response_artifact.is_some()
                 || self.usage.is_some()
-                || self.observed_model_fingerprint.is_some())
+                || self.observed_model_fingerprint.is_some()
+                || self.outcome_evidence.is_some())
             || self.state == ModelRunState::Dispatched
                 && (self.response_artifact.is_some()
                     || self.usage.is_some()
-                    || self.observed_model_fingerprint.is_some())
+                    || self.observed_model_fingerprint.is_some()
+                    || self.outcome_evidence.is_some())
             || self.state != ModelRunState::Completed && self.observed_model_fingerprint.is_some()
         {
             return Err(ContractError::InvalidContract(
@@ -1831,6 +1861,66 @@ impl ModelRun {
             ));
         }
         Ok(())
+    }
+
+    fn validate_outcome_evidence(&self) -> Result<(), ContractError> {
+        let Some(evidence) = &self.outcome_evidence else {
+            return Ok(());
+        };
+        if let ModelRunCostProvenance::ProviderCatalog { pricing_source } =
+            &evidence.cost_provenance
+        {
+            pricing_source.validate()?;
+        }
+        let valid_cost = match &evidence.cost_provenance {
+            ModelRunCostProvenance::Unknown => evidence.actual_cost_microusd.is_none(),
+            ModelRunCostProvenance::NoProviderContact => evidence.actual_cost_microusd == Some(0),
+            ModelRunCostProvenance::ProviderCatalog { .. } => {
+                evidence.actual_cost_microusd.is_some()
+            }
+        };
+        let valid_outcome = match self.state {
+            ModelRunState::Completed => {
+                evidence.error_class.is_none()
+                    && !matches!(
+                        &evidence.cost_provenance,
+                        ModelRunCostProvenance::NoProviderContact
+                    )
+            }
+            ModelRunState::Failed => {
+                matches!(
+                    evidence.error_class,
+                    Some(
+                        ModelRunErrorClass::RetryableBeforeProviderContact
+                            | ModelRunErrorClass::FinalBeforeProviderContact
+                    )
+                ) && matches!(
+                    &evidence.cost_provenance,
+                    ModelRunCostProvenance::NoProviderContact
+                )
+            }
+            ModelRunState::OutcomeUnknown => {
+                evidence.error_class == Some(ModelRunErrorClass::OutcomeUnknown)
+                    && matches!(&evidence.cost_provenance, ModelRunCostProvenance::Unknown)
+            }
+            ModelRunState::Cancelled => evidence.error_class == Some(ModelRunErrorClass::Cancelled),
+            ModelRunState::Planned | ModelRunState::Dispatched => false,
+        };
+        let expected_latency = self.finished_at.and_then(|finished_at| {
+            u64::try_from(
+                finished_at
+                    .signed_duration_since(self.started_at)
+                    .num_milliseconds(),
+            )
+            .ok()
+        });
+        if valid_cost && valid_outcome && expected_latency == Some(evidence.latency_milliseconds) {
+            Ok(())
+        } else {
+            Err(ContractError::InvalidContract(
+                "model run outcome evidence is inconsistent with its terminal state",
+            ))
+        }
     }
 }
 
@@ -2861,6 +2951,7 @@ mod tests {
                 reasoning_tokens: 2,
             }),
             observed_model_fingerprint: None,
+            outcome_evidence: None,
             started_at: fixture_time("2026-08-30T12:00:00Z"),
             finished_at: Some(fixture_time("2026-08-30T12:00:01Z")),
         };
@@ -2985,6 +3076,7 @@ mod tests {
             response_artifact: None,
             usage: None,
             observed_model_fingerprint: None,
+            outcome_evidence: None,
             started_at: fixture_time("2026-08-30T12:00:00Z"),
             finished_at: Some(fixture_time("2026-08-30T12:00:01Z")),
         };
@@ -2992,6 +3084,27 @@ mod tests {
             run.validate(),
             Err(ContractError::InvalidContract(
                 "model run state and timestamps are inconsistent"
+            ))
+        );
+
+        let mut completed_with_outcome = run.clone();
+        completed_with_outcome.state = ModelRunState::Completed;
+        completed_with_outcome.outcome_evidence = Some(ModelRunOutcomeEvidence {
+            latency_milliseconds: 1_000,
+            actual_cost_microusd: None,
+            cost_provenance: ModelRunCostProvenance::Unknown,
+            error_class: None,
+        });
+        assert_eq!(completed_with_outcome.validate(), Ok(()));
+        completed_with_outcome
+            .outcome_evidence
+            .as_mut()
+            .expect("outcome evidence")
+            .error_class = Some(ModelRunErrorClass::OutcomeUnknown);
+        assert_eq!(
+            completed_with_outcome.validate(),
+            Err(ContractError::InvalidContract(
+                "model run outcome evidence is inconsistent with its terminal state"
             ))
         );
 
@@ -3011,9 +3124,11 @@ mod tests {
         })
         .expect("legacy-compatible model run JSON");
         assert!(legacy_json.get("observed_model_fingerprint").is_none());
+        assert!(legacy_json.get("outcome_evidence").is_none());
         let decoded: ModelRun =
             serde_json::from_value(legacy_json).expect("decode model run without fingerprint");
         assert!(decoded.observed_model_fingerprint.is_none());
+        assert!(decoded.outcome_evidence.is_none());
 
         assert!(ModelRunState::Planned.can_transition_to(ModelRunState::Dispatched));
         assert!(ModelRunState::Dispatched.can_transition_to(ModelRunState::Completed));

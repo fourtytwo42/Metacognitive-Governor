@@ -42,13 +42,14 @@ use mcg_contracts::{
     CorrelationId, DeterministicCriterionEvidence, DeterministicVerifyInput, EffectClass,
     EffectOutcome, HashAlgorithm, InvocationId, InvocationManifest, InvocationRole, ModelBudget,
     ModelDataClassification, ModelDestinationClass, ModelDisclosureManifest, ModelEgressPolicy,
-    ModelEgressRoute, ModelInvocationPermit, ModelInvocationProposal, ModelRunId, ModelUsage,
-    OwnerActionCompensationRequest, PROTOCOL_V1, PermitId, PolicyBinding,
-    RUNTIME_INVOCATION_REQUEST_HASH_DOMAIN, ReconciliationJob, ReconciliationJobId,
-    ReconciliationObservation, RequestId, RootStatus, RpcEnvelope, RuntimeActorId, RuntimeIdentity,
-    RuntimeInstanceId, RuntimeInvocationRequest, RuntimeInvocationResult, SecretHandleId,
-    SourceRef, StableTypeId, VersionedPayload, WorkflowAttempt, WorkflowCancelRequest, WorkflowId,
-    WorkflowState, canonical_contract_hash, decode_canonical_cbor_v1,
+    ModelEgressRoute, ModelInvocationPermit, ModelInvocationProposal, ModelRunCostProvenance,
+    ModelRunErrorClass, ModelRunId, ModelUsage, OwnerActionCompensationRequest, PROTOCOL_V1,
+    PermitId, PolicyBinding, RUNTIME_INVOCATION_REQUEST_HASH_DOMAIN, ReconciliationJob,
+    ReconciliationJobId, ReconciliationObservation, RequestId, RootStatus, RpcEnvelope,
+    RuntimeActorId, RuntimeIdentity, RuntimeInstanceId, RuntimeInvocationRequest,
+    RuntimeInvocationResult, SecretHandleId, SourceRef, StableTypeId, VersionedPayload,
+    WorkflowAttempt, WorkflowCancelRequest, WorkflowId, WorkflowState, canonical_contract_hash,
+    decode_canonical_cbor_v1,
 };
 use mcg_domain::{AgentLeaseId, EvaluationId};
 use mcg_platform::{
@@ -73,7 +74,7 @@ use mcg_provider_runner::{
 };
 use mcg_providers::{
     CONTRACT_VERSION, ModelDescriptor, ModelRequest, ModelResponse, ModelStreamEvent,
-    ProviderAuthMode, ProviderConnection, ProviderError, ProviderKind, ProviderStream,
+    ProviderAuthMode, ProviderConnection, ProviderError, ProviderKind, ProviderStream, actual_cost,
 };
 use mcg_runtime::{
     AppRuntime, ProtectedAgentModelDispatcher, ProtectedCompatibilityVerifier, RuntimeError,
@@ -476,6 +477,52 @@ fn observed_model_fingerprint(
         HashAlgorithm::Blake3_256 => "blake3-256",
     };
     Ok(format!("{}:{algorithm}:{}", hash.domain, hash.digest_hex))
+}
+
+fn observed_model_cost(
+    runtime: &AppRuntime,
+    authorization: &RuntimeModelEgressAuthorizationReceipt,
+    response: &ModelResponse,
+) -> Result<(Option<u64>, ModelRunCostProvenance), ProtectedRootError> {
+    let Some((_, catalog)) =
+        runtime.model_egress_route_state(&authorization.proposal.route.provider_id)?
+    else {
+        return Ok((None, ModelRunCostProvenance::Unknown));
+    };
+    let Some(model) = catalog
+        .models
+        .iter()
+        .find(|model| model.id == authorization.proposal.route.model_id)
+    else {
+        return Ok((None, ModelRunCostProvenance::Unknown));
+    };
+    if model_descriptor_source_ref(&authorization.proposal.route.provider_id, model)?
+        != authorization.permit.resolved_model
+    {
+        return Ok((None, ModelRunCostProvenance::Unknown));
+    }
+    let Some(price) = model.price.as_ref().filter(|price| price.currency == "USD") else {
+        return Ok((None, ModelRunCostProvenance::Unknown));
+    };
+    let Some(amount_usd) = actual_cost(Some(price), &response.usage).amount_usd else {
+        return Ok((None, ModelRunCostProvenance::Unknown));
+    };
+    let microusd = amount_usd * 1_000_000.0;
+    if !microusd.is_finite() || microusd < 0.0 {
+        return Err(StorageError::InvalidData(
+            "provider catalog produced an invalid observed cost".into(),
+        )
+        .into());
+    }
+    let microusd = format!("{microusd:.0}").parse::<u64>().map_err(|_| {
+        StorageError::InvalidData("provider catalog cost exceeds the evidence range".into())
+    })?;
+    Ok((
+        Some(microusd),
+        ModelRunCostProvenance::ProviderCatalog {
+            pricing_source: authorization.permit.resolved_model.clone(),
+        },
+    ))
 }
 
 #[async_trait::async_trait]
@@ -1712,9 +1759,16 @@ async fn dispatch_governed_gateway(
             match class {
                 GovernedProviderFailureClass::RetryableBeforeProviderContact
                 | GovernedProviderFailureClass::FinalBeforeProviderContact => {
+                    let error_class =
+                        if class == GovernedProviderFailureClass::RetryableBeforeProviderContact {
+                            ModelRunErrorClass::RetryableBeforeProviderContact
+                        } else {
+                            ModelRunErrorClass::FinalBeforeProviderContact
+                        };
                     runtime.fail_governed_provider_invocation_before_contact(
                         invocation_id,
                         model_run_id,
+                        error_class,
                         Utc::now(),
                     )?;
                     if class == GovernedProviderFailureClass::RetryableBeforeProviderContact {
@@ -1814,6 +1868,18 @@ pub async fn execute_authorized_model_invocation(
             return Err(error);
         }
     };
+    let (actual_cost_microusd, cost_provenance) =
+        match observed_model_cost(runtime, &authorization, &response) {
+            Ok(cost) => cost,
+            Err(error) => {
+                runtime.settle_governed_provider_invocation_unknown(
+                    manifest.id,
+                    model_run_id,
+                    completed_at,
+                )?;
+                return Err(error);
+            }
+        };
     let completed_run = match runtime.complete_governed_provider_invocation(
         manifest.id,
         model_run_id,
@@ -1825,6 +1891,8 @@ pub async fn execute_authorized_model_invocation(
             reasoning_tokens: response.usage.reasoning_tokens,
         },
         fingerprint,
+        actual_cost_microusd,
+        cost_provenance,
         completed_at,
     ) {
         Ok(completed) => completed,
@@ -1932,9 +2000,16 @@ pub async fn execute_authorized_model_stream(
             match class {
                 GovernedProviderFailureClass::RetryableBeforeProviderContact
                 | GovernedProviderFailureClass::FinalBeforeProviderContact => {
+                    let error_class =
+                        if class == GovernedProviderFailureClass::RetryableBeforeProviderContact {
+                            ModelRunErrorClass::RetryableBeforeProviderContact
+                        } else {
+                            ModelRunErrorClass::FinalBeforeProviderContact
+                        };
                     runtime.fail_governed_provider_invocation_before_contact(
                         manifest.id,
                         model_run_id,
+                        error_class,
                         Utc::now(),
                     )?;
                     if class == GovernedProviderFailureClass::RetryableBeforeProviderContact {
@@ -2039,6 +2114,8 @@ async fn run_authorized_model_stream(
             let completed_at = Utc::now();
             let completion = model_provider_response_artifact(response).and_then(|artifact| {
                 let fingerprint = observed_model_fingerprint(&authorization, response)?;
+                let (actual_cost_microusd, cost_provenance) =
+                    observed_model_cost(&runtime, &authorization, response)?;
                 runtime
                     .complete_governed_provider_invocation(
                         invocation_id,
@@ -2051,6 +2128,8 @@ async fn run_authorized_model_stream(
                             reasoning_tokens: response.usage.reasoning_tokens,
                         },
                         fingerprint,
+                        actual_cost_microusd,
+                        cost_provenance,
                         completed_at,
                     )
                     .map_err(ProtectedRootError::from)
@@ -4403,7 +4482,15 @@ mod tests {
                 streaming: Some(true),
                 ..ModelCapabilities::default()
             },
-            price: None,
+            price: Some(mcg_providers::ModelPrice {
+                input_per_million: Some(1.0),
+                cached_input_per_million: Some(0.5),
+                output_per_million: Some(2.0),
+                currency: "USD".into(),
+                provenance: mcg_providers::PriceProvenance::McgCatalog {
+                    catalog_date: "2026-09-01".into(),
+                },
+            }),
             metadata: serde_json::Value::Null,
         };
         store
@@ -4707,6 +4794,7 @@ mod tests {
             response_artifact: None,
             usage: None,
             observed_model_fingerprint: None,
+            outcome_evidence: None,
             started_at: at,
             finished_at: None,
         };
@@ -5120,15 +5208,22 @@ mod tests {
             inspection.manifest.egress_permit,
             Some(authorization.permit_ref.clone())
         );
-        assert_eq!(
-            inspection
-                .model_runs
-                .last()
-                .expect("completed model run")
-                .run
-                .state,
-            ModelRunState::Completed
-        );
+        let completed_run = &inspection
+            .model_runs
+            .last()
+            .expect("completed model run")
+            .run;
+        assert_eq!(completed_run.state, ModelRunState::Completed);
+        let outcome = completed_run
+            .outcome_evidence
+            .as_ref()
+            .expect("completed provider outcome evidence");
+        assert_eq!(outcome.actual_cost_microusd, Some(18));
+        assert!(matches!(
+            outcome.cost_provenance,
+            ModelRunCostProvenance::ProviderCatalog { .. }
+        ));
+        assert!(outcome.error_class.is_none());
     }
 
     #[tokio::test]
@@ -5272,23 +5367,37 @@ mod tests {
                     .runtime_invocation(*invocation_id, 10)
                     .expect("retry invocation inspection")
                     .expect("retry invocation exists");
-                assert_eq!(
-                    inspection
-                        .model_runs
-                        .last()
-                        .expect("retry model run")
-                        .run
-                        .state,
-                    expected_states[index]
-                );
-                model_run_ids.push(
-                    inspection
-                        .model_runs
-                        .last()
-                        .expect("retry model run")
-                        .run
-                        .id,
-                );
+                let run = &inspection.model_runs.last().expect("retry model run").run;
+                assert_eq!(run.state, expected_states[index]);
+                let outcome = run
+                    .outcome_evidence
+                    .as_ref()
+                    .expect("retry outcome evidence");
+                match run.state {
+                    ModelRunState::Completed => {
+                        assert_eq!(outcome.actual_cost_microusd, Some(20));
+                        assert!(outcome.error_class.is_none());
+                    }
+                    ModelRunState::Failed => {
+                        assert_eq!(outcome.actual_cost_microusd, Some(0));
+                        assert!(matches!(
+                            outcome.error_class,
+                            Some(
+                                ModelRunErrorClass::RetryableBeforeProviderContact
+                                    | ModelRunErrorClass::FinalBeforeProviderContact
+                            )
+                        ));
+                    }
+                    ModelRunState::OutcomeUnknown => {
+                        assert!(outcome.actual_cost_microusd.is_none());
+                        assert_eq!(
+                            outcome.error_class,
+                            Some(ModelRunErrorClass::OutcomeUnknown)
+                        );
+                    }
+                    _ => panic!("unexpected retry terminal state"),
+                }
+                model_run_ids.push(run.id);
                 retry_payloads.push(
                     decode_canonical_cbor_v1(
                         &inspection.context_manifest.selected_sources[0]
@@ -5437,6 +5546,16 @@ mod tests {
                 .is_none(),
             "possible-contact cancellation must not invent observed completion identity"
         );
+        let outcome = inspection
+            .model_runs
+            .last()
+            .and_then(|record| record.run.outcome_evidence.as_ref())
+            .expect("possible-contact cancellation outcome evidence");
+        assert!(outcome.actual_cost_microusd.is_none());
+        assert_eq!(
+            outcome.error_class,
+            Some(ModelRunErrorClass::OutcomeUnknown)
+        );
         drop(gateway);
         drop(runtime);
 
@@ -5535,11 +5654,16 @@ mod tests {
         )
         .await
         .expect("governed provider stream");
-        let calls = gateway.calls.lock().expect("streaming gateway calls");
-        assert_eq!(calls.len(), 2, "one proved pre-contact stream retry");
-        let (authorization, dispatched_request) = calls[1].clone();
-        let first_invocation_id = calls[0].0.proposal.invocation_id;
-        drop(calls);
+        let (authorization, dispatched_request, first_invocation_id) = {
+            let calls = gateway.calls.lock().expect("streaming gateway calls");
+            assert_eq!(calls.len(), 2, "one proved pre-contact stream retry");
+            let (authorization, dispatched_request) = calls[1].clone();
+            (
+                authorization,
+                dispatched_request,
+                calls[0].0.proposal.invocation_id,
+            )
+        };
         let expected_fingerprint = observed_model_fingerprint(&authorization, &gateway.response)?;
         assert_eq!(
             authorization.proposal.request_hash,
@@ -5639,6 +5763,14 @@ mod tests {
                 .and_then(|record| record.run.observed_model_fingerprint.as_deref()),
             Some(expected_fingerprint.as_str())
         );
+        assert_eq!(
+            completed
+                .model_runs
+                .last()
+                .and_then(|record| record.run.outcome_evidence.as_ref())
+                .and_then(|evidence| evidence.actual_cost_microusd),
+            Some(18)
+        );
         drop(stream);
         drop(gateway);
         drop(runtime);
@@ -5663,6 +5795,14 @@ mod tests {
                 .last()
                 .and_then(|record| record.run.observed_model_fingerprint.as_deref()),
             Some(expected_fingerprint.as_str())
+        );
+        assert_eq!(
+            completed
+                .model_runs
+                .last()
+                .and_then(|record| record.run.outcome_evidence.as_ref())
+                .and_then(|evidence| evidence.actual_cost_microusd),
+            Some(18)
         );
         Ok::<(), ProtectedRootError>(())
     }
@@ -5860,7 +6000,15 @@ mod tests {
                 responses: Some(true),
                 ..ModelCapabilities::default()
             },
-            price: None,
+            price: Some(mcg_providers::ModelPrice {
+                input_per_million: Some(1.0),
+                cached_input_per_million: Some(1.0),
+                output_per_million: Some(2.0),
+                currency: "USD".into(),
+                provenance: mcg_providers::PriceProvenance::McgCatalog {
+                    catalog_date: "2026-09-01".into(),
+                },
+            }),
             metadata: serde_json::Value::Null,
         };
         {
@@ -6154,6 +6302,53 @@ mod tests {
                 .expect("provider response lookup")
                 .is_none(),
             "generic durable state must not retain raw provider response content"
+        );
+
+        let mut over_budget_proposal = proposal.clone();
+        over_budget_proposal.invocation_id = InvocationId::new();
+        over_budget_proposal.requested_limits.max_cost_microusd = 1;
+        let over_budget_receipt = authorize_runtime_model_egress(
+            &runtime,
+            &context,
+            &over_budget_proposal,
+            &runtime_identity,
+            &policy,
+            at,
+        )
+        .expect("authorize exact cost-budget fixture");
+        let mut over_budget_manifest = manifest.clone();
+        over_budget_manifest.id = over_budget_proposal.invocation_id;
+        over_budget_manifest.egress_permit = Some(over_budget_receipt.permit_ref);
+        over_budget_manifest.resolved_provider = over_budget_receipt.permit.resolved_provider;
+        over_budget_manifest.resolved_model = over_budget_receipt.permit.resolved_model;
+        let over_budget_run_id = ModelRunId::new();
+        assert!(
+            execute_authorized_model_invocation(
+                &runtime,
+                &gateway,
+                &over_budget_manifest,
+                over_budget_run_id,
+                &request,
+                at,
+            )
+            .await
+            .is_err(),
+            "known provider cost above the exact permit ceiling must fail closed"
+        );
+        let over_budget_run = runtime
+            .governed_provider_model_run(over_budget_proposal.invocation_id, over_budget_run_id)
+            .expect("cost-budget model run lookup")
+            .expect("cost-budget model run");
+        assert_eq!(over_budget_run.run.state, ModelRunState::OutcomeUnknown);
+        assert!(
+            over_budget_run
+                .run
+                .outcome_evidence
+                .as_ref()
+                .is_some_and(|evidence| {
+                    evidence.actual_cost_microusd.is_none()
+                        && evidence.error_class == Some(ModelRunErrorClass::OutcomeUnknown)
+                })
         );
 
         let mut stale_proposal = proposal.clone();

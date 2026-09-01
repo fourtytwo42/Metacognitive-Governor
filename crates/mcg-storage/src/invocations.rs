@@ -1087,6 +1087,8 @@ fn validate_model_run_continuity(current: &ModelRun, next: &ModelRun) -> Result<
     let usage_preserved = current.usage.is_none() || current.usage == next.usage;
     let fingerprint_preserved = current.observed_model_fingerprint.is_none()
         || current.observed_model_fingerprint == next.observed_model_fingerprint;
+    let outcome_evidence_preserved =
+        current.outcome_evidence.is_none() || current.outcome_evidence == next.outcome_evidence;
     if current.id != next.id
         || current.invocation_id != next.invocation_id
         || current.role != next.role
@@ -1095,6 +1097,7 @@ fn validate_model_run_continuity(current: &ModelRun, next: &ModelRun) -> Result<
         || !artifact_preserved
         || !usage_preserved
         || !fingerprint_preserved
+        || !outcome_evidence_preserved
     {
         return Err(StorageError::Conflict(
             "model-run transition rewrites immutable historical fields".into(),
@@ -1220,9 +1223,10 @@ mod tests {
     use chrono::TimeZone;
     use mcg_contracts::{
         ArtifactRef, ConfigurationId, ContextSelection, ContractClause, CorrelationId,
-        CriterionResult, HashAlgorithm, ModelUsage, PolicyBinding, RecordId, RetryPolicy,
-        RuntimeActorId, RuntimeIdentity, RuntimeInstanceId, SourceRef, TaskContract,
-        TaskContractId, TaskContractStatus, VersionedRef, WorkflowId, WorkflowState,
+        CriterionResult, HashAlgorithm, ModelRunCostProvenance, ModelRunOutcomeEvidence,
+        ModelUsage, PolicyBinding, RecordId, RetryPolicy, RuntimeActorId, RuntimeIdentity,
+        RuntimeInstanceId, SourceRef, TaskContract, TaskContractId, TaskContractStatus,
+        VersionedRef, WorkflowId, WorkflowState,
     };
     use tempfile::tempdir;
 
@@ -1403,6 +1407,7 @@ mod tests {
             response_artifact: None,
             usage: None,
             observed_model_fingerprint: None,
+            outcome_evidence: None,
             started_at: now(),
             finished_at: None,
         }
@@ -1426,6 +1431,14 @@ mod tests {
             observed_model_fingerprint: Some(
                 "MetaCog.ObservedModelFingerprint:sha256:fixture".into(),
             ),
+            outcome_evidence: Some(ModelRunOutcomeEvidence {
+                latency_milliseconds: 2_000,
+                actual_cost_microusd: Some(7),
+                cost_provenance: ModelRunCostProvenance::ProviderCatalog {
+                    pricing_source: source("fake-model"),
+                },
+                error_class: None,
+            }),
             finished_at: Some(now() + chrono::Duration::seconds(2)),
             ..run.clone()
         }
@@ -1533,6 +1546,14 @@ mod tests {
                 .and_then(|record| record.run.observed_model_fingerprint.as_deref()),
             Some("MetaCog.ObservedModelFingerprint:sha256:fixture")
         );
+        assert_eq!(
+            inspection
+                .model_runs
+                .last()
+                .and_then(|record| record.run.outcome_evidence.as_ref())
+                .and_then(|evidence| evidence.actual_cost_microusd),
+            Some(7)
+        );
         assert!(!inspection.model_runs_truncated);
         let summaries = store.invocation_summaries(10).unwrap();
         assert_eq!(summaries.len(), 2);
@@ -1599,6 +1620,11 @@ mod tests {
         store.transition_model_run(&dispatched, 1, now()).unwrap();
         let mut rewrite = completed_run(&planned);
         rewrite.started_at += chrono::Duration::seconds(1);
+        rewrite
+            .outcome_evidence
+            .as_mut()
+            .expect("completed outcome evidence")
+            .latency_milliseconds = 1_000;
         assert!(matches!(
             store.transition_model_run(&rewrite, 2, now()),
             Err(StorageError::Conflict(_))

@@ -1473,6 +1473,7 @@ test("Runtime invocations preserve one Root truth across Simple Advanced and Dev
         provider_request_id: "provider-request-567",
         response_artifact: { content_hash: hash("MetaCog.RuntimeResponse", "5"), media_type: "application/vnd.metacog.runtime-response+json", byte_length: 512 },
         observed_model_fingerprint: "MetaCog.ObservedModelFingerprint:sha256:observed-fixture-567",
+        outcome_evidence: { latency_milliseconds: 1250, actual_cost_microusd: 18, cost_provenance: { kind: "provider_catalog", pricing_source: { source_type: "mcg.model.v1", locator: "fixture-priced-model", content_hash: hash("MetaCog.Model", "6") } }, error_class: null },
         started_at: updatedAt,
         finished_at: "2026-08-30T14:00:01Z"
       },
@@ -1499,6 +1500,8 @@ test("Runtime invocations preserve one Root truth across Simple Advanced and Dev
   expect(await within(invocations).findByText(/governed-provider/)).toBeInTheDocument();
   expect(within(invocations).getByText(/deterministic-work-v1/)).toBeInTheDocument();
   expect(within(invocations).getByText(/observed model/)).toHaveTextContent(/MetaCog\.ObservedModel/);
+  expect(within(invocations).getByText(/Provider latency/)).toHaveTextContent(/1,250 ms/);
+  expect(within(invocations).getByText(/Provider latency/)).toHaveTextContent(/\$0\.000018/);
   expect(within(invocations).getByText(/1 governed context source · approximately 144 tokens/)).toBeInTheDocument();
   expect(within(invocations).queryByRole("button", { name: "Canonical invocation evidence" })).not.toBeInTheDocument();
 
@@ -1513,6 +1516,8 @@ test("Runtime invocations preserve one Root truth across Simple Advanced and Dev
   expect(evidence).toHaveTextContent("MetaCog.ModelRequest");
   expect(evidence).toHaveTextContent("response_artifact");
   expect(evidence).toHaveTextContent("MetaCog.ObservedModelFingerprint:sha256:observed-fixture-567");
+  expect(evidence).toHaveTextContent("outcome_evidence");
+  expect(evidence).toHaveTextContent("actual_cost_microusd");
 
   fireEvent.click(complexity);
   await waitFor(() => expect(complexity).toHaveTextContent("Simple"));

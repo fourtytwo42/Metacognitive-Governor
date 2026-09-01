@@ -4728,6 +4728,7 @@ mod tests {
                 response_artifact: None,
                 usage: None,
                 observed_model_fingerprint: None,
+                outcome_evidence: None,
                 started_at: now,
                 finished_at: None,
             };

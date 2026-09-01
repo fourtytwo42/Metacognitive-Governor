@@ -9,7 +9,10 @@ use mcg_contracts::{
     SecretHandleId, SourceRef, StableTypeId, VersionedPayload, WorkflowAttempt, WorkflowState,
     canonical_contract_hash, decode_canonical_cbor_v1,
 };
-use mcg_providers::{ModelDescriptor, ProviderAuthMode, ProviderConnection};
+use mcg_providers::{
+    ModelCapabilities, ModelDescriptor, ModelPrice, PriceProvenance, ProviderAuthMode,
+    ProviderConnection,
+};
 use rusqlite::{OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 
@@ -22,6 +25,58 @@ const PROVIDER_MODEL_HASH_DOMAIN: &str = "MetaCog.ProviderModel";
 const PROVIDER_DESTINATION_TYPE: &str = "mcg.provider_destination.v1";
 const PROVIDER_DESTINATION_HASH_DOMAIN: &str = "MetaCog.ProviderDestination";
 const MODEL_PERMIT_SOURCE_TYPE: &str = "mcg.model_invocation_permit.v2";
+
+#[derive(Serialize)]
+struct CanonicalModelDescriptor<'a> {
+    id: &'a str,
+    display_name: &'a str,
+    owned_by: &'a Option<String>,
+    context_window: Option<u64>,
+    capabilities: &'a ModelCapabilities,
+    price: Option<CanonicalModelPrice<'a>>,
+    metadata: &'a serde_json::Value,
+}
+
+#[derive(Serialize)]
+struct CanonicalModelPrice<'a> {
+    input_per_million: Option<String>,
+    cached_input_per_million: Option<String>,
+    output_per_million: Option<String>,
+    currency: &'a str,
+    provenance: &'a PriceProvenance,
+}
+
+fn canonical_price_rate(rate: Option<f64>) -> Result<Option<String>, StorageError> {
+    rate.map(|rate| {
+        if !rate.is_finite() || rate < 0.0 {
+            return Err(StorageError::InvalidData(
+                "provider model price is negative or non-finite".into(),
+            ));
+        }
+        Ok(if rate == 0.0 {
+            "0".to_owned()
+        } else {
+            rate.to_string()
+        })
+    })
+    .transpose()
+}
+
+fn canonical_model_price(
+    price: Option<&ModelPrice>,
+) -> Result<Option<CanonicalModelPrice<'_>>, StorageError> {
+    price
+        .map(|price| {
+            Ok(CanonicalModelPrice {
+                input_per_million: canonical_price_rate(price.input_per_million)?,
+                cached_input_per_million: canonical_price_rate(price.cached_input_per_million)?,
+                output_per_million: canonical_price_rate(price.output_per_million)?,
+                currency: &price.currency,
+                provenance: &price.provenance,
+            })
+        })
+        .transpose()
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -462,11 +517,20 @@ pub fn model_descriptor_source_ref(
     provider_id: &str,
     model: &ModelDescriptor,
 ) -> Result<SourceRef, StorageError> {
+    let canonical = CanonicalModelDescriptor {
+        id: &model.id,
+        display_name: &model.display_name,
+        owned_by: &model.owned_by,
+        context_window: model.context_window,
+        capabilities: &model.capabilities,
+        price: canonical_model_price(model.price.as_ref())?,
+        metadata: &model.metadata,
+    };
     source_ref(
         PROVIDER_MODEL_TYPE,
         &format!("{provider_id}/{}", model.id),
         PROVIDER_MODEL_HASH_DOMAIN,
-        model,
+        &canonical,
     )
 }
 
@@ -1095,6 +1159,37 @@ mod tests {
             price: None,
             metadata: serde_json::Value::Null,
         };
+        assert_eq!(
+            model_descriptor_source_ref(&connection.id, &model).unwrap(),
+            source_ref(
+                PROVIDER_MODEL_TYPE,
+                &format!("{}/{}", connection.id, model.id),
+                PROVIDER_MODEL_HASH_DOMAIN,
+                &model,
+            )
+            .unwrap(),
+            "price-less model authority hashes must remain backward compatible"
+        );
+        let mut priced_model = model.clone();
+        priced_model.price = Some(ModelPrice {
+            input_per_million: Some(1.0),
+            cached_input_per_million: Some(0.5),
+            output_per_million: Some(2.0),
+            currency: "USD".into(),
+            provenance: PriceProvenance::McgCatalog {
+                catalog_date: "2026-09-01".into(),
+            },
+        });
+        assert_ne!(
+            model_descriptor_source_ref(&connection.id, &priced_model).unwrap(),
+            model_descriptor_source_ref(&connection.id, &model).unwrap()
+        );
+        priced_model
+            .price
+            .as_mut()
+            .expect("priced model")
+            .input_per_million = Some(-1.0);
+        assert!(model_descriptor_source_ref(&connection.id, &priced_model).is_err());
         let catalog = ProviderModelCatalog {
             connection_id: connection.id.clone(),
             models: vec![model.clone()],

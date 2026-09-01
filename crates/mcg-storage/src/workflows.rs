@@ -3376,6 +3376,7 @@ mod tests {
             response_artifact: None,
             usage: None,
             observed_model_fingerprint: None,
+            outcome_evidence: None,
             started_at: observed_at,
             finished_at: None,
         };

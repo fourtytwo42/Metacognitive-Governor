@@ -17,7 +17,7 @@ use mcg_providers::{
 };
 use rusqlite::{OptionalExtension, params};
 
-use crate::{SqliteEventStore, StorageError};
+use crate::{SqliteEventStore, StorageError, model_descriptor_source_ref};
 
 impl SqliteEventStore {
     /// Atomically creates or advances a privacy-preserving conversation projection and
@@ -671,12 +671,13 @@ impl SqliteEventStore {
                 serde_json::json!({"connection": connection}),
             ),
         )?;
+        let catalog_payload = provider_catalog_event_payload(catalog)?;
         let catalog_event = Self::insert_event(
             &transaction,
             &EventEnvelope::new(
                 EventKind::ProviderCatalogDiscovered,
                 None,
-                serde_json::json!({"catalog": catalog}),
+                serde_json::json!({"catalog": catalog_payload}),
             ),
         )?;
         transaction.commit()?;
@@ -743,12 +744,13 @@ impl SqliteEventStore {
                 catalog.discovered_at.to_rfc3339(),
             ],
         )?;
+        let catalog_payload = provider_catalog_event_payload(catalog)?;
         let event = Self::insert_event(
             &transaction,
             &EventEnvelope::new(
                 EventKind::ProviderCatalogDiscovered,
                 None,
-                serde_json::json!({"catalog": catalog}),
+                serde_json::json!({"catalog": catalog_payload}),
             ),
         )?;
         transaction.commit()?;
@@ -1695,6 +1697,21 @@ fn validate_catalog(catalog: &ProviderModelCatalog) -> Result<(), StorageError> 
         ));
     }
     Ok(())
+}
+
+fn provider_catalog_event_payload(
+    catalog: &ProviderModelCatalog,
+) -> Result<serde_json::Value, StorageError> {
+    let models = catalog
+        .models
+        .iter()
+        .map(|model| model_descriptor_source_ref(&catalog.connection_id, model))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(serde_json::json!({
+        "connection_id": catalog.connection_id,
+        "models": models,
+        "discovered_at": catalog.discovered_at,
+    }))
 }
 
 fn dispatch_purpose_name(purpose: ProxyModelCallPurpose) -> &'static str {

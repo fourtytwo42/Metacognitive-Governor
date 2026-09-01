@@ -1429,7 +1429,13 @@ export interface CanonicalInvocationInspection {
       state: CanonicalModelRunState;
       provider_request_id: string | null;
       response_artifact: { content_hash: { algorithm: string; domain: string; digest_hex: string }; media_type: string; byte_length: number } | null;
-      observed_model_fingerprint: string | null;
+      observed_model_fingerprint?: string | null;
+      outcome_evidence?: {
+        latency_milliseconds: number;
+        actual_cost_microusd: number | null;
+        cost_provenance: { kind: "unknown" | "no_provider_contact" | "provider_catalog"; pricing_source?: unknown };
+        error_class: "retryable_before_provider_contact" | "final_before_provider_contact" | "outcome_unknown" | "cancelled" | null;
+      } | null;
       started_at: string;
       finished_at: string | null;
       [key: string]: unknown;

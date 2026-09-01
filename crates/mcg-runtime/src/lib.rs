@@ -62,10 +62,11 @@ use mcg_contracts::{
     ActionSummary, ActionValidation, ArtifactRef, CompletionCertificate, ContentHash,
     ContextManifest, CorrelationId, EffectOutcome, InvocationId, InvocationInspection,
     InvocationManifest, InvocationSummary, ModelEgressPolicy, ModelInvocationPermit,
-    ModelInvocationProposal, ModelRun, ModelRunId, ModelRunState, ModelUsage, PermitId,
-    ReconciliationJob, ReconciliationJobId, ReconciliationObservation, RuntimeActorId,
-    RuntimeIdentity, RuntimeInvocationRequest, RuntimeInvocationResult, SecretHandleId, SourceRef,
-    StableTypeId, WorkflowAttempt, WorkflowCancelRequest, WorkflowId, WorkflowInspection,
+    ModelInvocationProposal, ModelRun, ModelRunCostProvenance, ModelRunErrorClass, ModelRunId,
+    ModelRunOutcomeEvidence, ModelRunState, ModelUsage, PermitId, ReconciliationJob,
+    ReconciliationJobId, ReconciliationObservation, RuntimeActorId, RuntimeIdentity,
+    RuntimeInvocationRequest, RuntimeInvocationResult, SecretHandleId, SourceRef, StableTypeId,
+    WorkflowAttempt, WorkflowCancelRequest, WorkflowId, WorkflowInspection,
     WorkflowInvocationActivity, WorkflowState, canonical_contract_hash,
 };
 use mcg_domain::{
@@ -3552,6 +3553,25 @@ fn exact_model_run(
     Ok(record)
 }
 
+fn model_run_outcome_evidence(
+    run: &ModelRun,
+    now: DateTime<Utc>,
+    actual_cost_microusd: Option<u64>,
+    cost_provenance: ModelRunCostProvenance,
+    error_class: Option<ModelRunErrorClass>,
+) -> Result<ModelRunOutcomeEvidence, StorageError> {
+    let latency_milliseconds = u64::try_from(
+        now.signed_duration_since(run.started_at).num_milliseconds(),
+    )
+    .map_err(|_| StorageError::Conflict("model run completion predates its start".into()))?;
+    Ok(ModelRunOutcomeEvidence {
+        latency_milliseconds,
+        actual_cost_microusd,
+        cost_provenance,
+        error_class,
+    })
+}
+
 impl AppRuntime {
     /// Opens the durable runtime, migrates storage, and rebuilds projections.
     ///
@@ -4305,6 +4325,7 @@ impl AppRuntime {
                 response_artifact: None,
                 usage: None,
                 observed_model_fingerprint: None,
+                outcome_evidence: None,
                 started_at: now,
                 finished_at: None,
             },
@@ -4350,6 +4371,8 @@ impl AppRuntime {
         response_artifact: ArtifactRef,
         usage: ModelUsage,
         observed_model_fingerprint: String,
+        actual_cost_microusd: Option<u64>,
+        cost_provenance: ModelRunCostProvenance,
         now: DateTime<Utc>,
     ) -> Result<mcg_storage::ModelRunRecord, RuntimeError> {
         response_artifact
@@ -4367,6 +4390,14 @@ impl AppRuntime {
             )
             .into());
         }
+        if actual_cost_microusd
+            .is_some_and(|cost| cost > authorization.permit.limits.max_cost_microusd)
+        {
+            return Err(StorageError::Conflict(
+                "provider result cost exceeds its exact permit budget".into(),
+            )
+            .into());
+        }
         let current = exact_model_run(&store, invocation_id, model_run_id)?;
         if current.run.state != ModelRunState::Dispatched {
             return Err(StorageError::Conflict(
@@ -4380,6 +4411,13 @@ impl AppRuntime {
         next.usage = Some(usage);
         next.observed_model_fingerprint = Some(observed_model_fingerprint);
         next.finished_at = Some(now);
+        next.outcome_evidence = Some(model_run_outcome_evidence(
+            &next,
+            now,
+            actual_cost_microusd,
+            cost_provenance,
+            None,
+        )?);
         Ok(store.transition_model_run(&next, current.revision, now)?)
     }
 
@@ -4405,6 +4443,13 @@ impl AppRuntime {
         let mut next = current.run;
         next.state = ModelRunState::OutcomeUnknown;
         next.finished_at = Some(now);
+        next.outcome_evidence = Some(model_run_outcome_evidence(
+            &next,
+            now,
+            None,
+            ModelRunCostProvenance::Unknown,
+            Some(ModelRunErrorClass::OutcomeUnknown),
+        )?);
         Ok(store.transition_model_run(&next, current.revision, now)?)
     }
 
@@ -4418,6 +4463,7 @@ impl AppRuntime {
         &self,
         invocation_id: InvocationId,
         model_run_id: ModelRunId,
+        error_class: ModelRunErrorClass,
         now: DateTime<Utc>,
     ) -> Result<mcg_storage::ModelRunRecord, RuntimeError> {
         let mut store = self.store()?;
@@ -4428,9 +4474,26 @@ impl AppRuntime {
             )
             .into());
         }
+        if !matches!(
+            error_class,
+            ModelRunErrorClass::RetryableBeforeProviderContact
+                | ModelRunErrorClass::FinalBeforeProviderContact
+        ) {
+            return Err(StorageError::InvalidData(
+                "pre-contact failure requires a pre-contact error class".into(),
+            )
+            .into());
+        }
         let mut next = current.run;
         next.state = ModelRunState::Failed;
         next.finished_at = Some(now);
+        next.outcome_evidence = Some(model_run_outcome_evidence(
+            &next,
+            now,
+            Some(0),
+            ModelRunCostProvenance::NoProviderContact,
+            Some(error_class),
+        )?);
         Ok(store.transition_model_run(&next, current.revision, now)?)
     }
 
@@ -4505,6 +4568,7 @@ impl AppRuntime {
                     response_artifact: None,
                     usage: None,
                     observed_model_fingerprint: None,
+                    outcome_evidence: None,
                     started_at: now,
                     finished_at: None,
                 },

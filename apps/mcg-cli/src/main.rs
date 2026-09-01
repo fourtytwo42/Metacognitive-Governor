@@ -11515,6 +11515,16 @@ async fn run_root_invocation(
                     if let Some(fingerprint) = &run.run.observed_model_fingerprint {
                         println!("    observed model: {fingerprint}");
                     }
+                    if let Some(outcome) = &run.run.outcome_evidence {
+                        println!("    provider latency: {} ms", outcome.latency_milliseconds);
+                        match outcome.actual_cost_microusd {
+                            Some(cost) => println!("    provider cost: {cost} micro-USD"),
+                            None => println!("    provider cost: unknown"),
+                        }
+                        if let Some(error_class) = outcome.error_class {
+                            println!("    provider error class: {error_class:?}");
+                        }
+                    }
                 }
                 if inspection.model_runs_truncated {
                     println!("  model-run history truncated at {model_run_limit} revisions");

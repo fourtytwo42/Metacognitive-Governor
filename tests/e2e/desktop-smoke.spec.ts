@@ -278,6 +278,7 @@ test.beforeEach(async ({ page }) => {
           provider_request_id: "provider-request-615",
           response_artifact: { content_hash: invocationHash("MetaCog.RuntimeResponse", "1"), media_type: "application/vnd.metacog.runtime-response+json", byte_length: 512 },
           observed_model_fingerprint: "MetaCog.ObservedModelFingerprint:sha256:observed-playwright-615",
+          outcome_evidence: { latency_milliseconds: 1250, actual_cost_microusd: 18, cost_provenance: { kind: "provider_catalog", pricing_source: { source_type: "mcg.model.v1", locator: "deterministic-work-v1", content_hash: invocationHash("MetaCog.Model", "9") } }, error_class: null },
           started_at: now,
           finished_at: "2026-08-18T00:00:01Z"
         },
@@ -791,6 +792,8 @@ test("Runtime invocations keep one Root truth across Simple Advanced and Develop
   await expect(invocations.getByText(/governed-provider/)).toBeVisible();
   await expect(invocations.getByText(/deterministic-work-v1/)).toBeVisible();
   await expect(invocations.getByText(/observed model/)).toContainText("MetaCog.ObservedModel");
+  await expect(invocations.getByText(/Provider latency/)).toContainText("1,250 ms");
+  await expect(invocations.getByText(/Provider latency/)).toContainText("$0.000018");
   await expect(invocations.getByText(/1 governed context source · approximately 144 tokens/)).toBeVisible();
   await expect(invocations.getByRole("button", { name: "Canonical invocation evidence" })).toHaveCount(0);
 
@@ -806,6 +809,7 @@ test("Runtime invocations keep one Root truth across Simple Advanced and Develop
   await expect(evidence).toContainText("MetaCog.ModelRequest");
   await expect(evidence).toContainText("response_artifact");
   await expect(evidence).toContainText("MetaCog.ObservedModelFingerprint:sha256:observed-playwright-615");
+  await expect(evidence).toContainText("outcome_evidence");
   const accessibility = await new AxeBuilder({ page }).include(".canonical-invocation-section").analyze();
   expect(accessibility.violations, "Runtime-invocation accessibility violations").toEqual([]);
 
