@@ -677,10 +677,10 @@ Do not claim consciousness, subjective identity, unrestricted self-improvement, 
 
 ## 10. Immediate Next Actions
 
-1. Complete canonical compatibility-turn result settlement, remaining Stage 3 source reattachment, child propagation, event streaming, wake triggers, and the remaining nonterminal crash/reassignment matrix.
+1. Complete independent Verify/CompletionCertificate settlement for compatibility Work now atomically advanced to `Verifying`; then finish remaining Stage 3 source reattachment, child propagation, event streaming, wake triggers, and the remaining nonterminal crash/reassignment matrix.
 2. Extend Stage 4's implemented owner-authorized compensation and real-child fault paths through packaged adversarial and native three-platform qualification.
 3. Finish Stage 5 packaged remote-inventory, cancellation, replacement, crash-injection, and native qualification; direct remote Codex sub-agent inventory and canonical workflow/current-attempt invocation drill-down are implemented.
-4. Complete canonical settlement for the fresh/resumed compatibility-agent callers now routed through the verified isolated provider runner, migrate any remaining provider surfaces without a compatibility bypass, then add distinct-authority retries, streaming/cancellation, governed tool/capability permits, redaction/security E2E, and cross-platform product qualification.
+4. Complete independent Verify and Root-owned certificate settlement for fresh/resumed compatibility-agent Work, migrate any remaining provider surfaces without a compatibility bypass, then add distinct-authority retries, streaming/cancellation, governed tool/capability permits, redaction/security E2E, and cross-platform product qualification.
 5. Build and pass the Stage 7 Protected Evaluator and Phase 0 integrity gate before beginning recursive improvement work.
 6. Continue through Stages 8–13 only behind the recorded scientific and production gates, with matched Windows/macOS/Linux package and native UAT evidence at every affected boundary.
 

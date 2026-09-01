@@ -205,7 +205,7 @@ Strict whole-storage Clippy still reaches the repository’s documented pre-exis
 
 Stage 5 is not complete until all of the following are implemented and qualified:
 
-1. Complete the compatibility-turn settlement bridge: production fresh/resumed calls now attach and claim the schema-60 canonical attempt and execute through a Stage 6 Root permit plus isolated runner without Runtime receiving ambient network, storage, or secret authority, but the final compatibility result must still drive the canonical attempt through Verify/CompletionCertificate/terminal settlement.
+1. Complete the compatibility-turn verification bridge: checkpoint `87887ae` now atomically moves approval waits to `Waiting(Approval)`, reclaims approved resumes under a fresh lease generation, moves a completed compatibility Work result to `Verifying`, and moves terminal errors or denied/cancelled approvals to `Failed` in the same transaction as the legacy projection. A completed Work response still cannot assert success: dispatch an independent Verify invocation over its exact evidence, persist a Root-owned CompletionCertificate, and settle the canonical terminal state.
 2. Run packaged active cancellation/service replacement, direct remote-inventory transport qualification, broader combined workflow/Runtime crash injection, native GUI UAT, migration, and matched Windows/Linux/macOS package gates.
 
 No real provider is required for this stage’s correctness. Root-bound remote egress permits and secret handles begin in Stage 6.
