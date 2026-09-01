@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use mcg_agents::{
-    AgentInstance, AgentLease, AgentLeaseState, AgentRun, AgentRunState, AgentState, WorkPlan,
+    AgentInstance, AgentLease, AgentLeaseState, AgentRun, AgentRunState, AgentState, WorkItem,
+    WorkPlan,
 };
 use mcg_contracts::{
     AttemptId, ConfigurationId, ContentHash, ContractClause, CorrelationId, EventId, PolicyBinding,
@@ -489,6 +490,125 @@ pub(crate) fn settle_attached_agent_turn_workflow_in_transaction(
     )?;
     insert_event(transaction, &event)?;
     Ok(Some(attempt.clone()))
+}
+
+/// Applies one ordinary workflow transition inside an existing Root-owned transaction.
+/// Callers use this when another immutable authority record and the workflow settlement must
+/// become visible together or not at all.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+pub(crate) fn transition_workflow_attempt_in_transaction(
+    transaction: &Transaction<'_>,
+    attempt_id: AttemptId,
+    expected_revision: u64,
+    expected_generation: u64,
+    next_state: WorkflowState,
+    correlation_id: CorrelationId,
+    idempotency_key: &str,
+    now: DateTime<Utc>,
+) -> Result<WorkflowAttempt, StorageError> {
+    if idempotency_key.is_empty() {
+        return Err(StorageError::InvalidData(
+            "workflow transition idempotency key cannot be empty".into(),
+        ));
+    }
+    let mut attempt = load_attempt(transaction, attempt_id)?
+        .ok_or(StorageError::WorkflowAttemptNotFound(attempt_id))?;
+    if let Some(event) =
+        load_event_by_idempotency(transaction, attempt.workflow_id, idempotency_key)?
+    {
+        let payload = event_payload_value(&event)?;
+        if event.type_id.as_str() != WORKFLOW_TRANSITIONED_TYPE_ID
+            || payload.get("attempt_id") != Some(&serde_json::json!(attempt.attempt_id))
+            || payload.get("to") != Some(&serde_json::to_value(next_state)?)
+        {
+            return Err(StorageError::Conflict(
+                "workflow transition idempotency key was replayed with different content".into(),
+            ));
+        }
+        return event_attempt(&event);
+    }
+    ensure_expected(&attempt, expected_revision, expected_generation)?;
+    if next_state == WorkflowState::Running || !attempt.state.can_transition_to(next_state) {
+        return Err(StorageError::Conflict(format!(
+            "illegal workflow transition {:?} -> {next_state:?}",
+            attempt.state
+        )));
+    }
+
+    let previous_state = attempt.state;
+    let cancellation_effects = if next_state == WorkflowState::CancelRequested {
+        Some(fence_actions_for_workflow_cancellation(
+            transaction,
+            attempt.attempt_id,
+            correlation_id,
+            now,
+        )?)
+    } else if previous_state == WorkflowState::CancelRequested {
+        let status = cancellation_effect_status(transaction, attempt.attempt_id)?;
+        if next_state == WorkflowState::Cancelled && status.unresolved > 0 {
+            return Err(StorageError::Conflict(
+                "workflow cancellation cannot settle while an action effect is unresolved".into(),
+            ));
+        }
+        if next_state == WorkflowState::Waiting(WaitReason::Reconciliation)
+            && (status.reconciliation_required == 0 || status.quarantined > 0)
+        {
+            return Err(StorageError::Conflict(
+                "workflow may wait for reconciliation only for unresolved reconcilable effects"
+                    .into(),
+            ));
+        }
+        Some(status)
+    } else if previous_state == WorkflowState::Waiting(WaitReason::Reconciliation)
+        && next_state == WorkflowState::Cancelled
+    {
+        let status = cancellation_effect_status(transaction, attempt.attempt_id)?;
+        if !is_cancellation_reconciliation_wait(transaction, &attempt)? || status.unresolved > 0 {
+            return Err(StorageError::Conflict(
+                "only a fully reconciled cancellation wait can settle as cancelled".into(),
+            ));
+        }
+        Some(status)
+    } else {
+        None
+    };
+    attempt.state = next_state;
+    attempt.revision = increment(attempt.revision, "workflow revision")?;
+    if next_state == WorkflowState::CancelRequested {
+        attempt.lease_generation = increment(attempt.lease_generation, "lease generation")?;
+    }
+    if next_state != WorkflowState::Verifying {
+        attempt.lease_owner = None;
+        attempt.lease_expires_at = None;
+        attempt.heartbeat_at = None;
+    }
+    attempt.updated_at = now;
+    update_attempt_cas(
+        transaction,
+        &attempt,
+        expected_revision,
+        expected_generation,
+    )?;
+
+    let (sequence, cause) = next_event_position(transaction, attempt.workflow_id)?;
+    let event = workflow_event(
+        &attempt,
+        sequence,
+        correlation_id,
+        cause,
+        idempotency_key,
+        WORKFLOW_TRANSITIONED_TYPE_ID,
+        now,
+        &serde_json::json!({
+            "attempt_id": attempt.attempt_id,
+            "from": previous_state,
+            "to": next_state,
+            "cancellation_effects": cancellation_effects,
+            "attempt": attempt,
+        }),
+    )?;
+    insert_event(transaction, &event)?;
+    Ok(attempt)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1015,115 +1135,17 @@ impl SqliteEventStore {
         idempotency_key: &str,
         now: DateTime<Utc>,
     ) -> Result<WorkflowAttempt, StorageError> {
-        if idempotency_key.is_empty() {
-            return Err(StorageError::InvalidData(
-                "workflow transition idempotency key cannot be empty".into(),
-            ));
-        }
         let transaction = self.connection.transaction()?;
-        let mut attempt = load_attempt(&transaction, attempt_id)?
-            .ok_or(StorageError::WorkflowAttemptNotFound(attempt_id))?;
-        if let Some(event) =
-            load_event_by_idempotency(&transaction, attempt.workflow_id, idempotency_key)?
-        {
-            let payload = event_payload_value(&event)?;
-            if event.type_id.as_str() != WORKFLOW_TRANSITIONED_TYPE_ID
-                || payload.get("attempt_id") != Some(&serde_json::json!(attempt.attempt_id))
-                || payload.get("to") != Some(&serde_json::to_value(next_state)?)
-            {
-                return Err(StorageError::Conflict(
-                    "workflow transition idempotency key was replayed with different content"
-                        .into(),
-                ));
-            }
-            let original = event_attempt(&event)?;
-            transaction.commit()?;
-            return Ok(original);
-        }
-        ensure_expected(&attempt, expected_revision, expected_generation)?;
-        if next_state == WorkflowState::Running || !attempt.state.can_transition_to(next_state) {
-            return Err(StorageError::Conflict(format!(
-                "illegal workflow transition {:?} -> {next_state:?}",
-                attempt.state
-            )));
-        }
-
-        let previous_state = attempt.state;
-        let cancellation_effects = if next_state == WorkflowState::CancelRequested {
-            Some(fence_actions_for_workflow_cancellation(
-                &transaction,
-                attempt.attempt_id,
-                correlation_id,
-                now,
-            )?)
-        } else if previous_state == WorkflowState::CancelRequested {
-            let status = cancellation_effect_status(&transaction, attempt.attempt_id)?;
-            if next_state == WorkflowState::Cancelled && status.unresolved > 0 {
-                return Err(StorageError::Conflict(
-                    "workflow cancellation cannot settle while an action effect is unresolved"
-                        .into(),
-                ));
-            }
-            if next_state == WorkflowState::Waiting(WaitReason::Reconciliation)
-                && (status.reconciliation_required == 0 || status.quarantined > 0)
-            {
-                return Err(StorageError::Conflict(
-                    "workflow may wait for reconciliation only for unresolved reconcilable effects"
-                        .into(),
-                ));
-            }
-            Some(status)
-        } else if previous_state == WorkflowState::Waiting(WaitReason::Reconciliation)
-            && next_state == WorkflowState::Cancelled
-        {
-            let status = cancellation_effect_status(&transaction, attempt.attempt_id)?;
-            if !is_cancellation_reconciliation_wait(&transaction, &attempt)?
-                || status.unresolved > 0
-            {
-                return Err(StorageError::Conflict(
-                    "only a fully reconciled cancellation wait can settle as cancelled".into(),
-                ));
-            }
-            Some(status)
-        } else {
-            None
-        };
-        attempt.state = next_state;
-        attempt.revision = increment(attempt.revision, "workflow revision")?;
-        if next_state == WorkflowState::CancelRequested {
-            attempt.lease_generation = increment(attempt.lease_generation, "lease generation")?;
-        }
-        if next_state != WorkflowState::Verifying {
-            attempt.lease_owner = None;
-            attempt.lease_expires_at = None;
-            attempt.heartbeat_at = None;
-        }
-        attempt.updated_at = now;
-        update_attempt_cas(
+        let attempt = transition_workflow_attempt_in_transaction(
             &transaction,
-            &attempt,
+            attempt_id,
             expected_revision,
             expected_generation,
-        )?;
-
-        let (sequence, cause) = next_event_position(&transaction, attempt.workflow_id)?;
-        let event = workflow_event(
-            &attempt,
-            sequence,
+            next_state,
             correlation_id,
-            cause,
             idempotency_key,
-            WORKFLOW_TRANSITIONED_TYPE_ID,
             now,
-            &serde_json::json!({
-                "attempt_id": attempt.attempt_id,
-                "from": previous_state,
-                "to": next_state,
-                "cancellation_effects": cancellation_effects,
-                "attempt": attempt,
-            }),
         )?;
-        insert_event(&transaction, &event)?;
         transaction.commit()?;
         Ok(attempt)
     }
@@ -1481,6 +1503,7 @@ struct ActiveAgentTurnSource {
     run: AgentRun,
     run_json: String,
     plan_json: String,
+    planned_item: WorkItem,
     instance: AgentInstance,
     instance_json: String,
     lease: AgentLease,
@@ -1532,7 +1555,11 @@ fn decode_active_agent_turn_source(
     let plan: WorkPlan = serde_json::from_str(&plan_json)?;
     let instance: AgentInstance = serde_json::from_str(&instance_json)?;
     let lease: AgentLease = serde_json::from_str(&lease_json)?;
-    let planned_item = plan.items.iter().find(|item| item.id == lease.work_item_id);
+    let planned_item = plan
+        .items
+        .iter()
+        .find(|item| item.id == lease.work_item_id)
+        .cloned();
     if lease.id != lease_id
         || lease.instance_id != instance.id
         || instance.run_id != run.id
@@ -1551,12 +1578,16 @@ fn decode_active_agent_turn_source(
             "agent turn source is inactive, expired, or identity-inconsistent".into(),
         ));
     }
+    let planned_item = planned_item.ok_or_else(|| {
+        StorageError::Conflict("agent turn source has no matching planned work item".into())
+    })?;
     Ok(ActiveAgentTurnSource {
         task,
         task_json,
         run,
         run_json,
         plan_json,
+        planned_item,
         instance,
         instance_json,
         lease,
@@ -1612,17 +1643,36 @@ fn derive_agent_turn_workflow(
             source_refs: vec![source_ref.clone()],
         })
         .collect();
-    let acceptance_criteria = source
-        .task
-        .success_conditions
-        .iter()
-        .enumerate()
-        .map(|(index, statement)| ContractClause {
-            clause_id: format!("legacy-acceptance-{}", index + 1),
-            statement: statement.clone(),
-            source_refs: vec![source_ref.clone()],
-        })
-        .collect();
+    let acceptance_criteria = if source.planned_item.success_conditions.is_empty() {
+        source
+            .task
+            .success_conditions
+            .iter()
+            .enumerate()
+            .map(|(index, statement)| ContractClause {
+                clause_id: format!("legacy-acceptance-{}", index + 1),
+                statement: statement.clone(),
+                source_refs: vec![source_ref.clone()],
+            })
+            .collect()
+    } else {
+        source
+            .planned_item
+            .success_conditions
+            .iter()
+            .enumerate()
+            .map(|(index, condition)| {
+                Ok(ContractClause {
+                    clause_id: format!("legacy-work-condition-{}", index + 1),
+                    statement: format!(
+                        "Objective condition: {}",
+                        serde_json::to_string(condition)?
+                    ),
+                    source_refs: vec![source_ref.clone()],
+                })
+            })
+            .collect::<Result<Vec<_>, StorageError>>()?
+    };
     let permitted_side_effects = agent_turn_policy(
         "mcg.agent_turn_side_effect_policy.v1",
         "MetaCog.AgentTurnSideEffects",
@@ -2898,6 +2948,16 @@ mod tests {
             .attach_active_agent_lease_workflow(lease.id, observed_at)
             .unwrap();
         assert_eq!(receipt.task_contract.objective, task.goal);
+        assert_eq!(receipt.task_contract.acceptance_criteria.len(), 1);
+        assert_eq!(
+            receipt.task_contract.acceptance_criteria[0].clause_id,
+            "legacy-work-condition-1"
+        );
+        assert!(
+            receipt.task_contract.acceptance_criteria[0]
+                .statement
+                .contains("return verified output")
+        );
         assert_eq!(receipt.attempt.state, WorkflowState::Ready);
         assert_eq!(
             receipt.attempt.task_contract,

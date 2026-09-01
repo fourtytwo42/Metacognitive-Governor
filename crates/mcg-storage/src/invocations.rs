@@ -1,14 +1,17 @@
 use chrono::{DateTime, Utc};
 use mcg_contracts::{
     AttemptId, CompletionCertificate, CompletionCertificateId, CompletionVerdict, ContentHash,
-    ContextManifest, InvocationId, InvocationInspection, InvocationManifest, InvocationRole,
-    InvocationSummary, ModelRun, ModelRunId, ModelRunRecord, ModelRunState,
+    ContextManifest, CorrelationId, InvocationId, InvocationInspection, InvocationManifest,
+    InvocationRole, InvocationSummary, ModelRun, ModelRunId, ModelRunRecord, ModelRunState,
     RuntimeInvocationResult, StableTypeId, VersionedPayload, WorkflowAttempt, WorkflowId,
+    WorkflowState,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::Serialize;
 
-use crate::{SqliteEventStore, StorageError};
+use crate::{
+    SqliteEventStore, StorageError, workflows::transition_workflow_attempt_in_transaction,
+};
 
 const CONTEXT_MANIFEST_HASH_DOMAIN: &str = "MetaCog.ContextManifest";
 const INVOCATION_MANIFEST_HASH_DOMAIN: &str = "MetaCog.InvocationManifest";
@@ -681,83 +684,71 @@ impl SqliteEventStore {
         certificate: &CompletionCertificate,
         persisted_at: DateTime<Utc>,
     ) -> Result<ContentHash, StorageError> {
+        let transaction = self.connection.transaction()?;
+        let hash =
+            persist_completion_certificate_in_transaction(&transaction, certificate, persisted_at)?;
+        transaction.commit()?;
+        Ok(hash)
+    }
+
+    /// Atomically persists one immutable certificate and settles its exact Verifying workflow.
+    /// Neither record becomes visible when either validation or write fails.
+    ///
+    /// # Errors
+    /// Returns a storage error for stale authority, invalid verdict/lineage, replay substitution,
+    /// incomplete model runs, an illegal transition, or transaction failure.
+    pub fn commit_completion_certificate(
+        &mut self,
+        certificate: &CompletionCertificate,
+        expected_revision: u64,
+        expected_generation: u64,
+        persisted_at: DateTime<Utc>,
+    ) -> Result<(ContentHash, WorkflowAttempt), StorageError> {
         certificate
             .validate()
             .map_err(|error| StorageError::InvalidData(error.to_string()))?;
-        let attempt = load_attempt(&self.connection, certificate.attempt_id)?.ok_or(
+        let transaction = self.connection.transaction()?;
+        let attempt = load_attempt(&transaction, certificate.attempt_id)?.ok_or(
             StorageError::WorkflowAttemptNotFound(certificate.attempt_id),
         )?;
-        if attempt.workflow_id != certificate.workflow_id
-            || attempt.task_contract != certificate.task_contract
-        {
-            return Err(StorageError::Conflict(
-                "completion certificate does not bind its exact workflow attempt".into(),
-            ));
-        }
-        validate_completion_invocations(&self.connection, certificate)?;
-        let hash = contract_hash(
-            CompletionCertificate::TYPE_ID,
-            COMPLETION_CERTIFICATE_HASH_DOMAIN,
-            certificate,
-        )?;
-        if let Some((existing_json, existing_hash_json)) = self
-            .connection
-            .query_row(
-                "SELECT certificate_json, content_hash_json FROM completion_certificates
-                 WHERE completion_certificate_id = ?1",
-                [certificate.id.to_string()],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-            )
-            .optional()?
-        {
-            let existing: CompletionCertificate = serde_json::from_str(&existing_json)?;
-            let existing_hash: ContentHash = serde_json::from_str(&existing_hash_json)?;
-            if existing != *certificate || existing_hash != hash {
+        let next_state = match certificate.verdict {
+            CompletionVerdict::Satisfied => WorkflowState::Succeeded,
+            CompletionVerdict::NotSatisfied | CompletionVerdict::Inconclusive => {
+                WorkflowState::Failed
+            }
+            CompletionVerdict::Cancelled => {
                 return Err(StorageError::Conflict(
-                    "completion-certificate identity was replayed with different content".into(),
+                    "a cancelled certificate cannot bypass cancellation settlement".into(),
                 ));
             }
-            return Ok(existing_hash);
+        };
+        let current_verifying_authority = attempt.revision == expected_revision
+            && attempt.lease_generation == expected_generation
+            && attempt.state == WorkflowState::Verifying;
+        let exact_terminal_replay = attempt.state == next_state;
+        if attempt.workflow_id != certificate.workflow_id
+            || attempt.task_contract != certificate.task_contract
+            || (!current_verifying_authority && !exact_terminal_replay)
+        {
+            return Err(StorageError::Conflict(
+                "completion certificate does not bind the current verifying workflow or its exact terminal replay"
+                    .into(),
+            ));
         }
-        let transaction = self.connection.transaction()?;
-        transaction.execute(
-            "INSERT INTO completion_certificates(
-                completion_certificate_id, workflow_id, workflow_attempt_id, task_contract_id,
-                task_contract_version, verdict, type_id, schema_version, content_hash_json,
-                certificate_json, issued_at, persisted_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-            params![
-                certificate.id.to_string(),
-                certificate.workflow_id.to_string(),
-                certificate.attempt_id.to_string(),
-                certificate.task_contract.id.to_string(),
-                sql_u64(
-                    certificate.task_contract.version,
-                    "completion task-contract version"
-                )?,
-                completion_verdict_label(certificate.verdict),
-                CompletionCertificate::TYPE_ID,
-                i64::from(CompletionCertificate::SCHEMA_VERSION),
-                serde_json::to_string(&hash)?,
-                serde_json::to_string(certificate)?,
-                certificate.issued_at.to_rfc3339(),
-                persisted_at.to_rfc3339(),
-            ],
-        )?;
-        insert_completion_invocations(
+        let hash =
+            persist_completion_certificate_in_transaction(&transaction, certificate, persisted_at)?;
+        let settled = transition_workflow_attempt_in_transaction(
             &transaction,
-            certificate.id,
-            InvocationRole::Work,
-            &certificate.work_invocations,
-        )?;
-        insert_completion_invocations(
-            &transaction,
-            certificate.id,
-            InvocationRole::Verify,
-            &certificate.verify_invocations,
+            certificate.attempt_id,
+            expected_revision,
+            expected_generation,
+            next_state,
+            CorrelationId::new(),
+            &format!("runtime-completion:{}", certificate.id),
+            persisted_at,
         )?;
         transaction.commit()?;
-        Ok(hash)
+        Ok((hash, settled))
     }
 
     /// Loads one exact immutable completion certificate.
@@ -779,6 +770,87 @@ impl SqliteEventStore {
             .map(|json| Ok(serde_json::from_str(&json)?))
             .transpose()
     }
+}
+
+fn persist_completion_certificate_in_transaction(
+    transaction: &Transaction<'_>,
+    certificate: &CompletionCertificate,
+    persisted_at: DateTime<Utc>,
+) -> Result<ContentHash, StorageError> {
+    certificate
+        .validate()
+        .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+    let attempt = load_attempt(transaction, certificate.attempt_id)?.ok_or(
+        StorageError::WorkflowAttemptNotFound(certificate.attempt_id),
+    )?;
+    if attempt.workflow_id != certificate.workflow_id
+        || attempt.task_contract != certificate.task_contract
+    {
+        return Err(StorageError::Conflict(
+            "completion certificate does not bind its exact workflow attempt".into(),
+        ));
+    }
+    validate_completion_invocations(transaction, certificate)?;
+    let hash = contract_hash(
+        CompletionCertificate::TYPE_ID,
+        COMPLETION_CERTIFICATE_HASH_DOMAIN,
+        certificate,
+    )?;
+    if let Some((existing_json, existing_hash_json)) = transaction
+        .query_row(
+            "SELECT certificate_json, content_hash_json FROM completion_certificates
+             WHERE completion_certificate_id = ?1",
+            [certificate.id.to_string()],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()?
+    {
+        let existing: CompletionCertificate = serde_json::from_str(&existing_json)?;
+        let existing_hash: ContentHash = serde_json::from_str(&existing_hash_json)?;
+        if existing != *certificate || existing_hash != hash {
+            return Err(StorageError::Conflict(
+                "completion-certificate identity was replayed with different content".into(),
+            ));
+        }
+        return Ok(existing_hash);
+    }
+    transaction.execute(
+        "INSERT INTO completion_certificates(
+            completion_certificate_id, workflow_id, workflow_attempt_id, task_contract_id,
+            task_contract_version, verdict, type_id, schema_version, content_hash_json,
+            certificate_json, issued_at, persisted_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+        params![
+            certificate.id.to_string(),
+            certificate.workflow_id.to_string(),
+            certificate.attempt_id.to_string(),
+            certificate.task_contract.id.to_string(),
+            sql_u64(
+                certificate.task_contract.version,
+                "completion task-contract version"
+            )?,
+            completion_verdict_label(certificate.verdict),
+            CompletionCertificate::TYPE_ID,
+            i64::from(CompletionCertificate::SCHEMA_VERSION),
+            serde_json::to_string(&hash)?,
+            serde_json::to_string(certificate)?,
+            certificate.issued_at.to_rfc3339(),
+            persisted_at.to_rfc3339(),
+        ],
+    )?;
+    insert_completion_invocations(
+        transaction,
+        certificate.id,
+        InvocationRole::Work,
+        &certificate.work_invocations,
+    )?;
+    insert_completion_invocations(
+        transaction,
+        certificate.id,
+        InvocationRole::Verify,
+        &certificate.verify_invocations,
+    )?;
+    Ok(hash)
 }
 
 type InvocationSummaryRow = (
@@ -1131,8 +1203,8 @@ mod tests {
     use mcg_contracts::{
         ArtifactRef, ConfigurationId, ContextSelection, ContractClause, CorrelationId,
         CriterionResult, HashAlgorithm, ModelUsage, PolicyBinding, RecordId, RetryPolicy,
-        RuntimeIdentity, RuntimeInstanceId, SourceRef, TaskContract, TaskContractId,
-        TaskContractStatus, VersionedRef, WorkflowId, WorkflowState,
+        RuntimeActorId, RuntimeIdentity, RuntimeInstanceId, SourceRef, TaskContract,
+        TaskContractId, TaskContractStatus, VersionedRef, WorkflowId, WorkflowState,
     };
     use tempfile::tempdir;
 
@@ -1657,6 +1729,110 @@ mod tests {
         let mut wrong_role = certificate.clone();
         wrong_role.verify_invocations = vec![work.id];
         assert!(wrong_role.validate().is_err());
+    }
+
+    fn prepare_verifying_completion(
+        store: &mut SqliteEventStore,
+    ) -> (WorkflowAttempt, CompletionCertificate) {
+        let (contract, ready) = workflow_fixture();
+        store
+            .create_workflow(&contract, &ready, CorrelationId::new(), now())
+            .unwrap();
+        let running = store
+            .claim_workflow_attempt(
+                ready.attempt_id,
+                ready.revision,
+                ready.lease_generation,
+                RuntimeActorId::new(),
+                now() + chrono::Duration::minutes(5),
+                CorrelationId::new(),
+                "claim-for-atomic-completion",
+                now(),
+            )
+            .unwrap();
+        let verifying = store
+            .transition_workflow_attempt(
+                running.attempt_id,
+                running.revision,
+                running.lease_generation,
+                WorkflowState::Verifying,
+                CorrelationId::new(),
+                "begin-atomic-verification",
+                now() + chrono::Duration::seconds(1),
+            )
+            .unwrap();
+        let (_, work, _) = persist_completed_invocation(store, &verifying, InvocationRole::Work);
+        let (_, verify, _) =
+            persist_completed_invocation(store, &verifying, InvocationRole::Verify);
+        let certificate = certificate(&verifying, work.id, verify.id);
+        (verifying, certificate)
+    }
+
+    #[test]
+    fn certificate_and_terminal_workflow_commit_atomically_and_replay_exactly() {
+        let mut store = SqliteEventStore::open_in_memory().unwrap();
+        let (verifying, certificate) = prepare_verifying_completion(&mut store);
+        let (hash, settled) = store
+            .commit_completion_certificate(
+                &certificate,
+                verifying.revision,
+                verifying.lease_generation,
+                now() + chrono::Duration::seconds(4),
+            )
+            .unwrap();
+        assert_eq!(settled.state, WorkflowState::Succeeded);
+        assert_eq!(
+            store.completion_certificate(certificate.id).unwrap(),
+            Some(certificate.clone())
+        );
+        assert_eq!(
+            store
+                .commit_completion_certificate(
+                    &certificate,
+                    verifying.revision,
+                    verifying.lease_generation,
+                    now() + chrono::Duration::seconds(5),
+                )
+                .unwrap(),
+            (hash, settled)
+        );
+
+        let mut rollback_store = SqliteEventStore::open_in_memory().unwrap();
+        let (rollback_verifying, rollback_certificate) =
+            prepare_verifying_completion(&mut rollback_store);
+        rollback_store
+            .connection
+            .execute_batch(
+                "CREATE TEMP TRIGGER reject_atomic_completion
+                 BEFORE UPDATE ON workflow_attempts
+                 BEGIN
+                    SELECT RAISE(ABORT, 'injected workflow settlement failure');
+                 END;",
+            )
+            .unwrap();
+        assert!(
+            rollback_store
+                .commit_completion_certificate(
+                    &rollback_certificate,
+                    rollback_verifying.revision,
+                    rollback_verifying.lease_generation,
+                    now() + chrono::Duration::seconds(4),
+                )
+                .is_err()
+        );
+        assert_eq!(
+            rollback_store
+                .completion_certificate(rollback_certificate.id)
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            rollback_store
+                .workflow_attempt(rollback_verifying.attempt_id)
+                .unwrap()
+                .unwrap(),
+            rollback_verifying
+        );
     }
 
     #[test]

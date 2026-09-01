@@ -59,8 +59,8 @@ use mcg_config::{
 };
 use mcg_contracts::{
     ActionEnvelope, ActionExecution, ActionExecutionId, ActionId, ActionInspection, ActionReceipt,
-    ActionSummary, ActionValidation, ArtifactRef, CompletionCertificate, CompletionVerdict,
-    ContentHash, ContextManifest, CorrelationId, EffectOutcome, InvocationId, InvocationInspection,
+    ActionSummary, ActionValidation, ArtifactRef, CompletionCertificate, ContentHash,
+    ContextManifest, CorrelationId, EffectOutcome, InvocationId, InvocationInspection,
     InvocationManifest, InvocationSummary, ModelEgressPolicy, ModelInvocationPermit,
     ModelInvocationProposal, ModelRun, ModelRunId, ModelRunState, ModelUsage, PermitId,
     ReconciliationJob, ReconciliationJobId, ReconciliationObservation, RuntimeActorId,
@@ -4612,29 +4612,12 @@ impl AppRuntime {
             )
             .into());
         }
-        let next = match certificate.verdict {
-            CompletionVerdict::Satisfied => WorkflowState::Succeeded,
-            CompletionVerdict::NotSatisfied | CompletionVerdict::Inconclusive => {
-                WorkflowState::Failed
-            }
-            CompletionVerdict::Cancelled => {
-                return Err(StorageError::Conflict(
-                    "a cancelled certificate cannot bypass cancellation settlement".into(),
-                )
-                .into());
-            }
-        };
-        let hash = store.persist_completion_certificate(certificate, now)?;
-        let settled = store.transition_workflow_attempt(
-            certificate.attempt_id,
+        Ok(store.commit_completion_certificate(
+            certificate,
             expected_revision,
             expected_generation,
-            next,
-            CorrelationId::new(),
-            &format!("runtime-completion:{}", certificate.id),
             now,
-        )?;
-        Ok((hash, settled))
+        )?)
     }
 
     /// Durably requests cancellation under exact attempt revision/generation fencing.
