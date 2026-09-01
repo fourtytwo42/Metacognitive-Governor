@@ -1,5 +1,6 @@
+use std::io::Read as _;
 #[cfg(feature = "executor")]
-use std::io::{Read as _, Write as _};
+use std::io::Write as _;
 #[cfg(feature = "executor")]
 use std::path::Component;
 use std::path::{Path, PathBuf};
@@ -15,8 +16,17 @@ use cap_std::fs::{Dir, OpenOptions};
 use chrono::{DateTime, Utc};
 use mcg_contracts::{
     ActionEnvelope, ActionExecution, ActionExecutionId, ActionExecutionState, ActionId,
-    ContentHash, EffectClass, PolicyBinding, ReconciliationJob, ReconciliationJobState,
-    RuntimeActorId, StableTypeId, VersionedPayload, decode_canonical_cbor_v1,
+    ContentHash, EffectClass, ExecutionPlatform, FilesystemAccess, FilesystemCapability,
+    HashAlgorithm, IsolationGuarantee, PolicyBinding, ReconciliationJob, ReconciliationJobState,
+    RuntimeActorId, SandboxCapabilityProfile, SourceRef, StableTypeId, ToolCapabilitySet,
+    ToolInvocationPermit, ToolInvocationProposal, ToolManifest, ToolManifestId, ToolPolicy,
+    ToolResourceLimits, VersionedPayload, decode_canonical_cbor_v1,
+};
+#[cfg(feature = "executor")]
+use mcg_contracts::{
+    ArtifactRef, PROTOCOL_V1, PermitId, RuntimeIdentity, RuntimeInstanceId,
+    TOOL_POLICY_HASH_DOMAIN, TaskContractId, VersionedRef, tool_invocation_permit_hash,
+    tool_invocation_proposal_hash,
 };
 #[cfg(windows)]
 use process_wrap::tokio::JobObject;
@@ -33,7 +43,7 @@ use tokio::{
 use unicode_normalization::UnicodeNormalization as _;
 use uuid::Uuid;
 
-pub const ACTION_RUNNER_PROTOCOL_VERSION: u32 = 1;
+pub const ACTION_RUNNER_PROTOCOL_VERSION: u32 = 2;
 pub const ACTION_RUNNER_REQUEST_MAX_BYTES: usize = 2 * 1024 * 1024;
 pub const ACTION_RUNNER_RESPONSE_MAX_BYTES: usize = 2 * 1024 * 1024;
 pub const ACTION_RUNNER_CONTENT_MAX_BYTES: u64 = 1024 * 1024;
@@ -42,6 +52,38 @@ pub const GOVERNED_FILESYSTEM_AUTHORITY_HASH_DOMAIN: &str = "MetaCog.FilesystemA
 pub const GOVERNED_FILESYSTEM_AUTHORITY_TYPE: &str = "mcg.governed_filesystem_authority.v1";
 pub const GOVERNED_FILESYSTEM_OPERATION_TYPE: &str = "mcg.governed_filesystem_operation.v1";
 pub const GOVERNED_FILESYSTEM_OBSERVATION_TYPE: &str = "mcg.governed_filesystem_observation.v1";
+pub const ACTION_RUNNER_EXECUTABLE_SOURCE_TYPE: &str = "mcg.action_runner_executable.v1";
+pub const ACTION_RUNNER_EXECUTABLE_HASH_DOMAIN: &str = "MetaCog.ActionRunnerExecutable";
+pub const ACTION_RUNNER_INPUT_SCHEMA_TYPE: &str = "mcg.action_runner_input_schema.v1";
+pub const ACTION_RUNNER_OUTPUT_SCHEMA_TYPE: &str = "mcg.action_runner_output_schema.v1";
+pub const ACTION_RUNNER_RECONCILER_TYPE: &str = "mcg.action_runner_reconciler.v1";
+pub const ACTION_RUNNER_RECEIPT_TYPE: &str = "mcg.action_runner_receipt.v1";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActionRunnerExecutionMode {
+    Effect,
+    Reconcile,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActionRunnerAuthorization {
+    pub manifest: ToolManifest,
+    pub proposal: ToolInvocationProposal,
+    pub proposal_hash: ContentHash,
+    pub policy: ToolPolicy,
+    pub permit: ToolInvocationPermit,
+    pub permit_hash: ContentHash,
+    pub permit_ref: SourceRef,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActionRunnerCapabilityEvidence {
+    pub runner: SourceRef,
+    pub platform: ExecutionPlatform,
+    pub available_sandbox: SandboxCapabilityProfile,
+    pub resource_ceiling: ToolResourceLimits,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActionRunnerRequest {
@@ -49,6 +91,9 @@ pub struct ActionRunnerRequest {
     pub request_id: Uuid,
     pub action_id: ActionId,
     pub execution_id: ActionExecutionId,
+    pub execution_mode: ActionRunnerExecutionMode,
+    pub envelope: ActionEnvelope,
+    pub authorization: ActionRunnerAuthorization,
     pub capability_root: PathBuf,
     pub operation: VersionedPayload,
     pub operation_hash: ContentHash,
@@ -166,6 +211,7 @@ impl ActionRunnerClientError {
 pub struct ActionRunnerClient {
     executable: PathBuf,
     outer_timeout: Duration,
+    capability_evidence: ActionRunnerCapabilityEvidence,
 }
 
 impl ActionRunnerClient {
@@ -209,10 +255,29 @@ impl ActionRunnerClient {
         if !metadata.file_type().is_file() || is_link_or_reparse(&metadata) {
             return Err(ActionRunnerClientError::Unavailable);
         }
+        let timeout_ms = u64::try_from(outer_timeout.as_millis())
+            .map_err(|_| ActionRunnerClientError::Unavailable)?;
         Ok(Self {
             executable: executable.to_path_buf(),
             outer_timeout,
+            capability_evidence: ActionRunnerCapabilityEvidence {
+                runner: runner_executable_source(executable)?,
+                platform: current_execution_platform(),
+                available_sandbox: action_runner_sandbox_profile(),
+                resource_ceiling: ToolResourceLimits {
+                    timeout_ms,
+                    max_output_bytes: u64::try_from(ACTION_RUNNER_RESPONSE_MAX_BYTES)
+                        .map_err(|_| ActionRunnerClientError::Unavailable)?,
+                    max_memory_bytes: 0,
+                    max_child_processes: 0,
+                },
+            },
         })
+    }
+
+    #[must_use]
+    pub fn capability_evidence(&self) -> &ActionRunnerCapabilityEvidence {
+        &self.capability_evidence
     }
 
     /// Executes exactly one request in a cleared-environment child and validates its identity.
@@ -226,6 +291,7 @@ impl ActionRunnerClient {
         &self,
         request: &ActionRunnerRequest,
     ) -> Result<ActionRunnerResponse, ActionRunnerClientError> {
+        self.validate_executable_identity()?;
         let request_bytes =
             serde_json::to_vec(request).map_err(|_| ActionRunnerClientError::InvalidResponse)?;
         if request_bytes.len() > ACTION_RUNNER_REQUEST_MAX_BYTES {
@@ -317,6 +383,18 @@ impl ActionRunnerClient {
             return Err(ActionRunnerClientError::DiagnosticOutput);
         }
         validate_client_response(status.success(), request, &stdout)
+    }
+
+    fn validate_executable_identity(&self) -> Result<(), ActionRunnerClientError> {
+        let metadata = std::fs::symlink_metadata(&self.executable)
+            .map_err(|_| ActionRunnerClientError::Unavailable)?;
+        if !metadata.file_type().is_file()
+            || is_link_or_reparse(&metadata)
+            || runner_executable_source(&self.executable)? != self.capability_evidence.runner
+        {
+            return Err(ActionRunnerClientError::Unavailable);
+        }
+        Ok(())
     }
 }
 
@@ -528,6 +606,7 @@ pub fn validate_governed_filesystem_envelope(
 pub fn request_from_authorized_action(
     envelope: &ActionEnvelope,
     execution: &ActionExecution,
+    authorization: ActionRunnerAuthorization,
     request_id: Uuid,
     now: DateTime<Utc>,
 ) -> Result<ActionRunnerRequest, ActionRunnerProtocolError> {
@@ -543,6 +622,9 @@ pub fn request_from_authorized_action(
         request_id,
         action_id: envelope.id,
         execution_id: execution.id,
+        execution_mode: ActionRunnerExecutionMode::Effect,
+        envelope: envelope.clone(),
+        authorization,
         capability_root: authority.capability_root,
         operation: envelope.operation.clone(),
         operation_hash: envelope.operation_hash.clone(),
@@ -563,6 +645,7 @@ pub fn request_from_reconciliation_job(
     envelope: &ActionEnvelope,
     execution: &ActionExecution,
     job: &ReconciliationJob,
+    authorization: ActionRunnerAuthorization,
     request_id: Uuid,
     now: DateTime<Utc>,
 ) -> Result<ActionRunnerRequest, ActionRunnerProtocolError> {
@@ -595,6 +678,9 @@ pub fn request_from_reconciliation_job(
         request_id,
         action_id: envelope.id,
         execution_id: execution.id,
+        execution_mode: ActionRunnerExecutionMode::Reconcile,
+        envelope: envelope.clone(),
+        authorization,
         capability_root: authority.capability_root,
         operation: reconciler.clone(),
         operation_hash,
@@ -1051,6 +1137,7 @@ fn execute(
             "operation is not a governed filesystem operation",
         ));
     }
+    validate_tool_authorization(request, Utc::now())?;
     validate_operation_binding(request)?;
     let value = decode_canonical_cbor_v1(&request.operation.bytes)
         .map_err(|error| denied("operation_invalid", error.to_string()))?;
@@ -1059,6 +1146,344 @@ fn execute(
     let root = CapabilityRoot::open(&request.capability_root)?;
     let (outcome, observation, detail) = execute_operation(&root, operation)?;
     encode_observation(outcome, &observation, detail)
+}
+
+#[cfg(feature = "executor")]
+#[allow(clippy::too_many_lines)]
+fn validate_tool_authorization(
+    request: &ActionRunnerRequest,
+    now: DateTime<Utc>,
+) -> Result<(), RunnerFailure> {
+    let authorization = &request.authorization;
+    authorization
+        .manifest
+        .validate()
+        .map_err(|error| denied("tool_manifest_invalid", error.to_string()))?;
+    authorization
+        .proposal
+        .validate()
+        .map_err(|error| denied("tool_proposal_invalid", error.to_string()))?;
+    authorization
+        .policy
+        .validate()
+        .map_err(|error| denied("tool_policy_invalid", error.to_string()))?;
+    authorization
+        .permit
+        .validate()
+        .map_err(|error| denied("tool_permit_invalid", error.to_string()))?;
+    authorization
+        .permit_ref
+        .validate()
+        .map_err(|error| denied("tool_permit_ref_invalid", error.to_string()))?;
+
+    let manifest_ref = authorization
+        .manifest
+        .versioned_ref()
+        .map_err(|error| denied("tool_manifest_invalid", error.to_string()))?;
+    let proposal_hash = tool_invocation_proposal_hash(&authorization.proposal)
+        .map_err(|error| denied("tool_proposal_invalid", error.to_string()))?;
+    let permit_hash = tool_invocation_permit_hash(&authorization.permit)
+        .map_err(|error| denied("tool_permit_invalid", error.to_string()))?;
+    let policy_binding = tool_policy_binding(&authorization.policy)
+        .map_err(|error| denied("tool_policy_invalid", error.clone()))?;
+    let expected_runner = runner_executable_source(
+        &std::env::current_exe()
+            .map_err(|error| denied("runner_identity_unavailable", error.to_string()))?,
+    )
+    .map_err(|error| denied("runner_identity_unavailable", error.to_string()))?;
+    let expected_capabilities = &authorization.manifest.required_capabilities;
+    let root = request
+        .capability_root
+        .to_str()
+        .ok_or_else(|| denied("capability_root_invalid", "filesystem root is not Unicode"))?;
+    let expected_access = if request.envelope.effect_class == EffectClass::Observational {
+        FilesystemAccess::Read
+    } else {
+        FilesystemAccess::Write
+    };
+    let expected_operation = match request.execution_mode {
+        ActionRunnerExecutionMode::Effect => &request.envelope.operation,
+        ActionRunnerExecutionMode::Reconcile => request
+            .envelope
+            .reconciler
+            .as_ref()
+            .ok_or_else(|| denied("reconciler_missing", "action has no reconciler"))?,
+    };
+    let filesystem_authority = validate_governed_filesystem_envelope(&request.envelope, now)
+        .map_err(|error| denied("action_envelope_invalid", error.to_string()))?;
+
+    if request.action_id != request.envelope.id
+        || request.authorization.proposal.action_id != request.envelope.id
+        || request.authorization.permit.action_id != request.envelope.id
+        || request.authorization.proposal.attempt_id != request.envelope.attempt_id
+        || request.authorization.proposal.runtime_actor != request.envelope.actor
+        || request.authorization.proposal.task_contract != request.envelope.task_contract
+        || request.authorization.proposal.argument_hash != request.envelope.operation_hash
+        || request.capability_root != filesystem_authority.capability_root
+        || request.authorization.proposal.requested_effect_class != request.envelope.effect_class
+        || request.authorization.proposal.tool_manifest != manifest_ref
+        || request.authorization.permit.tool_manifest != manifest_ref
+        || request.authorization.proposal_hash != proposal_hash
+        || request.authorization.permit.proposal_hash != proposal_hash
+        || request.authorization.permit_hash != permit_hash
+        || request.authorization.permit.argument_hash != request.envelope.operation_hash
+        || request.authorization.permit.allowed_effect_class != request.envelope.effect_class
+        || request.authorization.permit.capabilities != *expected_capabilities
+        || request.authorization.proposal.requested_capabilities != *expected_capabilities
+        || request.authorization.permit.limits != authorization.manifest.resource_ceiling
+        || request.authorization.proposal.requested_limits
+            != authorization.manifest.resource_ceiling
+        || request.authorization.proposal.required_sandbox
+            != authorization.manifest.sandbox_requirement
+        || request.authorization.permit.policy != policy_binding
+        || request.authorization.permit.platform != current_execution_platform()
+        || request.authorization.proposal.platform != current_execution_platform()
+        || !authorization
+            .manifest
+            .platform_support
+            .contains(&current_execution_platform())
+        || !action_runner_sandbox_profile().satisfies(authorization.manifest.sandbox_requirement)
+        || !authorization
+            .permit
+            .sandbox
+            .satisfies(authorization.manifest.sandbox_requirement)
+        || authorization.permit.issued_at > now
+        || authorization.permit.expires_at <= now
+        || authorization.proposal.deadline != authorization.permit.expires_at
+        || !authorization.permit.secret_handles.is_empty()
+        || expected_capabilities.filesystem.len() != 1
+        || expected_capabilities.filesystem[0].root != root
+        || expected_capabilities.filesystem[0].access != expected_access
+        || !expected_capabilities.network.is_empty()
+        || !expected_capabilities.secret_slots.is_empty()
+        || expected_capabilities.process_spawn
+        || authorization.manifest.runner != expected_runner
+        || authorization.permit_ref.source_type.as_str() != ToolInvocationPermit::TYPE_ID
+        || authorization.permit_ref.locator != authorization.permit.id.to_string()
+        || authorization.permit_ref.content_hash != permit_hash
+        || request.operation != *expected_operation
+        || request.operation_hash
+            != expected_operation
+                .content_hash(GOVERNED_ACTION_OPERATION_HASH_DOMAIN)
+                .map_err(|error| denied("operation_invalid", error.to_string()))?
+    {
+        return Err(denied(
+            "tool_authority_mismatch",
+            "request differs from the exact Root-issued Tool authority",
+        ));
+    }
+    if request.execution_mode == ActionRunnerExecutionMode::Reconcile
+        && authorization.manifest.reconciler.as_ref() != Some(&action_runner_reconciler_source())
+    {
+        return Err(denied(
+            "reconciler_authority_mismatch",
+            "reconciliation is outside the Tool manifest",
+        ));
+    }
+    Ok(())
+}
+
+#[must_use]
+pub const fn current_execution_platform() -> ExecutionPlatform {
+    if cfg!(windows) {
+        ExecutionPlatform::Windows
+    } else if cfg!(target_os = "macos") {
+        ExecutionPlatform::Macos
+    } else {
+        ExecutionPlatform::Linux
+    }
+}
+
+#[must_use]
+pub const fn action_runner_sandbox_profile() -> SandboxCapabilityProfile {
+    SandboxCapabilityProfile {
+        filesystem_scope: IsolationGuarantee::Hard,
+        network: IsolationGuarantee::Unavailable,
+        process_tree: IsolationGuarantee::BestEffort,
+        secrets: IsolationGuarantee::BestEffort,
+        environment: IsolationGuarantee::BestEffort,
+        resources: IsolationGuarantee::BestEffort,
+        protected_paths: IsolationGuarantee::Hard,
+    }
+}
+
+/// Hashes one exact real runner executable into its stable capability source reference.
+///
+/// # Errors
+/// Returns unavailable when the executable cannot be opened, read, or represented canonically.
+pub fn runner_executable_source(path: &Path) -> Result<SourceRef, ActionRunnerClientError> {
+    let mut file = std::fs::File::open(path).map_err(|_| ActionRunnerClientError::Unavailable)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0_u8; 64 * 1024].into_boxed_slice();
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|_| ActionRunnerClientError::Unavailable)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(SourceRef {
+        source_type: StableTypeId::parse(ACTION_RUNNER_EXECUTABLE_SOURCE_TYPE)
+            .map_err(|_| ActionRunnerClientError::Unavailable)?,
+        locator: runner_file_name().into(),
+        content_hash: ContentHash {
+            algorithm: HashAlgorithm::Sha256,
+            domain: ACTION_RUNNER_EXECUTABLE_HASH_DOMAIN.into(),
+            digest_hex: format!("{:x}", hasher.finalize()),
+        },
+    })
+}
+
+#[must_use]
+pub fn action_runner_input_schema_source() -> SourceRef {
+    static_source_ref(
+        ACTION_RUNNER_INPUT_SCHEMA_TYPE,
+        GOVERNED_FILESYSTEM_OPERATION_TYPE,
+        "MetaCog.ActionRunnerInputSchema",
+    )
+}
+
+#[must_use]
+pub fn action_runner_output_schema_source() -> SourceRef {
+    static_source_ref(
+        ACTION_RUNNER_OUTPUT_SCHEMA_TYPE,
+        GOVERNED_FILESYSTEM_OBSERVATION_TYPE,
+        "MetaCog.ActionRunnerOutputSchema",
+    )
+}
+
+#[must_use]
+pub fn action_runner_reconciler_source() -> SourceRef {
+    static_source_ref(
+        ACTION_RUNNER_RECONCILER_TYPE,
+        GOVERNED_FILESYSTEM_OPERATION_TYPE,
+        "MetaCog.ActionRunnerReconciler",
+    )
+}
+
+/// Builds the exact immutable manifest for one physical filesystem root and access class.
+///
+/// The manifest identity is deterministically derived from the executable hash, platform, root,
+/// and access class, so exact replay is stable while a changed binary or scope becomes a distinct
+/// Tool identity rather than silently rewriting durable authority.
+///
+/// # Errors
+/// Returns an error for a non-absolute/non-Unicode root or malformed evidence.
+pub fn governed_filesystem_tool_manifest(
+    evidence: &ActionRunnerCapabilityEvidence,
+    capability_root: &Path,
+    access: FilesystemAccess,
+) -> Result<ToolManifest, String> {
+    if !capability_root.is_absolute() {
+        return Err("filesystem Tool root is not absolute".into());
+    }
+    let root = capability_root
+        .to_str()
+        .ok_or("filesystem Tool root is not Unicode")?
+        .to_owned();
+    evidence
+        .runner
+        .validate()
+        .map_err(|error| error.to_string())?;
+    evidence
+        .resource_ceiling
+        .validate()
+        .map_err(|error| error.to_string())?;
+    let access_label = match access {
+        FilesystemAccess::Read => "read",
+        FilesystemAccess::Write => "write",
+    };
+    let identity_material = serde_json::to_vec(&serde_json::json!({
+        "runner": evidence.runner,
+        "platform": evidence.platform,
+        "root": root,
+        "access": access,
+        "sandbox": evidence.available_sandbox,
+        "resources": evidence.resource_ceiling,
+    }))
+    .map_err(|error| error.to_string())?;
+    let digest = Sha256::digest(identity_material);
+    let mut uuid_bytes = [0_u8; 16];
+    uuid_bytes.copy_from_slice(&digest[..16]);
+    uuid_bytes[6] = (uuid_bytes[6] & 0x0f) | 0x50;
+    uuid_bytes[8] = (uuid_bytes[8] & 0x3f) | 0x80;
+    let manifest = ToolManifest {
+        id: ToolManifestId(Uuid::from_bytes(uuid_bytes)),
+        version: 1,
+        name: format!("filesystem.{access_label}"),
+        summary: format!("Governed {access_label} access to one exact filesystem root"),
+        runner: evidence.runner.clone(),
+        input_schema: action_runner_input_schema_source(),
+        output_schema: action_runner_output_schema_source(),
+        maximum_effect_class: if access == FilesystemAccess::Read {
+            EffectClass::Observational
+        } else {
+            EffectClass::Reversible
+        },
+        required_capabilities: ToolCapabilitySet {
+            filesystem: vec![FilesystemCapability { root, access }],
+            network: Vec::new(),
+            secret_slots: Vec::new(),
+            process_spawn: false,
+        },
+        resource_ceiling: evidence.resource_ceiling,
+        sandbox_requirement: evidence.available_sandbox,
+        platform_support: vec![evidence.platform],
+        receipt_semantics: StableTypeId::parse(ACTION_RUNNER_RECEIPT_TYPE)
+            .map_err(|error| error.to_string())?,
+        reconciler: (access == FilesystemAccess::Write).then(action_runner_reconciler_source),
+    };
+    manifest.validate().map_err(|error| error.to_string())?;
+    Ok(manifest)
+}
+
+/// Builds the least-authority Root policy for one exact filesystem Tool manifest.
+///
+/// # Errors
+/// Returns an error when the supplied manifest cannot produce an immutable reference.
+pub fn governed_filesystem_tool_policy(manifest: &ToolManifest) -> Result<ToolPolicy, String> {
+    Ok(ToolPolicy {
+        allowed_manifests: vec![
+            manifest
+                .versioned_ref()
+                .map_err(|error| error.to_string())?,
+        ],
+        maximum_effect_class: manifest.maximum_effect_class,
+        maximum_capabilities: manifest.required_capabilities.clone(),
+        maximum_limits: manifest.resource_ceiling,
+        maximum_permit_lifetime_seconds: 24 * 60 * 60,
+    })
+}
+
+fn static_source_ref(source_type: &str, locator: &str, domain: &str) -> SourceRef {
+    let digest = Sha256::digest(format!("{source_type}\0{locator}").as_bytes());
+    SourceRef {
+        source_type: StableTypeId::parse(source_type).expect("fixed action-runner source type"),
+        locator: locator.into(),
+        content_hash: ContentHash {
+            algorithm: HashAlgorithm::Sha256,
+            domain: domain.into(),
+            digest_hex: format!("{digest:x}"),
+        },
+    }
+}
+
+#[cfg(feature = "executor")]
+fn tool_policy_binding(policy: &ToolPolicy) -> Result<PolicyBinding, String> {
+    let payload = VersionedPayload::canonical_v1(
+        StableTypeId::parse(ToolPolicy::TYPE_ID).map_err(|error| error.to_string())?,
+        &serde_json::to_value(policy).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
+    let content_hash = payload
+        .content_hash(TOOL_POLICY_HASH_DOMAIN)
+        .map_err(|error| error.to_string())?;
+    Ok(PolicyBinding {
+        payload,
+        content_hash,
+    })
 }
 
 #[cfg(feature = "executor")]
@@ -1475,16 +1900,242 @@ fn qualification_request(
     root: &Path,
     operation: &GovernedFilesystemOperation,
 ) -> Result<ActionRunnerRequest, String> {
-    let (operation, operation_hash) = governed_filesystem_operation_payload(operation)?;
-    Ok(ActionRunnerRequest {
-        protocol_version: ACTION_RUNNER_PROTOCOL_VERSION,
-        request_id: Uuid::new_v4(),
-        action_id: ActionId::new(),
-        execution_id: ActionExecutionId::new(),
-        capability_root: root.into(),
+    let executable = std::env::current_exe().map_err(|error| error.to_string())?;
+    let evidence = ActionRunnerCapabilityEvidence {
+        runner: runner_executable_source(&executable).map_err(|error| error.to_string())?,
+        platform: current_execution_platform(),
+        available_sandbox: action_runner_sandbox_profile(),
+        resource_ceiling: ToolResourceLimits {
+            timeout_ms: 30_000,
+            max_output_bytes: u64::try_from(ACTION_RUNNER_RESPONSE_MAX_BYTES)
+                .map_err(|error| error.to_string())?,
+            max_memory_bytes: 0,
+            max_child_processes: 0,
+        },
+    };
+    qualification_request_with_evidence(root, operation, &evidence)
+}
+
+#[cfg(feature = "executor")]
+/// Builds a self-contained request for packaged runner qualification.
+///
+/// This does not persist authority and must not be used by Protected Root production dispatch.
+///
+/// # Errors
+/// Returns an error when the operation, evidence, or canonical bindings are invalid.
+pub fn qualification_request_with_evidence(
+    root: &Path,
+    operation: &GovernedFilesystemOperation,
+    evidence: &ActionRunnerCapabilityEvidence,
+) -> Result<ActionRunnerRequest, String> {
+    standalone_authorized_request(root, operation, evidence)
+}
+
+#[cfg(feature = "executor")]
+#[allow(clippy::too_many_lines)]
+fn standalone_authorized_request(
+    root: &Path,
+    operation: &GovernedFilesystemOperation,
+    evidence: &ActionRunnerCapabilityEvidence,
+) -> Result<ActionRunnerRequest, String> {
+    let now = Utc::now();
+    let action_id = ActionId::new();
+    let actor = RuntimeActorId::new();
+    let (operation_payload, operation_hash) = governed_filesystem_operation_payload(operation)?;
+    let relative_path = match operation {
+        GovernedFilesystemOperation::ReadFile { relative_path, .. }
+        | GovernedFilesystemOperation::CreateFile { relative_path, .. }
+        | GovernedFilesystemOperation::RemoveCreatedFile { relative_path, .. }
+        | GovernedFilesystemOperation::InspectFile { relative_path, .. } => relative_path,
+    };
+    let access = if matches!(
         operation,
+        GovernedFilesystemOperation::ReadFile { .. }
+            | GovernedFilesystemOperation::InspectFile { .. }
+    ) {
+        FilesystemAccess::Read
+    } else {
+        FilesystemAccess::Write
+    };
+    let effect_class = if access == FilesystemAccess::Read {
+        EffectClass::Observational
+    } else {
+        EffectClass::Reversible
+    };
+    let reconciler = (access == FilesystemAccess::Write)
+        .then(|| {
+            governed_filesystem_operation_payload(&GovernedFilesystemOperation::InspectFile {
+                relative_path: relative_path.clone(),
+                max_bytes: ACTION_RUNNER_CONTENT_MAX_BYTES,
+            })
+            .map(|(payload, _)| payload)
+        })
+        .transpose()?;
+    let compensation = match operation {
+        GovernedFilesystemOperation::CreateFile {
+            relative_path,
+            content_base64,
+        } => {
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(content_base64)
+                .map_err(|error| error.to_string())?;
+            Some(
+                governed_filesystem_operation_payload(
+                    &GovernedFilesystemOperation::RemoveCreatedFile {
+                        relative_path: relative_path.clone(),
+                        expected_sha256: sha256(&bytes),
+                    },
+                )?
+                .0,
+            )
+        }
+        _ => None,
+    };
+    let deadline = now + chrono::Duration::minutes(5);
+    let authority = governed_filesystem_authority_binding(&GovernedFilesystemAuthority {
+        action_id,
+        actor,
+        capability_root: root.into(),
+        operation_hash: operation_hash.clone(),
+        effect_class,
+        expires_at: deadline,
+    })?;
+    let envelope = ActionEnvelope {
+        id: action_id,
+        workflow_id: mcg_contracts::WorkflowId::new(),
+        attempt_id: mcg_contracts::AttemptId::new(),
+        task_contract: VersionedRef {
+            id: TaskContractId::new(),
+            version: 1,
+            content_hash: operation_hash.clone(),
+        },
+        actor,
+        origin: None,
+        authority,
+        elevated_authority: None,
+        expected_versions: Vec::new(),
+        operation: operation_payload,
         operation_hash,
-    })
+        effect_class,
+        preconditions: Vec::new(),
+        budget_reservation: tool_policy_binding(&ToolPolicy {
+            allowed_manifests: vec![VersionedRef {
+                id: ToolManifestId::new(),
+                version: 1,
+                content_hash: static_source_ref(
+                    ACTION_RUNNER_INPUT_SCHEMA_TYPE,
+                    "qualification-budget",
+                    "MetaCog.ActionRunnerQualificationBudget",
+                )
+                .content_hash,
+            }],
+            maximum_effect_class: effect_class,
+            maximum_capabilities: ToolCapabilitySet::default(),
+            maximum_limits: ToolResourceLimits {
+                timeout_ms: 1,
+                max_output_bytes: 1,
+                max_memory_bytes: 0,
+                max_child_processes: 0,
+            },
+            maximum_permit_lifetime_seconds: 1,
+        })?,
+        idempotency_key: format!("runner-qualification-{action_id}"),
+        compensation,
+        compensates_action: matches!(
+            operation,
+            GovernedFilesystemOperation::RemoveCreatedFile { .. }
+        )
+        .then(ActionId::new),
+        reconciler,
+        reconciliation_deadline: (access == FilesystemAccess::Write).then_some(deadline),
+        created_at: now,
+    };
+    let execution = ActionExecution {
+        id: ActionExecutionId::new(),
+        action_id,
+        attempt_number: 1,
+        state: ActionExecutionState::Executing,
+        revision: 2,
+        lease_generation: 1,
+        executor: Some(actor),
+        outcome: None,
+        created_at: now,
+        updated_at: now,
+    };
+    let manifest = governed_filesystem_tool_manifest(evidence, root, access)?;
+    let policy = governed_filesystem_tool_policy(&manifest)?;
+    let runtime_identity = RuntimeIdentity {
+        instance_id: RuntimeInstanceId::new(),
+        build_hash: evidence.runner.content_hash.clone(),
+        protocol_version: PROTOCOL_V1,
+        started_at: now - chrono::Duration::seconds(1),
+    };
+    let proposal = ToolInvocationProposal {
+        action_id,
+        attempt_id: envelope.attempt_id,
+        attempt_revision: 1,
+        lease_generation: 1,
+        runtime_actor: actor,
+        runtime_identity: runtime_identity.clone(),
+        task_contract: envelope.task_contract.clone(),
+        tool_manifest: manifest
+            .versioned_ref()
+            .map_err(|error| error.to_string())?,
+        arguments: ArtifactRef {
+            content_hash: envelope.operation_hash.clone(),
+            media_type: "application/vnd.metacog.governed-filesystem-operation+cbor".into(),
+            byte_length: u64::try_from(envelope.operation.bytes.len())
+                .map_err(|error| error.to_string())?,
+        },
+        argument_hash: envelope.operation_hash.clone(),
+        requested_effect_class: effect_class,
+        requested_capabilities: manifest.required_capabilities.clone(),
+        requested_limits: manifest.resource_ceiling,
+        required_sandbox: manifest.sandbox_requirement,
+        platform: evidence.platform,
+        deadline,
+    };
+    let proposal_hash =
+        tool_invocation_proposal_hash(&proposal).map_err(|error| error.to_string())?;
+    let permit = ToolInvocationPermit {
+        id: PermitId::new(),
+        action_id,
+        attempt_id: proposal.attempt_id,
+        attempt_revision: proposal.attempt_revision,
+        lease_generation: proposal.lease_generation,
+        runtime_actor: actor,
+        runtime_identity,
+        task_contract: proposal.task_contract.clone(),
+        tool_manifest: proposal.tool_manifest.clone(),
+        proposal_hash: proposal_hash.clone(),
+        argument_hash: proposal.argument_hash.clone(),
+        allowed_effect_class: effect_class,
+        capabilities: proposal.requested_capabilities.clone(),
+        limits: proposal.requested_limits,
+        sandbox: evidence.available_sandbox,
+        platform: evidence.platform,
+        policy: tool_policy_binding(&policy)?,
+        expires_at: deadline,
+        secret_handles: Vec::new(),
+        issued_at: now,
+    };
+    let permit_hash = tool_invocation_permit_hash(&permit).map_err(|error| error.to_string())?;
+    let authorization = ActionRunnerAuthorization {
+        manifest,
+        proposal,
+        proposal_hash,
+        policy,
+        permit: permit.clone(),
+        permit_hash: permit_hash.clone(),
+        permit_ref: SourceRef {
+            source_type: StableTypeId::parse(ToolInvocationPermit::TYPE_ID)
+                .map_err(|error| error.to_string())?,
+            locator: permit.id.to_string(),
+            content_hash: permit_hash,
+        },
+    };
+    request_from_authorized_action(&envelope, &execution, authorization, Uuid::new_v4(), now)
+        .map_err(|error| error.to_string())
 }
 
 #[cfg(feature = "executor")]
@@ -1581,107 +2232,38 @@ fn is_link_or_reparse(metadata: &std::fs::Metadata) -> bool {
 mod tests {
     use super::*;
 
-    fn policy_binding(type_id: &str, domain: &str) -> PolicyBinding {
-        let payload = VersionedPayload::canonical_v1(
-            StableTypeId::parse(type_id).unwrap(),
-            &serde_json::json!({"bounded": true}),
-        )
-        .unwrap();
-        let content_hash = payload.content_hash(domain).unwrap();
-        PolicyBinding {
-            payload,
-            content_hash,
-        }
-    }
-
     fn authorized_create(
         root: &Path,
-    ) -> (ActionEnvelope, ActionExecution, GovernedFilesystemOperation) {
-        let now = Utc::now();
-        let action_id = ActionId::new();
-        let actor = RuntimeActorId::new();
+    ) -> (
+        ActionEnvelope,
+        ActionExecution,
+        GovernedFilesystemOperation,
+        ActionRunnerAuthorization,
+    ) {
         let operation = GovernedFilesystemOperation::CreateFile {
             relative_path: "authorized.txt".into(),
             content_base64: base64::engine::general_purpose::STANDARD.encode(b"authorized"),
         };
-        let (operation_payload, operation_hash) =
-            governed_filesystem_operation_payload(&operation).unwrap();
-        let (compensation, _) = governed_filesystem_operation_payload(
-            &GovernedFilesystemOperation::RemoveCreatedFile {
-                relative_path: "authorized.txt".into(),
-                expected_sha256: sha256(b"authorized"),
-            },
-        )
-        .unwrap();
-        let (reconciler, _) =
-            governed_filesystem_operation_payload(&GovernedFilesystemOperation::InspectFile {
-                relative_path: "authorized.txt".into(),
-                max_bytes: ACTION_RUNNER_CONTENT_MAX_BYTES,
-            })
-            .unwrap();
-        let authority = governed_filesystem_authority_binding(&GovernedFilesystemAuthority {
-            action_id,
-            actor,
-            capability_root: root.into(),
-            operation_hash: operation_hash.clone(),
-            effect_class: EffectClass::Reversible,
-            expires_at: now + chrono::Duration::minutes(5),
-        })
-        .unwrap();
-        let envelope = ActionEnvelope {
-            id: action_id,
-            workflow_id: mcg_contracts::WorkflowId::new(),
-            attempt_id: mcg_contracts::AttemptId::new(),
-            task_contract: mcg_contracts::VersionedRef {
-                id: mcg_contracts::TaskContractId::new(),
-                version: 1,
-                content_hash: operation_hash.clone(),
-            },
-            actor,
-            origin: None,
-            authority,
-            elevated_authority: None,
-            expected_versions: vec![],
-            operation: operation_payload,
-            operation_hash,
-            effect_class: EffectClass::Reversible,
-            preconditions: vec![],
-            budget_reservation: policy_binding("mcg.test_budget.v1", "TestBudget"),
-            idempotency_key: "authorized-create".into(),
-            compensation: Some(compensation),
-            compensates_action: None,
-            reconciler: Some(reconciler),
-            reconciliation_deadline: Some(now + chrono::Duration::minutes(5)),
-            created_at: now,
-        };
+        let request = qualification_request(root, &operation).unwrap();
+        let envelope = request.envelope;
         let execution = ActionExecution {
-            id: ActionExecutionId::new(),
-            action_id,
+            id: request.execution_id,
+            action_id: envelope.id,
             attempt_number: 1,
             state: ActionExecutionState::Executing,
             revision: 2,
             lease_generation: 1,
-            executor: Some(RuntimeActorId::new()),
+            executor: Some(envelope.actor),
             outcome: None,
-            created_at: now,
-            updated_at: now,
+            created_at: envelope.created_at,
+            updated_at: envelope.created_at,
         };
-        (envelope, execution, operation)
+        (envelope, execution, operation, request.authorization)
     }
 
     #[allow(clippy::needless_pass_by_value)]
     fn request(root: &Path, operation: GovernedFilesystemOperation) -> ActionRunnerRequest {
-        let (operation, operation_hash) =
-            governed_filesystem_operation_payload(&operation).unwrap();
-        ActionRunnerRequest {
-            protocol_version: ACTION_RUNNER_PROTOCOL_VERSION,
-            request_id: Uuid::new_v4(),
-            action_id: ActionId::new(),
-            execution_id: ActionExecutionId::new(),
-            capability_root: root.into(),
-            operation,
-            operation_hash,
-        }
+        qualification_request(root, &operation).unwrap()
     }
 
     fn run(request: &ActionRunnerRequest) -> ActionRunnerResponse {
@@ -1762,16 +2344,15 @@ mod tests {
             "CON.txt",
             "COM¹.log",
         ] {
-            let response = run(&request(
-                root.path(),
-                GovernedFilesystemOperation::InspectFile {
-                    relative_path: relative_path.into(),
-                    max_bytes: 100,
-                },
-            ));
-            assert_eq!(
-                response.outcome,
-                RunnerEffectOutcome::Denied,
+            assert!(
+                qualification_request(
+                    root.path(),
+                    &GovernedFilesystemOperation::InspectFile {
+                        relative_path: relative_path.into(),
+                        max_bytes: 100,
+                    },
+                )
+                .is_err(),
                 "semantic path must be denied: {relative_path:?}"
             );
         }
@@ -1799,7 +2380,7 @@ mod tests {
         assert_eq!(response.outcome, RunnerEffectOutcome::Denied);
         assert_eq!(
             response.error_code.as_deref(),
-            Some("operation_hash_domain_mismatch")
+            Some("tool_authority_mismatch")
         );
 
         std::fs::write(root.path().join("changed.txt"), "new owner content").unwrap();
@@ -1901,12 +2482,50 @@ mod tests {
     }
 
     #[test]
+    fn child_rejects_fully_rehashed_runner_identity_substitution() {
+        let root = tempfile::tempdir().unwrap();
+        let mut request = request(
+            root.path(),
+            GovernedFilesystemOperation::InspectFile {
+                relative_path: "missing.txt".into(),
+                max_bytes: 100,
+            },
+        );
+        request
+            .authorization
+            .manifest
+            .runner
+            .content_hash
+            .digest_hex = "0".repeat(64);
+        let manifest_ref = request.authorization.manifest.versioned_ref().unwrap();
+        request.authorization.policy.allowed_manifests = vec![manifest_ref.clone()];
+        request.authorization.proposal.tool_manifest = manifest_ref.clone();
+        request.authorization.proposal_hash =
+            tool_invocation_proposal_hash(&request.authorization.proposal).unwrap();
+        request.authorization.permit.tool_manifest = manifest_ref;
+        request.authorization.permit.proposal_hash = request.authorization.proposal_hash.clone();
+        request.authorization.permit.policy =
+            tool_policy_binding(&request.authorization.policy).unwrap();
+        request.authorization.permit_hash =
+            tool_invocation_permit_hash(&request.authorization.permit).unwrap();
+        request.authorization.permit_ref.content_hash = request.authorization.permit_hash.clone();
+
+        let response = run(&request);
+        assert_eq!(response.outcome, RunnerEffectOutcome::Denied);
+        assert_eq!(
+            response.error_code.as_deref(),
+            Some("tool_authority_mismatch")
+        );
+    }
+
+    #[test]
     fn authorized_request_is_derived_from_exact_cross_bound_intent() {
         let root = tempfile::tempdir().unwrap();
-        let (envelope, execution, _) = authorized_create(root.path());
+        let (envelope, execution, _, authorization) = authorized_create(root.path());
         let request = request_from_authorized_action(
             &envelope,
             &execution,
+            authorization.clone(),
             Uuid::new_v4(),
             envelope.created_at,
         )
@@ -1920,6 +2539,7 @@ mod tests {
             request_from_authorized_action(
                 &substituted,
                 &execution,
+                authorization.clone(),
                 Uuid::new_v4(),
                 envelope.created_at,
             )
@@ -1929,8 +2549,14 @@ mod tests {
         let mut stale = execution.clone();
         stale.state = ActionExecutionState::Authorized;
         assert!(
-            request_from_authorized_action(&envelope, &stale, Uuid::new_v4(), envelope.created_at,)
-                .is_err()
+            request_from_authorized_action(
+                &envelope,
+                &stale,
+                authorization.clone(),
+                Uuid::new_v4(),
+                envelope.created_at,
+            )
+            .is_err()
         );
 
         let worker = RuntimeActorId::new();
@@ -1958,6 +2584,7 @@ mod tests {
             &envelope,
             &reconciling,
             &job,
+            authorization.clone(),
             Uuid::new_v4(),
             envelope.created_at,
         )
@@ -1975,6 +2602,7 @@ mod tests {
                 &envelope,
                 &reconciling,
                 &substituted_job,
+                authorization,
                 Uuid::new_v4(),
                 envelope.created_at,
             )

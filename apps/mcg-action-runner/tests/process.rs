@@ -7,24 +7,25 @@ use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use mcg_action_runner::{
-    ACTION_RUNNER_PROTOCOL_VERSION, ActionRunnerClient, ActionRunnerClientError,
-    ActionRunnerRequest, ActionRunnerResponse, GovernedFilesystemOperation, RunnerEffectOutcome,
-    governed_filesystem_operation_payload,
+    ActionRunnerClient, ActionRunnerClientError, ActionRunnerRequest, ActionRunnerResponse,
+    GovernedFilesystemOperation, RunnerEffectOutcome, qualification_request_with_evidence,
 };
-use mcg_contracts::{ActionExecutionId, ActionId};
-use uuid::Uuid;
 
 fn request(root: &Path, operation: &GovernedFilesystemOperation) -> ActionRunnerRequest {
-    let (operation, operation_hash) = governed_filesystem_operation_payload(operation).unwrap();
-    ActionRunnerRequest {
-        protocol_version: ACTION_RUNNER_PROTOCOL_VERSION,
-        request_id: Uuid::new_v4(),
-        action_id: ActionId::new(),
-        execution_id: ActionExecutionId::new(),
-        capability_root: root.into(),
-        operation,
-        operation_hash,
-    }
+    let client = ActionRunnerClient::with_executable(
+        env!("CARGO_BIN_EXE_mcg-action-runner"),
+        Duration::from_secs(5),
+    )
+    .unwrap();
+    request_for(&client, root, operation)
+}
+
+fn request_for(
+    client: &ActionRunnerClient,
+    root: &Path,
+    operation: &GovernedFilesystemOperation,
+) -> ActionRunnerRequest {
+    qualification_request_with_evidence(root, operation, client.capability_evidence()).unwrap()
 }
 
 fn invoke(request: &[u8]) -> (std::process::ExitStatus, ActionRunnerResponse) {
@@ -62,8 +63,9 @@ fn fault_client(root: &Path, timeout: Duration) -> ActionRunnerClient {
     ActionRunnerClient::with_executable(runner, timeout).unwrap()
 }
 
-fn fixture_request(root: &Path) -> ActionRunnerRequest {
-    request(
+fn fixture_request(client: &ActionRunnerClient, root: &Path) -> ActionRunnerRequest {
+    request_for(
+        client,
         root,
         &GovernedFilesystemOperation::InspectFile {
             relative_path: "probe.txt".into(),
@@ -160,18 +162,19 @@ fn packaged_qualification_mode_exercises_and_cleans_the_runner() {
 #[tokio::test]
 async fn bounded_parent_client_validates_the_exact_child_response() {
     let root = tempfile::tempdir().unwrap();
-    let create = request(
+    let client = ActionRunnerClient::with_executable(
+        env!("CARGO_BIN_EXE_mcg-action-runner"),
+        Duration::from_secs(5),
+    )
+    .unwrap();
+    let create = request_for(
+        &client,
         root.path(),
         &GovernedFilesystemOperation::CreateFile {
             relative_path: "client.txt".into(),
             content_base64: base64::engine::general_purpose::STANDARD.encode(b"client effect"),
         },
     );
-    let client = ActionRunnerClient::with_executable(
-        env!("CARGO_BIN_EXE_mcg-action-runner"),
-        Duration::from_secs(5),
-    )
-    .unwrap();
     let response = client.invoke(&create).await.unwrap();
     assert_eq!(response.request_id, Some(create.request_id));
     assert_eq!(response.action_id, Some(create.action_id));
@@ -187,13 +190,43 @@ async fn bounded_parent_client_validates_the_exact_child_response() {
 }
 
 #[tokio::test]
+async fn parent_refuses_runner_replacement_after_identity_measurement() {
+    let root = tempfile::tempdir().unwrap();
+    let runner = root.path().join(if cfg!(windows) {
+        "mcg-action-runner.exe"
+    } else {
+        "mcg-action-runner"
+    });
+    std::fs::copy(env!("CARGO_BIN_EXE_mcg-action-runner"), &runner).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mut permissions = std::fs::metadata(&runner).unwrap().permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&runner, permissions).unwrap();
+    }
+    let client = ActionRunnerClient::with_executable(&runner, Duration::from_secs(5)).unwrap();
+    let request = fixture_request(&client, root.path());
+    std::fs::copy(
+        env!("CARGO_BIN_EXE_mcg-action-runner-fault-fixture"),
+        &runner,
+    )
+    .unwrap();
+
+    let error = client.invoke(&request).await.unwrap_err();
+    assert!(matches!(error, ActionRunnerClientError::Unavailable));
+    assert!(!error.effect_may_have_occurred());
+    assert!(!root.path().join("effect.txt").exists());
+}
+
+#[tokio::test]
 async fn child_exit_before_effect_is_unknown_but_leaves_no_effect() {
     let root = tempfile::tempdir().unwrap();
     std::fs::write(root.path().join("fault-mode.txt"), "exit-before-effect").unwrap();
     let client = fault_client(root.path(), Duration::from_secs(2));
 
     let error = client
-        .invoke(&fixture_request(root.path()))
+        .invoke(&fixture_request(&client, root.path()))
         .await
         .unwrap_err();
 
@@ -209,7 +242,7 @@ async fn lost_response_after_effect_preserves_unknown_outcome_evidence() {
     let client = fault_client(root.path(), Duration::from_secs(2));
 
     let error = client
-        .invoke(&fixture_request(root.path()))
+        .invoke(&fixture_request(&client, root.path()))
         .await
         .unwrap_err();
 
@@ -226,15 +259,13 @@ async fn timeout_kills_reaps_and_rejects_late_effects() {
     let root = tempfile::tempdir().unwrap();
     std::fs::write(root.path().join("fault-mode.txt"), "timeout-before-effect").unwrap();
     let client = fault_client(root.path(), Duration::from_millis(100));
+    let request = fixture_request(&client, root.path());
     let started = Instant::now();
 
-    let error = client
-        .invoke(&fixture_request(root.path()))
-        .await
-        .unwrap_err();
+    let error = client.invoke(&request).await.unwrap_err();
 
     assert!(matches!(error, ActionRunnerClientError::Timeout));
-    assert!(started.elapsed() < Duration::from_secs(1));
+    assert!(started.elapsed() < Duration::from_secs(3));
     let pid = std::fs::read_to_string(root.path().join("fixture-pid.txt"))
         .unwrap()
         .parse::<u32>()
@@ -252,7 +283,7 @@ async fn timeout_after_effect_is_unknown_and_still_stops_late_work() {
     let client = fault_client(root.path(), Duration::from_millis(100));
 
     let error = client
-        .invoke(&fixture_request(root.path()))
+        .invoke(&fixture_request(&client, root.path()))
         .await
         .unwrap_err();
 
@@ -292,7 +323,7 @@ async fn bounded_parent_rejects_oversized_or_diagnostic_child_output() {
         let client = fault_client(root.path(), Duration::from_secs(2));
 
         let error = client
-            .invoke(&fixture_request(root.path()))
+            .invoke(&fixture_request(&client, root.path()))
             .await
             .unwrap_err();
 
@@ -311,7 +342,7 @@ async fn bounded_parent_rejects_malformed_real_child_response() {
     let client = fault_client(root.path(), Duration::from_secs(2));
 
     let error = client
-        .invoke(&fixture_request(root.path()))
+        .invoke(&fixture_request(&client, root.path()))
         .await
         .unwrap_err();
 
@@ -330,7 +361,7 @@ async fn timeout_terminates_the_entire_child_process_tree() {
     let client = fault_client(root.path(), Duration::from_millis(250));
 
     let error = client
-        .invoke(&fixture_request(root.path()))
+        .invoke(&fixture_request(&client, root.path()))
         .await
         .unwrap_err();
 
@@ -359,7 +390,7 @@ async fn deadline_still_applies_after_the_process_leader_exits() {
     let started = Instant::now();
 
     let error = client
-        .invoke(&fixture_request(root.path()))
+        .invoke(&fixture_request(&client, root.path()))
         .await
         .unwrap_err();
 

@@ -23,13 +23,14 @@ use chrono::{Duration, Utc};
 use futures_core::Stream;
 use futures_util::StreamExt as _;
 use mcg_action_runner::{
-    ActionRunnerClient, ActionRunnerClientError, ActionRunnerProtocolError, ActionRunnerRequest,
-    ActionRunnerResponse, GOVERNED_ACTION_OPERATION_HASH_DOMAIN,
-    GOVERNED_FILESYSTEM_AUTHORITY_HASH_DOMAIN, GOVERNED_FILESYSTEM_OPERATION_TYPE,
-    GovernedFilesystemAuthority, GovernedFilesystemObservation, GovernedFilesystemOperation,
-    RunnerEffectOutcome, decode_governed_filesystem_authority,
+    ActionRunnerAuthorization, ActionRunnerCapabilityEvidence, ActionRunnerClient,
+    ActionRunnerClientError, ActionRunnerProtocolError, ActionRunnerRequest, ActionRunnerResponse,
+    GOVERNED_ACTION_OPERATION_HASH_DOMAIN, GOVERNED_FILESYSTEM_AUTHORITY_HASH_DOMAIN,
+    GOVERNED_FILESYSTEM_OPERATION_TYPE, GovernedFilesystemAuthority, GovernedFilesystemObservation,
+    GovernedFilesystemOperation, RunnerEffectOutcome, decode_governed_filesystem_authority,
     decode_governed_filesystem_observation, decode_governed_filesystem_operation,
-    governed_filesystem_authority_binding, request_from_authorized_action,
+    governed_filesystem_authority_binding, governed_filesystem_tool_manifest,
+    governed_filesystem_tool_policy, request_from_authorized_action,
     request_from_reconciliation_job, validate_governed_filesystem_envelope,
 };
 use mcg_agents::{EvaluationOutcome, EvaluationReport};
@@ -40,17 +41,18 @@ use mcg_contracts::{
     AuthenticatedRpcRequest, CompletionCertificate, CompletionCertificateId, CompletionVerdict,
     ContentHash, ContextManifest, ContextManifestId, ContextSelection, ContractError,
     CorrelationId, DeterministicCriterionEvidence, DeterministicVerifyInput, EffectClass,
-    EffectOutcome, HashAlgorithm, InvocationId, InvocationManifest, InvocationRole, ModelBudget,
-    ModelDataClassification, ModelDestinationClass, ModelDisclosureManifest, ModelEgressPolicy,
-    ModelEgressRoute, ModelInvocationPermit, ModelInvocationProposal, ModelRunCostProvenance,
-    ModelRunErrorClass, ModelRunId, ModelUsage, OwnerActionCompensationRequest, PROTOCOL_V1,
-    PermitId, PolicyBinding, RUNTIME_INVOCATION_REQUEST_HASH_DOMAIN, ReconciliationJob,
-    ReconciliationJobId, ReconciliationObservation, RequestId, RootStatus, RpcEnvelope,
-    RuntimeActorId, RuntimeIdentity, RuntimeInstanceId, RuntimeInvocationRequest,
-    RuntimeInvocationResult, SandboxCapabilityProfile, SecretHandleId, SourceRef, StableTypeId,
-    ToolInvocationPermit, ToolInvocationProposal, ToolManifest, ToolPolicy, VersionedPayload,
-    WorkflowAttempt, WorkflowCancelRequest, WorkflowId, WorkflowState, canonical_contract_hash,
-    decode_canonical_cbor_v1, tool_invocation_proposal_hash,
+    EffectOutcome, FilesystemAccess, HashAlgorithm, InvocationId, InvocationManifest,
+    InvocationRole, ModelBudget, ModelDataClassification, ModelDestinationClass,
+    ModelDisclosureManifest, ModelEgressPolicy, ModelEgressRoute, ModelInvocationPermit,
+    ModelInvocationProposal, ModelRunCostProvenance, ModelRunErrorClass, ModelRunId, ModelUsage,
+    OwnerActionCompensationRequest, PROTOCOL_V1, PermitId, PolicyBinding,
+    RUNTIME_INVOCATION_REQUEST_HASH_DOMAIN, ReconciliationJob, ReconciliationJobId,
+    ReconciliationObservation, RequestId, RootStatus, RpcEnvelope, RuntimeActorId, RuntimeIdentity,
+    RuntimeInstanceId, RuntimeInvocationRequest, RuntimeInvocationResult, SandboxCapabilityProfile,
+    SecretHandleId, SourceRef, StableTypeId, ToolInvocationPermit, ToolInvocationProposal,
+    ToolManifest, ToolPolicy, VersionedPayload, WorkflowAttempt, WorkflowCancelRequest, WorkflowId,
+    WorkflowState, canonical_contract_hash, decode_canonical_cbor_v1,
+    tool_invocation_proposal_hash,
 };
 use mcg_domain::{AgentLeaseId, EvaluationId};
 use mcg_platform::{
@@ -2756,6 +2758,14 @@ where
 
 #[async_trait::async_trait]
 pub trait GovernedActionRunnerGateway: Send + Sync {
+    /// Returns the exact executable, platform, sandbox, and resource evidence for this gateway.
+    ///
+    /// # Errors
+    /// Returns unavailable when the fixed runner identity cannot be measured.
+    fn capability_evidence(
+        &self,
+    ) -> Result<ActionRunnerCapabilityEvidence, ActionRunnerClientError>;
+
     async fn invoke(
         &self,
         request: &ActionRunnerRequest,
@@ -2764,12 +2774,110 @@ pub trait GovernedActionRunnerGateway: Send + Sync {
 
 #[async_trait::async_trait]
 impl GovernedActionRunnerGateway for ActionRunnerClient {
+    fn capability_evidence(
+        &self,
+    ) -> Result<ActionRunnerCapabilityEvidence, ActionRunnerClientError> {
+        Ok(ActionRunnerClient::capability_evidence(self).clone())
+    }
+
     async fn invoke(
         &self,
         request: &ActionRunnerRequest,
     ) -> Result<ActionRunnerResponse, ActionRunnerClientError> {
         ActionRunnerClient::invoke(self, request).await
     }
+}
+
+fn ensure_filesystem_tool_authorization(
+    runtime: &AppRuntime,
+    client: &dyn GovernedActionRunnerGateway,
+    envelope: &ActionEnvelope,
+    now: chrono::DateTime<Utc>,
+) -> Result<ActionRunnerAuthorization, ProtectedRootError> {
+    let filesystem_authority = validate_governed_filesystem_envelope(envelope, now)?;
+    let evidence = client.capability_evidence()?;
+    let access = if envelope.effect_class == EffectClass::Observational {
+        FilesystemAccess::Read
+    } else {
+        FilesystemAccess::Write
+    };
+    let manifest =
+        governed_filesystem_tool_manifest(&evidence, &filesystem_authority.capability_root, access)
+            .map_err(StorageError::InvalidData)?;
+    runtime.register_tool_manifest(&manifest, now)?;
+    let workflow = runtime
+        .canonical_workflow(envelope.workflow_id)?
+        .ok_or_else(|| StorageError::InvalidData("Tool workflow is missing".into()))?;
+    let attempt = workflow.attempt;
+    if attempt.attempt_id != envelope.attempt_id
+        || attempt.task_contract != envelope.task_contract
+        || attempt.state != WorkflowState::Running
+        || attempt.lease_owner != Some(envelope.actor)
+        || attempt.lease_expires_at.is_none_or(|expiry| expiry <= now)
+    {
+        return Err(StorageError::Conflict(
+            "filesystem Tool action does not belong to the exact active workflow lease".into(),
+        )
+        .into());
+    }
+    let root_identity = runtime
+        .root_ownership()?
+        .ok_or_else(|| StorageError::InvalidData("Root ownership identity is missing".into()))?
+        .runtime_identity;
+    let mut deadline = filesystem_authority.expires_at;
+    if let Some(reconciliation_deadline) = envelope.reconciliation_deadline {
+        deadline = std::cmp::min(deadline, reconciliation_deadline);
+    }
+    if let Some(lease_expiry) = attempt.lease_expires_at {
+        deadline = std::cmp::min(deadline, lease_expiry);
+    }
+    if deadline <= now {
+        return Err(StorageError::Conflict("filesystem Tool authority has expired".into()).into());
+    }
+    let argument_length = u64::try_from(envelope.operation.bytes.len())
+        .map_err(|_| StorageError::InvalidData("Tool argument length overflowed".into()))?;
+    let proposal = ToolInvocationProposal {
+        action_id: envelope.id,
+        attempt_id: envelope.attempt_id,
+        attempt_revision: attempt.revision,
+        lease_generation: attempt.lease_generation,
+        runtime_actor: envelope.actor,
+        runtime_identity: root_identity.clone(),
+        task_contract: envelope.task_contract.clone(),
+        tool_manifest: manifest.versioned_ref()?,
+        arguments: ArtifactRef {
+            content_hash: envelope.operation_hash.clone(),
+            media_type: "application/vnd.metacog.governed-filesystem-operation+cbor".into(),
+            byte_length: argument_length,
+        },
+        argument_hash: envelope.operation_hash.clone(),
+        requested_effect_class: envelope.effect_class,
+        requested_capabilities: manifest.required_capabilities.clone(),
+        requested_limits: manifest.resource_ceiling,
+        required_sandbox: manifest.sandbox_requirement,
+        platform: evidence.platform,
+        deadline,
+    };
+    let policy = governed_filesystem_tool_policy(&manifest).map_err(StorageError::InvalidData)?;
+    let receipt = authorize_and_persist_runtime_tool_capability(
+        runtime,
+        &proposal,
+        &root_identity,
+        &manifest,
+        &policy,
+        evidence.available_sandbox,
+        evidence.platform,
+        now,
+    )?;
+    Ok(ActionRunnerAuthorization {
+        manifest,
+        proposal: receipt.proposal,
+        proposal_hash: receipt.proposal_hash,
+        policy,
+        permit: receipt.permit,
+        permit_hash: receipt.permit_hash,
+        permit_ref: receipt.permit_ref,
+    })
 }
 
 /// Executes one already-authorized filesystem action and durably classifies its physical result.
@@ -2802,6 +2910,7 @@ pub async fn execute_authorized_filesystem_action(
         )));
     }
     validate_governed_filesystem_envelope(&envelope, now)?;
+    let authorization = ensure_filesystem_tool_authorization(runtime, client, &envelope, now)?;
     let correlation_id = CorrelationId::new();
     let dispatched = runtime.dispatch_canonical_action(
         execution_id,
@@ -2813,7 +2922,8 @@ pub async fn execute_authorized_filesystem_action(
         now,
     )?;
     let request_id = Uuid::new_v4();
-    let request = request_from_authorized_action(&envelope, &dispatched, request_id, now)?;
+    let request =
+        request_from_authorized_action(&envelope, &dispatched, authorization, request_id, now)?;
     match client.invoke(&request).await {
         Ok(response) => classify_runner_response(
             runtime,
@@ -3260,6 +3370,7 @@ pub async fn reconcile_filesystem_action(
         )));
     }
     validate_governed_filesystem_envelope(&envelope, now)?;
+    let authorization = ensure_filesystem_tool_authorization(runtime, client, &envelope, now)?;
     let lease_expires_at = std::cmp::min(now + Duration::minutes(2), job.deadline);
     let correlation_id = CorrelationId::new();
     let claimed = runtime.claim_canonical_reconciliation(
@@ -3281,6 +3392,7 @@ pub async fn reconcile_filesystem_action(
         &envelope,
         &claimed.execution,
         &claimed.job,
+        authorization,
         request_id,
         now,
     )?;
@@ -4993,14 +5105,44 @@ mod tests {
         LaunchFailed,
     }
 
+    fn scripted_action_capability_evidence() -> ActionRunnerCapabilityEvidence {
+        ActionRunnerCapabilityEvidence {
+            runner: root_invocation_source("scripted-action-runner"),
+            platform: mcg_action_runner::current_execution_platform(),
+            available_sandbox: mcg_action_runner::action_runner_sandbox_profile(),
+            resource_ceiling: mcg_contracts::ToolResourceLimits {
+                timeout_ms: 30_000,
+                max_output_bytes: u64::try_from(
+                    mcg_action_runner::ACTION_RUNNER_RESPONSE_MAX_BYTES,
+                )
+                .expect("response bound"),
+                max_memory_bytes: 0,
+                max_child_processes: 0,
+            },
+        }
+    }
+
     struct ScriptedActionGateway(GatewayOutcome);
 
     #[async_trait::async_trait]
     impl GovernedActionRunnerGateway for ScriptedActionGateway {
+        fn capability_evidence(
+            &self,
+        ) -> Result<ActionRunnerCapabilityEvidence, ActionRunnerClientError> {
+            Ok(scripted_action_capability_evidence())
+        }
+
         async fn invoke(
             &self,
             request: &ActionRunnerRequest,
         ) -> Result<ActionRunnerResponse, ActionRunnerClientError> {
+            assert_eq!(request.envelope.id, request.action_id);
+            assert_eq!(request.authorization.proposal.action_id, request.action_id);
+            assert_eq!(request.authorization.permit.action_id, request.action_id);
+            assert_eq!(
+                request.authorization.proposal.argument_hash,
+                request.envelope.operation_hash
+            );
             match self.0 {
                 GatewayOutcome::LaunchFailed => Err(ActionRunnerClientError::Launch),
                 GatewayOutcome::LostWithoutEffect => Err(ActionRunnerClientError::Timeout),
@@ -5065,6 +5207,12 @@ mod tests {
 
     #[async_trait::async_trait]
     impl GovernedActionRunnerGateway for InspectingActionGateway {
+        fn capability_evidence(
+            &self,
+        ) -> Result<ActionRunnerCapabilityEvidence, ActionRunnerClientError> {
+            Ok(scripted_action_capability_evidence())
+        }
+
         async fn invoke(
             &self,
             request: &ActionRunnerRequest,
@@ -7471,6 +7619,15 @@ mod tests {
             .await
             .expect("execute governed action");
             assert_eq!(receipt.execution.state, expected_state);
+            let capability = runtime
+                .active_tool_capability_authorization(receipt.execution.action_id, now)
+                .expect("load active filesystem Tool permit")
+                .expect("filesystem Tool permit exists");
+            assert_eq!(capability.permit.action_id, receipt.execution.action_id);
+            assert_eq!(
+                capability.proposal.argument_hash,
+                capability.permit.argument_hash
+            );
             assert_eq!(receipt.reconciliation_job.is_some(), expects_reconciliation);
             assert_eq!(
                 temporary
