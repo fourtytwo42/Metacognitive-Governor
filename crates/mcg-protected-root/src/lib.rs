@@ -539,6 +539,7 @@ const COMPATIBILITY_AGENT_WORKFLOW_LEASE_SECONDS: u64 = 5 * 60;
 const COMPATIBILITY_AGENT_PERMIT_SECONDS: i64 = 2 * 60;
 const COMPATIBILITY_AGENT_CALL_MAX_COST_MICROUSD: u64 = 5_000_000;
 const COMPATIBILITY_AGENT_PROVIDER_MAX_ATTEMPTS: u32 = 2;
+const GOVERNED_PROVIDER_AUTHORITY_POLL_MILLISECONDS: u64 = 25;
 
 struct RootAgentModelDispatcher {
     runtime: Weak<AppRuntime>,
@@ -1372,6 +1373,97 @@ pub async fn execute_authorized_model_invocation_isolated(
         .await
 }
 
+async fn invoke_governed_gateway_while_authorized(
+    runtime: &AppRuntime,
+    gateway: &dyn GovernedModelProviderGateway,
+    authorization: &RuntimeModelEgressAuthorizationReceipt,
+    request: &ModelRequest,
+) -> Option<Result<ModelResponse, GovernedModelProviderGatewayError>> {
+    let mut gateway_call = Box::pin(gateway.invoke(authorization, request));
+    let mut authority_poll = tokio::time::interval(std::time::Duration::from_millis(
+        GOVERNED_PROVIDER_AUTHORITY_POLL_MILLISECONDS,
+    ));
+    authority_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            result = &mut gateway_call => return Some(result),
+            _ = authority_poll.tick() => {
+                let still_authorized = matches!(
+                    runtime.active_model_egress_authorization(
+                        authorization.proposal.invocation_id,
+                        Utc::now(),
+                    ),
+                    Ok(Some(current)) if current == *authorization
+                );
+                if !still_authorized {
+                    return None;
+                }
+            }
+        }
+    }
+}
+
+fn settle_governed_provider_authority_loss(
+    runtime: &AppRuntime,
+    invocation_id: InvocationId,
+    model_run_id: ModelRunId,
+) -> Result<ProtectedRootError, ProtectedRootError> {
+    runtime.settle_governed_provider_invocation_unknown(invocation_id, model_run_id, Utc::now())?;
+    Ok(StorageError::Conflict(
+        "governed provider execution was cancelled after dispatch or lost current authority".into(),
+    )
+    .into())
+}
+
+async fn dispatch_governed_gateway(
+    runtime: &AppRuntime,
+    gateway: &dyn GovernedModelProviderGateway,
+    authorization: &RuntimeModelEgressAuthorizationReceipt,
+    invocation_id: InvocationId,
+    model_run_id: ModelRunId,
+    request: &ModelRequest,
+) -> Result<ModelResponse, ProtectedRootError> {
+    let Some(gateway_result) =
+        invoke_governed_gateway_while_authorized(runtime, gateway, authorization, request).await
+    else {
+        return Err(settle_governed_provider_authority_loss(
+            runtime,
+            invocation_id,
+            model_run_id,
+        )?);
+    };
+    match gateway_result {
+        Ok(response) => Ok(response),
+        Err(error) => {
+            let class = error.class();
+            let provider_error = error.into_provider_error();
+            match class {
+                GovernedProviderFailureClass::RetryableBeforeProviderContact
+                | GovernedProviderFailureClass::FinalBeforeProviderContact => {
+                    runtime.fail_governed_provider_invocation_before_contact(
+                        invocation_id,
+                        model_run_id,
+                        Utc::now(),
+                    )?;
+                    if class == GovernedProviderFailureClass::RetryableBeforeProviderContact {
+                        return Err(ProtectedRootError::RetryableProviderBeforeContact(
+                            provider_error,
+                        ));
+                    }
+                }
+                GovernedProviderFailureClass::OutcomeUnknown => {
+                    runtime.settle_governed_provider_invocation_unknown(
+                        invocation_id,
+                        model_run_id,
+                        Utc::now(),
+                    )?;
+                }
+            }
+            Err(provider_error.into())
+        }
+    }
+}
+
 /// Executes one exact provider request only through its active Root-issued egress permit.
 ///
 /// The immutable invocation manifest and planned model run are persisted before dispatch. Root
@@ -1410,36 +1502,15 @@ pub async fn execute_authorized_model_invocation(
         now,
     )?;
 
-    let response = match gateway.invoke(&authorization, request).await {
-        Ok(response) => response,
-        Err(error) => {
-            let class = error.class();
-            let provider_error = error.into_provider_error();
-            match class {
-                GovernedProviderFailureClass::RetryableBeforeProviderContact
-                | GovernedProviderFailureClass::FinalBeforeProviderContact => {
-                    runtime.fail_governed_provider_invocation_before_contact(
-                        manifest.id,
-                        model_run_id,
-                        Utc::now(),
-                    )?;
-                    if class == GovernedProviderFailureClass::RetryableBeforeProviderContact {
-                        return Err(ProtectedRootError::RetryableProviderBeforeContact(
-                            provider_error,
-                        ));
-                    }
-                }
-                GovernedProviderFailureClass::OutcomeUnknown => {
-                    runtime.settle_governed_provider_invocation_unknown(
-                        manifest.id,
-                        model_run_id,
-                        Utc::now(),
-                    )?;
-                }
-            }
-            return Err(provider_error.into());
-        }
-    };
+    let response = dispatch_governed_gateway(
+        runtime,
+        gateway,
+        &authorization,
+        manifest.id,
+        model_run_id,
+        request,
+    )
+    .await?;
     let completed_at = Utc::now();
     if let Err(error) = validate_governed_provider_response(&authorization, &response) {
         runtime.settle_governed_provider_invocation_unknown(
@@ -3768,6 +3839,37 @@ mod tests {
         }
     }
 
+    struct CancellingAgentProviderGateway<'a> {
+        runtime: &'a AppRuntime,
+        calls: Mutex<Vec<InvocationId>>,
+    }
+
+    #[async_trait::async_trait]
+    impl GovernedModelProviderGateway for CancellingAgentProviderGateway<'_> {
+        async fn invoke(
+            &self,
+            authorization: &RuntimeModelEgressAuthorizationReceipt,
+            _request: &ModelRequest,
+        ) -> Result<ModelResponse, GovernedModelProviderGatewayError> {
+            self.calls
+                .lock()
+                .expect("cancelling gateway calls")
+                .push(authorization.proposal.invocation_id);
+            self.runtime
+                .cancel_canonical_workflow(&WorkflowCancelRequest {
+                    attempt_id: authorization.proposal.attempt_id,
+                    expected_revision: authorization.proposal.attempt_revision,
+                    expected_generation: authorization.proposal.lease_generation,
+                    idempotency_key: format!(
+                        "cancel-provider-{}",
+                        authorization.proposal.invocation_id
+                    ),
+                })
+                .expect("cancel provider workflow");
+            std::future::pending().await
+        }
+    }
+
     struct LeaseAdvancingModelGateway<'a> {
         runtime: &'a AppRuntime,
         attempt_id: AttemptId,
@@ -4498,6 +4600,108 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn compatibility_provider_cancellation_stops_waiting_and_fences_late_output() {
+        let temporary = tempfile::tempdir().expect("temporary provider cancellation directory");
+        let config = AppConfig::default().with_data_directory(temporary.path());
+        let at = Utc::now();
+        let runtime = open(config.clone()).expect("open provider cancellation Root");
+        let (lease, connection, model) = {
+            let mut store = SqliteEventStore::open(config.database_path())
+                .expect("provider cancellation store");
+            seed_compatibility_agent_provider(&mut store, at)
+        };
+        let identity = current_runtime_identity().expect("runtime identity");
+        let actor = RuntimeActorId(identity.instance_id.0);
+        let target = mcg_providers::ProviderModelRef {
+            provider_id: connection.id.clone(),
+            model_id: model.id.clone(),
+        };
+        let request = ModelRequest {
+            contract_version: CONTRACT_VERSION,
+            model: model.id.clone(),
+            client_request_id: None,
+            instructions: Some("Wait for governed cancellation.".into()),
+            messages: vec![Message {
+                role: MessageRole::User,
+                content: vec![ContentPart::Text {
+                    text: "Do not outlive cancellation.".into(),
+                }],
+                name: None,
+            }],
+            tools: Vec::new(),
+            tool_choice: None,
+            structured_output: None,
+            reasoning: None,
+            temperature: None,
+            top_p: None,
+            max_output_tokens: Some(64),
+            metadata: serde_json::json!({"agent_lease_id": lease.id}),
+        };
+        let gateway = CancellingAgentProviderGateway {
+            runtime: &runtime,
+            calls: Mutex::new(Vec::new()),
+        };
+
+        let result = execute_compatibility_agent_model_invocation(
+            &runtime,
+            &gateway,
+            &connection,
+            &model,
+            actor,
+            &identity,
+            lease.id,
+            &target,
+            request,
+            at,
+        )
+        .await;
+        assert!(result.is_err());
+        let invocation_ids = gateway
+            .calls
+            .lock()
+            .expect("cancelling gateway calls")
+            .clone();
+        assert_eq!(invocation_ids.len(), 1, "cancellation must never retry");
+        let workflow = runtime
+            .canonical_workflows()
+            .expect("cancelled provider workflow")
+            .pop()
+            .expect("provider workflow");
+        assert_eq!(workflow.state, WorkflowState::CancelRequested);
+        let inspection = runtime
+            .runtime_invocation(invocation_ids[0], 10)
+            .expect("cancelled provider invocation")
+            .expect("cancelled provider invocation exists");
+        assert_eq!(
+            inspection
+                .model_runs
+                .last()
+                .expect("cancelled provider model run")
+                .run
+                .state,
+            ModelRunState::OutcomeUnknown
+        );
+        drop(gateway);
+        drop(runtime);
+
+        let reopened = open(config).expect("reopen provider cancellation Root");
+        let inspection = reopened
+            .runtime_invocation(invocation_ids[0], 10)
+            .expect("reopened cancelled provider invocation")
+            .expect("persisted cancelled provider invocation");
+        assert_eq!(
+            inspection
+                .model_runs
+                .last()
+                .expect("persisted cancelled provider model run")
+                .run
+                .state,
+            ModelRunState::OutcomeUnknown
+        );
     }
 
     #[tokio::test]

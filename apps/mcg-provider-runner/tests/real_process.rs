@@ -20,6 +20,7 @@ use sha2::{Digest as _, Sha256};
 use tokio::{
     io::{AsyncReadExt as _, AsyncWriteExt as _},
     net::TcpListener,
+    sync::oneshot,
 };
 use uuid::Uuid;
 
@@ -270,4 +271,119 @@ async fn fixed_child_executes_one_real_loopback_provider_request() {
     let observed = provider.await.expect("provider fixture");
     assert!(observed.contains("POST /v1/responses HTTP/1.1"));
     assert!(!observed.to_ascii_lowercase().contains("authorization:"));
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn dropping_an_inflight_call_kills_the_child_and_closes_provider_transport() {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("cancellation provider listener");
+    let address = listener
+        .local_addr()
+        .expect("cancellation provider address");
+    let (contacted_sender, contacted_receiver) = oneshot::channel();
+    let provider = tokio::spawn(async move {
+        let (mut stream, _) = listener
+            .accept()
+            .await
+            .expect("cancellation provider connection");
+        let mut request = vec![0_u8; 64 * 1024];
+        let read = stream
+            .read(&mut request)
+            .await
+            .expect("cancellation provider request");
+        assert!(read > 0);
+        contacted_sender.send(()).expect("report provider contact");
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match stream.read(&mut request).await {
+                    Ok(0) => break,
+                    Ok(_) => {}
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            std::io::ErrorKind::ConnectionReset
+                                | std::io::ErrorKind::ConnectionAborted
+                                | std::io::ErrorKind::BrokenPipe
+                        ) =>
+                    {
+                        break;
+                    }
+                    Err(error) => panic!("provider transport close failed: {error}"),
+                }
+            }
+        })
+        .await
+        .expect("cancelled child closes provider transport");
+    });
+    let connection = ProviderConnection {
+        contract_version: CONTRACT_VERSION,
+        id: "cancelled-real-child-provider".into(),
+        display_name: "Cancelled real child provider".into(),
+        kind: ProviderKind::OpenAiCompatible,
+        base_url: format!("http://{address}/v1"),
+        auth_mode: ProviderAuthMode::None,
+        organization: None,
+        project: None,
+    };
+    let model = ModelDescriptor {
+        id: "cancelled-real-child-model".into(),
+        display_name: "Cancelled real child model".into(),
+        owned_by: Some("fixture".into()),
+        context_window: Some(1_024),
+        capabilities: ModelCapabilities {
+            responses: Some(true),
+            ..ModelCapabilities::default()
+        },
+        price: None,
+        metadata: serde_json::Value::Null,
+    };
+    let model_request = ModelRequest {
+        contract_version: CONTRACT_VERSION,
+        model: model.id.clone(),
+        client_request_id: Some("cancelled-real-child-request".into()),
+        instructions: None,
+        messages: vec![Message {
+            role: MessageRole::User,
+            content: vec![ContentPart::Text {
+                text: "wait until cancelled".into(),
+            }],
+            name: None,
+        }],
+        tools: Vec::new(),
+        tool_choice: None,
+        structured_output: None,
+        reasoning: None,
+        temperature: Some(0.0),
+        top_p: None,
+        max_output_tokens: Some(32),
+        metadata: serde_json::Value::Null,
+    };
+    let request = ProviderRunnerRequest {
+        protocol_version: PROVIDER_RUNNER_PROTOCOL_VERSION,
+        request_id: Uuid::new_v4(),
+        authorization: authorization(&connection, &model, &model_request),
+        connection,
+        model,
+        request: model_request,
+    };
+    let client = ProviderRunnerClient::with_executable(
+        env!("CARGO_BIN_EXE_mcg-provider-runner"),
+        Duration::from_secs(30),
+    )
+    .expect("cancellable provider runner client");
+    let invocation = tokio::spawn(async move { client.invoke(&request).await });
+    tokio::time::timeout(Duration::from_secs(5), contacted_receiver)
+        .await
+        .expect("provider contact deadline")
+        .expect("provider contact signal");
+    invocation.abort();
+    assert!(
+        invocation
+            .await
+            .expect_err("cancelled invocation task")
+            .is_cancelled()
+    );
+    provider.await.expect("cancelled provider fixture");
 }
