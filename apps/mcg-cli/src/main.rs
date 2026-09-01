@@ -322,6 +322,11 @@ enum Command {
         #[command(subcommand)]
         command: InvocationCommand,
     },
+    /// Inspect bounded Root-issued Tool capability authority.
+    Capability {
+        #[command(subcommand)]
+        command: CapabilityCommand,
+    },
     /// Inspect or change restart-safe owner settings.
     Settings {
         #[command(subcommand)]
@@ -1396,6 +1401,24 @@ enum InvocationCommand {
         id: String,
         #[arg(long, default_value_t = 100)]
         model_run_limit: usize,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum CapabilityCommand {
+    /// List bounded newest-first Tool authorization summaries.
+    List {
+        #[arg(long, default_value_t = 100)]
+        limit: usize,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show content-minimized manifest, policy, workflow-fence, scope, and permit evidence.
+    Show {
+        /// Canonical action ID that owns the Tool authorization.
+        id: String,
         #[arg(long)]
         json: bool,
     },
@@ -2933,6 +2956,10 @@ async fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
         run_root_invocation(&config.data_directory, command).await?;
         return Ok(());
     }
+    if let Some(Command::Capability { command }) = &cli.command {
+        run_root_capability(&config.data_directory, command).await?;
+        return Ok(());
+    }
     if let Some(Command::Backup { command }) = &cli.command {
         match command {
             BackupCommand::Verify { bundle, json } => {
@@ -3051,6 +3078,9 @@ async fn run_cli() -> Result<(), Box<dyn std::error::Error>> {
         }
         Some(Command::Invocation { .. }) => {
             unreachable!("invocation commands handled before bearer-token loading")
+        }
+        Some(Command::Capability { .. }) => {
+            unreachable!("capability commands handled before bearer-token loading")
         }
         Some(Command::Settings { command }) => {
             run_settings(&client, host, token.trim(), command).await?;
@@ -11535,6 +11565,137 @@ async fn run_root_invocation(
     Ok(())
 }
 
+async fn run_root_capability(
+    data_directory: &Path,
+    command: &CapabilityCommand,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match command {
+        CapabilityCommand::List { limit, json } => {
+            let capabilities =
+                mcg_platform::query_root_capabilities(data_directory, *limit).await?;
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&capabilities)?);
+            } else if capabilities.is_empty() {
+                println!("No governed Tool authorizations.");
+            } else {
+                for capability in capabilities {
+                    println!(
+                        "{}  {} v{}  {:?}  {:?}  fs:{} net:{} secret:{} process:{}",
+                        capability.action_id,
+                        capability.tool_name,
+                        capability.tool_manifest.version,
+                        capability.state,
+                        capability.effect_class,
+                        capability.filesystem_scope_count,
+                        capability.network_scope_count,
+                        capability.secret_slot_count,
+                        capability.process_spawn
+                    );
+                }
+            }
+        }
+        CapabilityCommand::Show { id, json } => {
+            let action_id = ActionId(uuid::Uuid::parse_str(id)?);
+            let inspection = mcg_platform::query_root_capability(data_directory, action_id)
+                .await?
+                .ok_or_else(|| {
+                    format!("Tool authorization for action {action_id} was not found")
+                })?;
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&inspection)?);
+            } else {
+                let summary = &inspection.summary;
+                println!("Tool authorization {}", summary.action_id);
+                println!(
+                    "  tool: {} v{}",
+                    summary.tool_name, summary.tool_manifest.version
+                );
+                println!("  state: {:?}", summary.state);
+                println!("  permit: {}", summary.permit_id);
+                println!(
+                    "  workflow fence: attempt {} revision {} generation {}",
+                    summary.attempt_id, inspection.attempt_revision, inspection.lease_generation
+                );
+                println!("  runtime: {}", inspection.runtime_identity.instance_id);
+                println!("  actor: {}", inspection.runtime_actor);
+                println!("  effect: {:?}", summary.effect_class);
+                println!("  platform: {:?}", inspection.platform);
+                println!(
+                    "  scopes: filesystem {} network {} secret slots {} process spawn {}",
+                    summary.filesystem_scope_count,
+                    summary.network_scope_count,
+                    summary.secret_slot_count,
+                    summary.process_spawn
+                );
+                for scope in &inspection.scopes.filesystem {
+                    println!("    filesystem {:?}: {}", scope.access, scope.root);
+                }
+                for scope in &inspection.scopes.network {
+                    println!("    network: {}", scope.destination);
+                }
+                for slot in &inspection.scopes.secret_slots {
+                    println!("    secret slot type: {}", slot.as_str());
+                }
+                if inspection.scopes.truncated.filesystem
+                    || inspection.scopes.truncated.network
+                    || inspection.scopes.truncated.secret_slots
+                {
+                    println!("    scope preview is bounded; exact scope hash retained below");
+                }
+                println!(
+                    "  runner: {} {} ({}:{})",
+                    inspection.runner.source_type.as_str(),
+                    inspection.runner.locator,
+                    inspection.runner.content_hash.domain,
+                    inspection.runner.content_hash.digest_hex
+                );
+                println!(
+                    "  hashes: argument {}:{}",
+                    inspection.argument_hash.domain, inspection.argument_hash.digest_hex
+                );
+                println!(
+                    "          proposal {}:{}",
+                    inspection.proposal_hash.domain, inspection.proposal_hash.digest_hex
+                );
+                println!(
+                    "          permit {}:{}",
+                    inspection.permit_hash.domain, inspection.permit_hash.digest_hex
+                );
+                println!(
+                    "          policy {}:{}",
+                    inspection.policy.content_hash.domain,
+                    inspection.policy.content_hash.digest_hex
+                );
+                println!(
+                    "          scopes {}:{}",
+                    inspection.capability_scope_hash.domain,
+                    inspection.capability_scope_hash.digest_hex
+                );
+                println!(
+                    "  limits: {} ms, {} output bytes, {} memory bytes, {} child processes",
+                    inspection.limits.timeout_ms,
+                    inspection.limits.max_output_bytes,
+                    inspection.limits.max_memory_bytes,
+                    inspection.limits.max_child_processes
+                );
+                println!(
+                    "  sandbox: filesystem {:?}, network {:?}, process tree {:?}, secrets {:?}, environment {:?}, resources {:?}, protected paths {:?}",
+                    inspection.sandbox.filesystem_scope,
+                    inspection.sandbox.network,
+                    inspection.sandbox.process_tree,
+                    inspection.sandbox.secrets,
+                    inspection.sandbox.environment,
+                    inspection.sandbox.resources,
+                    inspection.sandbox.protected_paths
+                );
+                println!("  issued: {}", summary.issued_at);
+                println!("  expires: {}", summary.expires_at);
+            }
+        }
+    }
+    Ok(())
+}
+
 fn canonical_action_origin_lines(origin: &mcg_contracts::ActionOrigin) -> Vec<String> {
     let named = [
         ("conversation", origin.conversation.as_ref()),
@@ -16589,6 +16750,30 @@ mod tests {
                     json: false,
                     ..
                 }
+            }
+        ));
+    }
+
+    #[test]
+    fn capability_commands_expose_bounded_root_authority_evidence() {
+        let id = "00000000-0000-4000-8000-000000000505";
+        let list = Cli::try_parse_from(["mcg", "capability", "list", "--limit", "25", "--json"])
+            .expect("capability list command");
+        assert!(matches!(
+            list.command.expect("command"),
+            Command::Capability {
+                command: CapabilityCommand::List {
+                    limit: 25,
+                    json: true
+                }
+            }
+        ));
+        let show = Cli::try_parse_from(["mcg", "capability", "show", id, "--json"])
+            .expect("capability show command");
+        assert!(matches!(
+            show.command.expect("command"),
+            Command::Capability {
+                command: CapabilityCommand::Show { json: true, .. }
             }
         ));
     }

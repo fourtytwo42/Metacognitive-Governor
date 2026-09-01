@@ -99,12 +99,15 @@ mod capabilities;
 pub use capabilities::{
     CAPABILITY_PROFILE_HASH_DOMAIN, CapabilityEstimate, CapabilityKind, CapabilityProfile,
     ExecutionPlatform, FilesystemAccess, FilesystemCapability, IsolationGuarantee,
-    NetworkCapability, SKILL_MANIFEST_HASH_DOMAIN, SandboxCapabilityProfile, SkillManifest,
-    SkillStatus, TOOL_INVOCATION_PERMIT_HASH_DOMAIN, TOOL_INVOCATION_PROPOSAL_HASH_DOMAIN,
-    TOOL_MANIFEST_HASH_DOMAIN, TOOL_POLICY_HASH_DOMAIN, ToolCapabilitySet, ToolInvocationPermit,
-    ToolInvocationProposal, ToolManifest, ToolPolicy, ToolResourceLimits, capability_profile_hash,
-    skill_manifest_hash, tool_invocation_permit_hash, tool_invocation_proposal_hash,
-    tool_manifest_hash,
+    MAX_CAPABILITY_SCOPE_PREVIEW_ITEMS, MAX_TOOL_CAPABILITY_SUMMARIES, NetworkCapability,
+    SKILL_MANIFEST_HASH_DOMAIN, SandboxCapabilityProfile, SkillManifest, SkillStatus,
+    TOOL_CAPABILITY_SET_HASH_DOMAIN, TOOL_INVOCATION_PERMIT_HASH_DOMAIN,
+    TOOL_INVOCATION_PROPOSAL_HASH_DOMAIN, TOOL_MANIFEST_HASH_DOMAIN, TOOL_POLICY_HASH_DOMAIN,
+    ToolAuthorizationInspection, ToolAuthorizationState, ToolAuthorizationSummary,
+    ToolCapabilityScopePreview, ToolCapabilityScopeTruncation, ToolCapabilitySet,
+    ToolInvocationPermit, ToolInvocationProposal, ToolManifest, ToolPolicy, ToolResourceLimits,
+    capability_profile_hash, skill_manifest_hash, tool_capability_set_hash,
+    tool_invocation_permit_hash, tool_invocation_proposal_hash, tool_manifest_hash,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]

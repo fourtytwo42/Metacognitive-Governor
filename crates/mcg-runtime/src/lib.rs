@@ -66,10 +66,10 @@ use mcg_contracts::{
     ModelRunOutcomeEvidence, ModelRunState, ModelUsage, PermitId, ReconciliationJob,
     ReconciliationJobId, ReconciliationObservation, RuntimeActorId, RuntimeIdentity,
     RuntimeInvocationRequest, RuntimeInvocationResult, SecretHandleId, SkillManifest,
-    SkillManifestId, SourceRef, StableTypeId, ToolInvocationPermit, ToolInvocationProposal,
-    ToolManifest, ToolManifestId, ToolPolicy, VersionedRef, WorkflowAttempt, WorkflowCancelRequest,
-    WorkflowId, WorkflowInspection, WorkflowInvocationActivity, WorkflowState,
-    canonical_contract_hash,
+    SkillManifestId, SourceRef, StableTypeId, ToolAuthorizationInspection,
+    ToolAuthorizationSummary, ToolInvocationPermit, ToolInvocationProposal, ToolManifest,
+    ToolManifestId, ToolPolicy, VersionedRef, WorkflowAttempt, WorkflowCancelRequest, WorkflowId,
+    WorkflowInspection, WorkflowInvocationActivity, WorkflowState, canonical_contract_hash,
 };
 use mcg_domain::{
     AgentContextCheckpoint, AgentContextCheckpointCause, AgentContextCheckpointId,
@@ -4024,6 +4024,32 @@ impl AppRuntime {
         event_limit: usize,
     ) -> Result<Option<ActionInspection>, RuntimeError> {
         Ok(self.store()?.action_inspection(action_id, event_limit)?)
+    }
+
+    /// Returns a bounded newest-first projection of Root-issued Tool authority.
+    ///
+    /// # Errors
+    /// Returns a runtime error for invalid bounds or unreadable authoritative state.
+    pub fn tool_authorizations(
+        &self,
+        limit: usize,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<ToolAuthorizationSummary>, RuntimeError> {
+        Ok(self.store()?.tool_authorization_summaries(limit, now)?)
+    }
+
+    /// Loads one content-minimized Tool authorization inspection by action identity.
+    ///
+    /// # Errors
+    /// Returns a runtime error for malformed or unreadable authoritative evidence.
+    pub fn tool_authorization(
+        &self,
+        action_id: ActionId,
+        now: DateTime<Utc>,
+    ) -> Result<Option<ToolAuthorizationInspection>, RuntimeError> {
+        Ok(self
+            .store()?
+            .tool_authorization_inspection(action_id, now)?)
     }
 
     /// Lists the latest authoritative attempt for every canonical workflow.

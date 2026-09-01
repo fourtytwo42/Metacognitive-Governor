@@ -275,6 +275,28 @@ async fn protected_root_invocation(
 }
 
 #[tauri::command]
+async fn protected_root_capabilities(
+    limit: usize,
+) -> Result<Vec<mcg_contracts::ToolAuthorizationSummary>, String> {
+    mcg_platform::query_root_capabilities(&AppConfig::default().data_directory, limit)
+        .await
+        .map_err(|error| format!("Protected Root capabilities could not be loaded: {error}"))
+}
+
+#[tauri::command]
+async fn protected_root_capability(
+    action_id: String,
+) -> Result<Option<mcg_contracts::ToolAuthorizationInspection>, String> {
+    let action_id = mcg_contracts::ActionId(
+        uuid::Uuid::parse_str(&action_id)
+            .map_err(|error| format!("Action ID is invalid: {error}"))?,
+    );
+    mcg_platform::query_root_capability(&AppConfig::default().data_directory, action_id)
+        .await
+        .map_err(|error| format!("Protected Root capability could not be loaded: {error}"))
+}
+
+#[tauri::command]
 async fn cancel_protected_root_workflow(
     request: mcg_contracts::WorkflowCancelRequest,
 ) -> Result<mcg_contracts::WorkflowAttempt, String> {
@@ -4115,6 +4137,8 @@ pub fn run() {
             compensate_protected_root_action,
             protected_root_invocations,
             protected_root_invocation,
+            protected_root_capabilities,
+            protected_root_capability,
             cancel_protected_root_workflow,
             run_diagnostics,
             updater::update_configuration,

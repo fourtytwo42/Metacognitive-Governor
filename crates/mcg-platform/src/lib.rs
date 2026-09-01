@@ -13,9 +13,10 @@ use chrono::{DateTime, Duration, Utc};
 use mcg_contracts::{
     ActionCompensationReceipt, ActionId, ActionInspection, ActionSummary, AuthenticatedRpcRequest,
     ContentHash, ContractError, CorrelationId, InvocationId, InvocationInspection,
-    InvocationSummary, MAX_WORKFLOW_ACTIVITY_INVOCATIONS, OwnerActionCompensationRequest,
-    PROTOCOL_V1, RequestId, RootStatus, RpcEnvelope, RuntimeInstanceId, RuntimeWorkerRole,
-    SessionId, StableTypeId, VersionedPayload, WorkflowAttempt, WorkflowCancelRequest, WorkflowId,
+    InvocationSummary, MAX_TOOL_CAPABILITY_SUMMARIES, MAX_WORKFLOW_ACTIVITY_INVOCATIONS,
+    OwnerActionCompensationRequest, PROTOCOL_V1, RequestId, RootStatus, RpcEnvelope,
+    RuntimeInstanceId, RuntimeWorkerRole, SessionId, StableTypeId, ToolAuthorizationInspection,
+    ToolAuthorizationSummary, VersionedPayload, WorkflowAttempt, WorkflowCancelRequest, WorkflowId,
     WorkflowInspection, WorkflowInvocationActivity, canonical_cbor_v1, decode_canonical_cbor_v1,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -33,6 +34,7 @@ pub const RUNTIME_WORKER_EXECUTABLE_HASH_DOMAIN: &str = "MetaCog.RuntimeWorkerEx
 pub const MAX_ROOT_INVOCATION_SUMMARIES: usize = 200;
 pub const MAX_ROOT_INVOCATION_MODEL_RUNS: usize = 100;
 pub const MAX_ROOT_WORKFLOW_INVOCATIONS: usize = MAX_WORKFLOW_ACTIVITY_INVOCATIONS;
+pub const MAX_ROOT_TOOL_AUTHORIZATION_SUMMARIES: usize = MAX_TOOL_CAPABILITY_SUMMARIES;
 pub const ROOT_STATUS_REQUEST_TYPE: &str = "metacog.root.status.request.v1";
 pub const ROOT_STATUS_RESPONSE_TYPE: &str = "metacog.root.status.response.v1";
 pub const ROOT_WORKFLOW_LIST_REQUEST_TYPE: &str = "metacog.root.workflow_list.request.v1";
@@ -53,6 +55,10 @@ pub const ROOT_INVOCATION_LIST_REQUEST_TYPE: &str = "metacog.root.invocation_lis
 pub const ROOT_INVOCATION_LIST_RESPONSE_TYPE: &str = "metacog.root.invocation_list.response.v1";
 pub const ROOT_INVOCATION_SHOW_REQUEST_TYPE: &str = "metacog.root.invocation_show.request.v1";
 pub const ROOT_INVOCATION_SHOW_RESPONSE_TYPE: &str = "metacog.root.invocation_show.response.v1";
+pub const ROOT_CAPABILITY_LIST_REQUEST_TYPE: &str = "metacog.root.capability_list.request.v1";
+pub const ROOT_CAPABILITY_LIST_RESPONSE_TYPE: &str = "metacog.root.capability_list.response.v1";
+pub const ROOT_CAPABILITY_SHOW_REQUEST_TYPE: &str = "metacog.root.capability_show.request.v1";
+pub const ROOT_CAPABILITY_SHOW_RESPONSE_TYPE: &str = "metacog.root.capability_show.response.v1";
 const ROOT_SESSION_FILE: &str = "root-ipc-session.json";
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -698,6 +704,57 @@ pub async fn query_root_invocation(
         }),
     )
     .await
+}
+
+/// Lists bounded newest-first Tool authorization summaries over authenticated local IPC.
+///
+/// # Errors
+/// Returns an error for unavailable transport, invalid bounds, or correlated protocol failure.
+pub async fn query_root_capabilities(
+    data_directory: &Path,
+    limit: usize,
+) -> Result<Vec<ToolAuthorizationSummary>, PlatformError> {
+    if limit == 0 || limit > MAX_ROOT_TOOL_AUTHORIZATION_SUMMARIES {
+        return Err(PlatformError::InvalidInspectionBound);
+    }
+    let summaries: Vec<ToolAuthorizationSummary> = query_root(
+        data_directory,
+        ROOT_CAPABILITY_LIST_REQUEST_TYPE,
+        ROOT_CAPABILITY_LIST_RESPONSE_TYPE,
+        &serde_json::json!({"limit": limit}),
+    )
+    .await?;
+    for summary in &summaries {
+        summary.validate()?;
+    }
+    Ok(summaries)
+}
+
+/// Loads one content-minimized exact Tool authorization projection over authenticated local IPC.
+///
+/// # Errors
+/// Returns an error for unavailable transport, substituted evidence, or protocol failure.
+pub async fn query_root_capability(
+    data_directory: &Path,
+    action_id: ActionId,
+) -> Result<Option<ToolAuthorizationInspection>, PlatformError> {
+    let inspection: Option<ToolAuthorizationInspection> = query_root(
+        data_directory,
+        ROOT_CAPABILITY_SHOW_REQUEST_TYPE,
+        ROOT_CAPABILITY_SHOW_RESPONSE_TYPE,
+        &serde_json::json!({"action_id": action_id}),
+    )
+    .await?;
+    if let Some(inspection) = &inspection {
+        inspection.validate()?;
+        if inspection.summary.action_id != action_id {
+            return Err(ContractError::InvalidContract(
+                "Tool authorization response does not match its requested action",
+            )
+            .into());
+        }
+    }
+    Ok(inspection)
 }
 
 async fn query_root<TRequest, TResponse>(

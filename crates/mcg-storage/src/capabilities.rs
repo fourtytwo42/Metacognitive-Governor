@@ -1,10 +1,12 @@
 use chrono::{DateTime, Utc};
 use mcg_contracts::{
-    CapabilityProfile, ContentHash, PermitId, PolicyBinding, SecretHandleId, SkillManifest,
-    SkillManifestId, SourceRef, StableTypeId, TOOL_INVOCATION_PERMIT_HASH_DOMAIN,
-    TOOL_POLICY_HASH_DOMAIN, ToolInvocationPermit, ToolInvocationProposal, ToolManifest,
-    ToolManifestId, ToolPolicy, VersionedPayload, VersionedRef, WorkflowState,
-    capability_profile_hash, decode_canonical_cbor_v1, skill_manifest_hash,
+    CapabilityProfile, ContentHash, MAX_TOOL_CAPABILITY_SUMMARIES, PermitId, PolicyBinding,
+    SecretHandleId, SkillManifest, SkillManifestId, SourceRef, StableTypeId,
+    TOOL_INVOCATION_PERMIT_HASH_DOMAIN, TOOL_POLICY_HASH_DOMAIN, ToolAuthorizationInspection,
+    ToolAuthorizationState, ToolAuthorizationSummary, ToolCapabilityScopePreview,
+    ToolInvocationPermit, ToolInvocationProposal, ToolManifest, ToolManifestId, ToolPolicy,
+    VersionedPayload, VersionedRef, WorkflowState, capability_profile_hash,
+    decode_canonical_cbor_v1, skill_manifest_hash, tool_capability_set_hash,
     tool_invocation_permit_hash, tool_invocation_proposal_hash, tool_manifest_hash,
 };
 use rusqlite::{OptionalExtension, Transaction, params};
@@ -587,6 +589,144 @@ impl SqliteEventStore {
             ));
         }
         Ok(Some(receipt))
+    }
+
+    /// Lists a bounded newest-first, content-minimized projection of persisted Tool authority.
+    /// Every row is reloaded through the canonical authorization path before projection.
+    ///
+    /// # Errors
+    /// Returns a storage error for invalid bounds or malformed authoritative evidence.
+    pub fn tool_authorization_summaries(
+        &self,
+        limit: usize,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<ToolAuthorizationSummary>, StorageError> {
+        if limit == 0 || limit > MAX_TOOL_CAPABILITY_SUMMARIES {
+            return Err(StorageError::InvalidData(
+                "Tool authorization summary limit is outside the supported range".into(),
+            ));
+        }
+        let sql_limit = i64::try_from(limit).map_err(|_| {
+            StorageError::InvalidData("Tool authorization summary limit overflowed".into())
+        })?;
+        let action_ids = {
+            let mut statement = self.connection.prepare(
+                "SELECT action_id FROM tool_invocation_permits
+                 ORDER BY issued_at DESC, permit_id DESC LIMIT ?1",
+            )?;
+            let rows = statement.query_map([sql_limit], |row| row.get::<_, String>(0))?;
+            rows.map(|row| {
+                let value = row?;
+                Ok(mcg_contracts::ActionId(parse_uuid(
+                    &value,
+                    "Tool authorization action id",
+                )?))
+            })
+            .collect::<Result<Vec<_>, StorageError>>()?
+        };
+        action_ids
+            .into_iter()
+            .map(|action_id| {
+                self.tool_authorization_inspection(action_id, now)?
+                    .map(|inspection| inspection.summary)
+                    .ok_or_else(|| {
+                        StorageError::InvalidData(
+                            "indexed Tool authorization is missing its canonical evidence".into(),
+                        )
+                    })
+            })
+            .collect()
+    }
+
+    /// Loads one bounded Developer-safe Tool authorization projection by action identity.
+    /// Raw arguments, secret values, and opaque handle identifiers are intentionally excluded.
+    ///
+    /// # Errors
+    /// Returns a storage error for malformed, substituted, or unreadable authoritative evidence.
+    pub fn tool_authorization_inspection(
+        &self,
+        action_id: mcg_contracts::ActionId,
+        now: DateTime<Utc>,
+    ) -> Result<Option<ToolAuthorizationInspection>, StorageError> {
+        let Some(receipt) = self.tool_capability_authorization(action_id)? else {
+            return Ok(None);
+        };
+        let manifest = self
+            .tool_manifest(
+                receipt.proposal.tool_manifest.id,
+                receipt.proposal.tool_manifest.version,
+            )?
+            .ok_or_else(|| {
+                StorageError::InvalidData("Tool authorization manifest version is missing".into())
+            })?;
+        let state = if now < receipt.permit.issued_at {
+            ToolAuthorizationState::NotYetActive
+        } else if now >= receipt.permit.expires_at {
+            ToolAuthorizationState::Expired
+        } else {
+            let attempt = self.workflow_attempt(receipt.proposal.attempt_id)?.ok_or(
+                StorageError::WorkflowAttemptNotFound(receipt.proposal.attempt_id),
+            )?;
+            if attempt.revision == receipt.proposal.attempt_revision
+                && attempt.lease_generation == receipt.proposal.lease_generation
+                && attempt.lease_owner == Some(receipt.proposal.runtime_actor)
+                && attempt.task_contract == receipt.proposal.task_contract
+                && attempt.state == WorkflowState::Running
+                && attempt.lease_expires_at.is_some_and(|expiry| expiry > now)
+            {
+                ToolAuthorizationState::Active
+            } else {
+                ToolAuthorizationState::WorkflowInactive
+            }
+        };
+        let capabilities = &receipt.permit.capabilities;
+        let summary = ToolAuthorizationSummary {
+            action_id,
+            permit_id: receipt.permit.id,
+            attempt_id: receipt.proposal.attempt_id,
+            tool_manifest: receipt.proposal.tool_manifest.clone(),
+            tool_name: manifest.name.clone(),
+            effect_class: receipt.permit.allowed_effect_class,
+            filesystem_scope_count: u32::try_from(capabilities.filesystem.len()).map_err(|_| {
+                StorageError::InvalidData("filesystem capability count overflowed".into())
+            })?,
+            network_scope_count: u32::try_from(capabilities.network.len()).map_err(|_| {
+                StorageError::InvalidData("network capability count overflowed".into())
+            })?,
+            secret_slot_count: u32::try_from(capabilities.secret_slots.len()).map_err(|_| {
+                StorageError::InvalidData("secret-slot capability count overflowed".into())
+            })?,
+            process_spawn: capabilities.process_spawn,
+            state,
+            issued_at: receipt.permit.issued_at,
+            expires_at: receipt.permit.expires_at,
+        };
+        let inspection = ToolAuthorizationInspection {
+            summary,
+            runner: manifest.runner,
+            input_schema: manifest.input_schema,
+            output_schema: manifest.output_schema,
+            receipt_semantics: manifest.receipt_semantics,
+            reconciler: manifest.reconciler,
+            platform_support: manifest.platform_support,
+            runtime_identity: receipt.permit.runtime_identity,
+            runtime_actor: receipt.permit.runtime_actor,
+            task_contract: receipt.permit.task_contract,
+            attempt_revision: receipt.permit.attempt_revision,
+            lease_generation: receipt.permit.lease_generation,
+            argument_hash: receipt.permit.argument_hash,
+            proposal_hash: receipt.proposal_hash,
+            permit_hash: receipt.permit_hash,
+            policy: receipt.permit.policy,
+            capability_scope_hash: tool_capability_set_hash(capabilities)
+                .map_err(contract_error)?,
+            scopes: ToolCapabilityScopePreview::from_capabilities(capabilities),
+            limits: receipt.permit.limits,
+            sandbox: receipt.permit.sandbox,
+            platform: receipt.permit.platform,
+        };
+        inspection.validate().map_err(contract_error)?;
+        Ok(Some(inspection))
     }
 
     /// Resolves one opaque Tool secret handle only for its exact active permit.
@@ -1491,6 +1631,28 @@ mod tests {
                     .expect("active authority"),
                 Some(expected_receipt.clone())
             );
+            let summaries = store
+                .tool_authorization_summaries(10, now())
+                .expect("bounded Tool summaries");
+            assert_eq!(summaries.len(), 1);
+            assert_eq!(summaries[0].action_id, action.id);
+            assert_eq!(summaries[0].state, ToolAuthorizationState::Active);
+            let inspection = store
+                .tool_authorization_inspection(action.id, now())
+                .expect("Tool inspection")
+                .expect("persisted Tool inspection");
+            assert_eq!(inspection.summary, summaries[0]);
+            assert_eq!(inspection.proposal_hash, expected_receipt.proposal_hash);
+            assert_eq!(inspection.permit_hash, expected_receipt.permit_hash);
+            assert_eq!(inspection.scopes.secret_slots.len(), 1);
+            let serialized = serde_json::to_string(&inspection).expect("serialize inspection");
+            assert!(!serialized.contains(&permit.secret_handles[0].to_string()));
+            assert!(store.tool_authorization_summaries(0, now()).is_err());
+            assert!(
+                store
+                    .tool_authorization_summaries(MAX_TOOL_CAPABILITY_SUMMARIES + 1, now())
+                    .is_err()
+            );
             action_id = action.id;
             permit_id = permit.id;
             handle_id = permit.secret_handles[0];
@@ -1541,6 +1703,15 @@ mod tests {
                 .tool_capability_authorization(action_id)
                 .expect("expired historical replay"),
             Some(expected_receipt)
+        );
+        assert_eq!(
+            reopened
+                .tool_authorization_inspection(action_id, now() + Duration::minutes(3))
+                .expect("expired Tool inspection")
+                .expect("persisted expired Tool inspection")
+                .summary
+                .state,
+            ToolAuthorizationState::Expired
         );
         reopened
             .connection

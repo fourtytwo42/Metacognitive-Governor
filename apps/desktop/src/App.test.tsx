@@ -222,6 +222,8 @@ const client = vi.hoisted(() => ({
   ,compensateProtectedRootAction: vi.fn()
   ,protectedRootInvocations: vi.fn()
   ,protectedRootInvocation: vi.fn()
+  ,protectedRootCapabilities: vi.fn()
+  ,protectedRootCapability: vi.fn()
   ,cancelProtectedRootWorkflow: vi.fn()
   ,listOpenInApplications: vi.fn()
   ,openWorkspaceIn: vi.fn()
@@ -437,6 +439,8 @@ vi.mock("./desktop-client", () => ({
   compensateProtectedRootAction: client.compensateProtectedRootAction,
   listProtectedRootInvocations: client.protectedRootInvocations,
   getProtectedRootInvocation: client.protectedRootInvocation,
+  listProtectedRootCapabilities: client.protectedRootCapabilities,
+  getProtectedRootCapability: client.protectedRootCapability,
   cancelProtectedRootWorkflow: client.cancelProtectedRootWorkflow,
   listOpenInApplications: client.listOpenInApplications,
   openWorkspaceIn: client.openWorkspaceIn,
@@ -471,6 +475,8 @@ beforeEach(() => {
   client.compensateProtectedRootAction.mockReset();
   client.protectedRootInvocations.mockReset();
   client.protectedRootInvocation.mockReset();
+  client.protectedRootCapabilities.mockReset();
+  client.protectedRootCapability.mockReset();
   client.cancelProtectedRootWorkflow.mockReset();
   client.start.mockReset();
   client.complete.mockReset();
@@ -984,6 +990,8 @@ beforeEach(() => {
   client.compensateProtectedRootAction.mockRejectedValue(new Error("No action compensation fixture configured."));
   client.protectedRootInvocations.mockResolvedValue([]);
   client.protectedRootInvocation.mockResolvedValue(null);
+  client.protectedRootCapabilities.mockResolvedValue([]);
+  client.protectedRootCapability.mockResolvedValue(null);
   client.cancelProtectedRootWorkflow.mockRejectedValue(new Error("No workflow fixture configured."));
   client.updateSettings.mockImplementation(async (request) => ({
     schema_version: 1,
@@ -1217,6 +1225,74 @@ test("durable workflows progressively disclose Root evidence and fence cancellat
   })));
   expect(await within(workflows).findByText(/Stopping safely · attempt 1 · revision 3 · generation 2/)).toBeInTheDocument();
   confirmation.mockRestore();
+});
+
+test("Tool capability inspection progressively discloses one Root projection", async () => {
+  const updatedAt = "2026-09-01T12:00:00Z";
+  const summary = {
+    action_id: "00000000-0000-4000-8000-000000000571",
+    permit_id: "00000000-0000-4000-8000-000000000572",
+    attempt_id: "00000000-0000-4000-8000-000000000573",
+    tool_manifest: { id: "00000000-0000-4000-8000-000000000574", version: 1, content_hash: { algorithm: "blake3-256", domain: "MetaCog.ToolManifest", digest_hex: "a".repeat(64) } },
+    tool_name: "Governed filesystem",
+    effect_class: "reversible",
+    filesystem_scope_count: 1,
+    network_scope_count: 0,
+    secret_slot_count: 0,
+    process_spawn: false,
+    state: "active",
+    issued_at: updatedAt,
+    expires_at: "2026-09-01T12:05:00Z"
+  };
+  const hash = (domain: string, digest = "b") => ({ algorithm: "blake3-256", domain, digest_hex: digest.repeat(64) });
+  const source = (type: string, locator: string) => ({ source_type: type, locator, content_hash: hash("MetaCog.Source") });
+  const inspection = {
+    summary,
+    runner: source("mcg.executable.v1", "C:/Program Files/MetaCog/mcg-action-runner.exe"),
+    input_schema: source("mcg.schema.v1", "governed-filesystem-input"),
+    output_schema: source("mcg.schema.v1", "governed-filesystem-output"),
+    receipt_semantics: "mcg.filesystem_receipt.v1",
+    reconciler: source("mcg.executable.v1", "C:/Program Files/MetaCog/mcg-action-runner.exe"),
+    platform_support: ["windows"],
+    runtime_identity: { instance_id: "00000000-0000-4000-8000-000000000575", build_hash: hash("MetaCog.RuntimeBuild"), protocol_version: 1, started_at: updatedAt },
+    runtime_actor: "00000000-0000-4000-8000-000000000576",
+    task_contract: { id: "00000000-0000-4000-8000-000000000577", version: 1, content_hash: hash("MetaCog.TaskContract") },
+    attempt_revision: 3,
+    lease_generation: 2,
+    argument_hash: hash("MetaCog.ActionOperation"),
+    proposal_hash: hash("MetaCog.ToolInvocationProposal"),
+    permit_hash: hash("MetaCog.ToolInvocationPermit"),
+    policy: { content_hash: hash("MetaCog.ToolPolicy"), payload: { type_id: "mcg.tool_policy.v1", schema_version: 1, canonical_encoding: "canonical-cbor-v1", normalization: "canonical-json-v1", bytes: [1, 2, 3] } },
+    capability_scope_hash: hash("MetaCog.ToolCapabilitySet"),
+    scopes: { filesystem: [{ root: "C:/workspace", access: "write" }], network: [], secret_slots: [], process_spawn: false, truncated: { filesystem: false, network: false, secret_slots: false } },
+    limits: { timeout_ms: 30000, max_output_bytes: 1048576, max_memory_bytes: 268435456, max_child_processes: 0 },
+    sandbox: { filesystem_scope: "hard", network: "hard", process_tree: "hard", secrets: "hard", environment: "hard", resources: "best_effort", protected_paths: "hard" },
+    platform: "windows"
+  };
+  client.protectedRootCapabilities.mockResolvedValue([summary]);
+  client.protectedRootCapability.mockResolvedValue(inspection);
+
+  for (const complexity of ["simple", "advanced", "developer"] as const) {
+    client.getSettings.mockResolvedValue({ schema_version: 1, revision: 1, interface_complexity: complexity, autonomy: "autonomous", shadow_experiments: true, updated_at: updatedAt });
+    const view = render(<App />);
+    fireEvent.click(await screen.findByRole("link", { name: /Agents/ }));
+    const capabilities = await screen.findByRole("article", { name: "Governed capabilities" });
+    expect(within(capabilities).getByText("Governed filesystem")).toBeInTheDocument();
+    if (complexity === "simple") {
+      expect(within(capabilities).getByText(/Bounded tool access · active/)).toBeInTheDocument();
+      expect(within(capabilities).queryByRole("button", { name: "Inspect access" })).not.toBeInTheDocument();
+    } else {
+      expect(within(capabilities).getByText(/1 filesystem · 0 network/)).toBeInTheDocument();
+      fireEvent.click(within(capabilities).getByRole("button", { name: "Inspect access" }));
+      expect(await within(capabilities).findByText("C:/workspace")).toBeInTheDocument();
+      if (complexity === "developer") {
+        expect(within(capabilities).getByRole("button", { name: "Exact capability evidence" })).toBeInTheDocument();
+      } else {
+        expect(within(capabilities).queryByRole("button", { name: "Exact capability evidence" })).not.toBeInTheDocument();
+      }
+    }
+    view.unmount();
+  }
 });
 
 test("Developer progressively inspects canonical governed-action evidence", async () => {

@@ -15,8 +15,11 @@ pub const CAPABILITY_PROFILE_HASH_DOMAIN: &str = "MetaCog.CapabilityProfile";
 pub const TOOL_INVOCATION_PROPOSAL_HASH_DOMAIN: &str = "MetaCog.ToolInvocationProposal";
 pub const TOOL_INVOCATION_PERMIT_HASH_DOMAIN: &str = "MetaCog.ToolInvocationPermit";
 pub const TOOL_POLICY_HASH_DOMAIN: &str = "MetaCog.ToolPolicy";
+pub const TOOL_CAPABILITY_SET_HASH_DOMAIN: &str = "MetaCog.ToolCapabilitySet";
 
 const MAX_CAPABILITY_ITEMS: usize = 256;
+pub const MAX_CAPABILITY_SCOPE_PREVIEW_ITEMS: usize = 32;
+pub const MAX_TOOL_CAPABILITY_SUMMARIES: usize = 200;
 const MAX_TEXT_BYTES: usize = 4_096;
 const MAX_RESOURCE_LOCATOR_BYTES: usize = 4_096;
 const MAX_TOOL_PERMIT_LIFETIME_SECONDS: u64 = 24 * 60 * 60;
@@ -676,6 +679,203 @@ impl ToolInvocationPermit {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolAuthorizationState {
+    NotYetActive,
+    Active,
+    WorkflowInactive,
+    Expired,
+}
+
+/// Bounded, content-minimized Root projection for one physical Tool authorization.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolAuthorizationSummary {
+    pub action_id: ActionId,
+    pub permit_id: PermitId,
+    pub attempt_id: crate::AttemptId,
+    pub tool_manifest: VersionedRef<ToolManifestId>,
+    pub tool_name: String,
+    pub effect_class: EffectClass,
+    pub filesystem_scope_count: u32,
+    pub network_scope_count: u32,
+    pub secret_slot_count: u32,
+    pub process_spawn: bool,
+    pub state: ToolAuthorizationState,
+    pub issued_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+}
+
+impl ToolAuthorizationSummary {
+    /// Validates the stable identity, bounds, and immutable timing evidence in a summary.
+    ///
+    /// # Errors
+    /// Returns an invalid-contract error for malformed or unbounded evidence.
+    pub fn validate(&self) -> Result<(), ContractError> {
+        validate_versioned_ref(
+            &self.tool_manifest,
+            "Tool authorization summary manifest is invalid",
+        )?;
+        validate_text(
+            &self.tool_name,
+            256,
+            "Tool authorization summary name is invalid",
+        )?;
+        if self.expires_at <= self.issued_at
+            || self.filesystem_scope_count as usize > MAX_CAPABILITY_ITEMS
+            || self.network_scope_count as usize > MAX_CAPABILITY_ITEMS
+            || self.secret_slot_count as usize > MAX_CAPABILITY_ITEMS
+        {
+            return Err(ContractError::InvalidContract(
+                "Tool authorization summary is inconsistent",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Bounded preview of exact scopes. Exact hashes remain authoritative when a set exceeds the
+/// preview window.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolCapabilityScopePreview {
+    pub filesystem: Vec<FilesystemCapability>,
+    pub network: Vec<NetworkCapability>,
+    pub secret_slots: Vec<StableTypeId>,
+    pub process_spawn: bool,
+    pub truncated: ToolCapabilityScopeTruncation,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolCapabilityScopeTruncation {
+    pub filesystem: bool,
+    pub network: bool,
+    pub secret_slots: bool,
+}
+
+impl ToolCapabilityScopePreview {
+    #[must_use]
+    pub fn from_capabilities(capabilities: &ToolCapabilitySet) -> Self {
+        Self {
+            filesystem: capabilities
+                .filesystem
+                .iter()
+                .take(MAX_CAPABILITY_SCOPE_PREVIEW_ITEMS)
+                .cloned()
+                .collect(),
+            network: capabilities
+                .network
+                .iter()
+                .take(MAX_CAPABILITY_SCOPE_PREVIEW_ITEMS)
+                .cloned()
+                .collect(),
+            secret_slots: capabilities
+                .secret_slots
+                .iter()
+                .take(MAX_CAPABILITY_SCOPE_PREVIEW_ITEMS)
+                .cloned()
+                .collect(),
+            process_spawn: capabilities.process_spawn,
+            truncated: ToolCapabilityScopeTruncation {
+                filesystem: capabilities.filesystem.len() > MAX_CAPABILITY_SCOPE_PREVIEW_ITEMS,
+                network: capabilities.network.len() > MAX_CAPABILITY_SCOPE_PREVIEW_ITEMS,
+                secret_slots: capabilities.secret_slots.len() > MAX_CAPABILITY_SCOPE_PREVIEW_ITEMS,
+            },
+        }
+    }
+
+    fn validate(&self, summary: &ToolAuthorizationSummary) -> Result<(), ContractError> {
+        if self.filesystem.len() > MAX_CAPABILITY_SCOPE_PREVIEW_ITEMS
+            || self.network.len() > MAX_CAPABILITY_SCOPE_PREVIEW_ITEMS
+            || self.secret_slots.len() > MAX_CAPABILITY_SCOPE_PREVIEW_ITEMS
+            || self.filesystem.len() > summary.filesystem_scope_count as usize
+            || self.network.len() > summary.network_scope_count as usize
+            || self.secret_slots.len() > summary.secret_slot_count as usize
+            || self.truncated.filesystem
+                != (summary.filesystem_scope_count as usize > self.filesystem.len())
+            || self.truncated.network != (summary.network_scope_count as usize > self.network.len())
+            || self.truncated.secret_slots
+                != (summary.secret_slot_count as usize > self.secret_slots.len())
+            || self.process_spawn != summary.process_spawn
+        {
+            return Err(ContractError::InvalidContract(
+                "Tool capability scope preview is inconsistent",
+            ));
+        }
+        ToolCapabilitySet {
+            filesystem: self.filesystem.clone(),
+            network: self.network.clone(),
+            secret_slots: self.secret_slots.clone(),
+            process_spawn: self.process_spawn,
+        }
+        .validate()
+    }
+}
+
+/// Developer-safe exact evidence for one Tool authorization. This intentionally excludes raw
+/// arguments, credential material, opaque secret-handle identifiers, and mutable Root authority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolAuthorizationInspection {
+    pub summary: ToolAuthorizationSummary,
+    pub runner: SourceRef,
+    pub input_schema: SourceRef,
+    pub output_schema: SourceRef,
+    pub receipt_semantics: StableTypeId,
+    pub reconciler: Option<SourceRef>,
+    pub platform_support: Vec<ExecutionPlatform>,
+    pub runtime_identity: RuntimeIdentity,
+    pub runtime_actor: RuntimeActorId,
+    pub task_contract: VersionedRef<TaskContractId>,
+    pub attempt_revision: u64,
+    pub lease_generation: u64,
+    pub argument_hash: ContentHash,
+    pub proposal_hash: ContentHash,
+    pub permit_hash: ContentHash,
+    pub policy: PolicyBinding,
+    pub capability_scope_hash: ContentHash,
+    pub scopes: ToolCapabilityScopePreview,
+    pub limits: ToolResourceLimits,
+    pub sandbox: SandboxCapabilityProfile,
+    pub platform: ExecutionPlatform,
+}
+
+impl ToolAuthorizationInspection {
+    /// Validates the content-minimized inspection projection and all cross-field bindings.
+    ///
+    /// # Errors
+    /// Returns an invalid-contract error for malformed or substituted evidence.
+    pub fn validate(&self) -> Result<(), ContractError> {
+        self.summary.validate()?;
+        self.runner.validate()?;
+        self.input_schema.validate()?;
+        self.output_schema.validate()?;
+        StableTypeId::parse(self.receipt_semantics.as_str())?;
+        if let Some(reconciler) = &self.reconciler {
+            reconciler.validate()?;
+        }
+        if self.platform_support.is_empty()
+            || self.attempt_revision == 0
+            || self.lease_generation == 0
+            || !self.platform_support.contains(&self.platform)
+        {
+            return Err(ContractError::InvalidContract(
+                "Tool authorization inspection workflow or platform evidence is invalid",
+            ));
+        }
+        self.runtime_identity.validate()?;
+        validate_versioned_ref(
+            &self.task_contract,
+            "Tool authorization inspection TaskContract is invalid",
+        )?;
+        self.argument_hash.validate()?;
+        self.proposal_hash.validate()?;
+        self.permit_hash.validate()?;
+        self.policy.validate()?;
+        self.capability_scope_hash.validate()?;
+        self.limits.validate()?;
+        self.scopes.validate(&self.summary)
+    }
+}
+
 /// Hashes one validated Tool manifest.
 ///
 /// # Errors
@@ -727,6 +927,21 @@ pub fn tool_invocation_permit_hash(
         ToolInvocationPermit::TYPE_ID,
         TOOL_INVOCATION_PERMIT_HASH_DOMAIN,
         permit,
+    )
+}
+
+/// Hashes one complete validated capability set without exposing its raw scope list.
+///
+/// # Errors
+/// Returns a contract error when validation or canonical encoding fails.
+pub fn tool_capability_set_hash(
+    capabilities: &ToolCapabilitySet,
+) -> Result<ContentHash, ContractError> {
+    capabilities.validate()?;
+    canonical_contract_hash(
+        "mcg.tool_capability_set.v1",
+        TOOL_CAPABILITY_SET_HASH_DOMAIN,
+        capabilities,
     )
 }
 
@@ -1072,5 +1287,45 @@ mod tests {
         let mut set = capabilities();
         set.secret_slots = vec![invalid];
         assert!(set.validate().is_err());
+    }
+
+    #[test]
+    fn capability_scope_projection_is_bounded_and_exactly_hashed() {
+        let mut set = capabilities();
+        for index in 0..MAX_CAPABILITY_SCOPE_PREVIEW_ITEMS {
+            set.filesystem.push(FilesystemCapability {
+                root: format!("C:/workspace/extra-{index}"),
+                access: FilesystemAccess::Read,
+            });
+        }
+        set.validate().expect("bounded exact capability set");
+        let exact_hash = tool_capability_set_hash(&set).expect("capability-set hash");
+        let preview = ToolCapabilityScopePreview::from_capabilities(&set);
+        assert_eq!(preview.filesystem.len(), MAX_CAPABILITY_SCOPE_PREVIEW_ITEMS);
+        assert!(preview.truncated.filesystem);
+        let summary = ToolAuthorizationSummary {
+            action_id: ActionId::new(),
+            permit_id: PermitId::new(),
+            attempt_id: crate::AttemptId::new(),
+            tool_manifest: tool_manifest().versioned_ref().expect("manifest ref"),
+            tool_name: "fixture.tool".into(),
+            effect_class: EffectClass::Observational,
+            filesystem_scope_count: u32::try_from(set.filesystem.len()).expect("scope count"),
+            network_scope_count: u32::try_from(set.network.len()).expect("scope count"),
+            secret_slot_count: u32::try_from(set.secret_slots.len()).expect("scope count"),
+            process_spawn: set.process_spawn,
+            state: ToolAuthorizationState::Active,
+            issued_at: Utc::now(),
+            expires_at: Utc::now() + chrono::Duration::minutes(1),
+        };
+        summary.validate().expect("summary");
+        preview.validate(&summary).expect("scope preview");
+
+        let mut substituted = set;
+        substituted.filesystem[0].root.push_str("-substituted");
+        assert_ne!(
+            exact_hash,
+            tool_capability_set_hash(&substituted).expect("substituted capability-set hash")
+        );
     }
 }

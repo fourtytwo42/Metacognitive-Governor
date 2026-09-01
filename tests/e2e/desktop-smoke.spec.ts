@@ -286,6 +286,44 @@ test.beforeEach(async ({ page }) => {
       }],
       model_runs_truncated: false
     };
+    const toolAuthorization = {
+      action_id: canonicalActionId,
+      permit_id: "00000000-0000-4000-8000-000000000633",
+      attempt_id: canonicalAttemptId,
+      tool_manifest: { id: "00000000-0000-4000-8000-000000000634", version: 1, content_hash: invocationHash("MetaCog.ToolManifest", "2") },
+      tool_name: "Governed filesystem",
+      effect_class: "reversible",
+      filesystem_scope_count: 1,
+      network_scope_count: 0,
+      secret_slot_count: 0,
+      process_spawn: false,
+      state: "active",
+      issued_at: now,
+      expires_at: "2026-08-18T00:05:00Z"
+    };
+    const toolAuthorizationInspection = {
+      summary: toolAuthorization,
+      runner: { source_type: "mcg.executable.v1", locator: "C:/Program Files/MetaCog/mcg-action-runner.exe", content_hash: invocationHash("MetaCog.ActionRunnerExecutable", "3") },
+      input_schema: { source_type: "mcg.schema.v1", locator: "governed-filesystem-input", content_hash: invocationHash("MetaCog.ToolInputSchema", "4") },
+      output_schema: { source_type: "mcg.schema.v1", locator: "governed-filesystem-output", content_hash: invocationHash("MetaCog.ToolOutputSchema", "5") },
+      receipt_semantics: "mcg.filesystem_receipt.v1",
+      reconciler: null,
+      platform_support: ["windows"],
+      runtime_identity: { instance_id: "runtime-generation-7", build_hash: invocationHash("MetaCog.RuntimeExecutable", "7"), protocol_version: 1, started_at: now },
+      runtime_actor: canonicalAction.actor,
+      task_contract: canonicalWorkflow.task_contract,
+      attempt_revision: 7,
+      lease_generation: 3,
+      argument_hash: invocationHash("MetaCog.ActionOperation", "6"),
+      proposal_hash: invocationHash("MetaCog.ToolInvocationProposal", "7"),
+      permit_hash: invocationHash("MetaCog.ToolInvocationPermit", "8"),
+      policy: { content_hash: invocationHash("MetaCog.ToolPolicy", "9"), payload: actionPayload },
+      capability_scope_hash: invocationHash("MetaCog.ToolCapabilitySet", "a"),
+      scopes: { filesystem: [{ root: "C:/Projects/consumer-app", access: "write" }], network: [], secret_slots: [], process_spawn: false, truncated: { filesystem: false, network: false, secret_slots: false } },
+      limits: { timeout_ms: 30000, max_output_bytes: 1048576, max_memory_bytes: 268435456, max_child_processes: 0 },
+      sandbox: { filesystem_scope: "hard", network: "hard", process_tree: "hard", secrets: "hard", environment: "hard", resources: "best_effort", protected_paths: "hard" },
+      platform: "windows"
+    };
     const history = [{ settings: initial, reason: "initial settings", changed_at: initial.updated_at }];
     Object.defineProperty(window, "__TAURI_INTERNALS__", {
       value: {
@@ -332,6 +370,8 @@ test.beforeEach(async ({ page }) => {
           }
           if (command === "protected_root_invocations") return [canonicalInvocation];
           if (command === "protected_root_invocation") return args.invocationId === canonicalInvocationId ? canonicalInvocationInspection : null;
+          if (command === "protected_root_capabilities") return [toolAuthorization];
+          if (command === "protected_root_capability") return args.actionId === canonicalActionId ? toolAuthorizationInspection : null;
           if (command === "list_global_agent_sessions") return { sessions: globalAgentSessions };
           if (command === "list_agent_runs") return { runs: [] };
           if (command === "cancel_protected_root_workflow") {
@@ -769,6 +809,42 @@ test("governed actions keep one Root truth across Simple Advanced and Developer"
   await expect(actions.getByText("Checking what happened", { exact: true })).toBeVisible();
   await expect(actions.getByRole("button", { name: "Inspect" })).toHaveCount(0);
   await expect(actions.getByRole("button", { name: "Canonical action evidence" })).toHaveCount(0);
+});
+
+test("Tool capabilities keep one bounded Root truth across Simple Advanced and Developer", async ({ page }) => {
+  test.setTimeout(90_000);
+  await page.goto("/");
+  await page.getByRole("link", { name: "Agents", exact: true }).click();
+
+  let capabilities = page.getByRole("article", { name: "Governed capabilities" });
+  await expect(capabilities.getByText("Governed filesystem", { exact: true })).toBeVisible();
+  await expect(capabilities.getByText("Bounded tool access · active", { exact: true })).toBeVisible();
+  await expect(capabilities.getByText(/1 filesystem/)).toHaveCount(0);
+  await expect(capabilities.getByRole("button", { name: "Inspect access" })).toHaveCount(0);
+
+  await enableAdvancedMode(page);
+  await page.getByRole("link", { name: "Agents", exact: true }).click();
+  capabilities = page.getByRole("article", { name: "Governed capabilities" });
+  await expect(capabilities.getByText(/1 filesystem · 0 network · 0 secret slots · process spawn denied/)).toBeVisible();
+  await capabilities.getByRole("button", { name: "Inspect access" }).click();
+  await expect(capabilities.getByText("C:/Projects/consumer-app", { exact: true })).toBeVisible();
+  await expect(capabilities.getByText(/Sandbox: filesystem hard · network hard · process tree hard · secrets hard/)).toBeVisible();
+  await expect(capabilities.getByRole("button", { name: "Exact capability evidence" })).toHaveCount(0);
+
+  await openOwnerSurface(page, "Settings");
+  await page.getByRole("button", { name: "General", exact: true }).click();
+  await page.getByRole("radio", { name: /Developer/ }).click();
+  await page.getByRole("button", { name: "Back to app" }).click();
+  await page.getByRole("link", { name: "Agents", exact: true }).click();
+  capabilities = page.getByRole("article", { name: "Governed capabilities" });
+  await capabilities.getByRole("button", { name: "Exact capability evidence" }).click();
+  const evidence = capabilities.getByRole("textbox", { name: /Tool authorization .* evidence/ });
+  await expect(evidence).toContainText("MetaCog.ToolInvocationPermit");
+  await expect(evidence).toContainText("capability_scope_hash");
+  await expect(evidence).not.toContainText("secret_handles");
+  await expect(evidence).not.toContainText("arguments");
+  const accessibility = await new AxeBuilder({ page }).include(".governed-capability-section").analyze();
+  expect(accessibility.violations, "governed-capability accessibility violations").toEqual([]);
 });
 
 test("Runtime invocations keep one Root truth across Simple Advanced and Developer", async ({ page }) => {

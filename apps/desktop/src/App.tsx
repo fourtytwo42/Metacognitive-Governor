@@ -214,6 +214,8 @@ import {
   compensateProtectedRootAction,
   listProtectedRootInvocations,
   getProtectedRootInvocation,
+  listProtectedRootCapabilities,
+  getProtectedRootCapability,
   cancelProtectedRootWorkflow,
   getGovernorOverview,
   getGovernorControlPolicy,
@@ -426,6 +428,8 @@ import {
   type CanonicalSourceRef,
   type CanonicalInvocationSummary,
   type CanonicalInvocationInspection,
+  type ToolAuthorizationSummary,
+  type ToolAuthorizationInspection,
   type CanonicalModelRunState,
   type ActionExecutionState,
   type WorkflowState,
@@ -2663,6 +2667,10 @@ export function App() {
   const [focusedInvocationId, setFocusedInvocationId] = useState<string | null>(null);
   const [invocationBusy, setInvocationBusy] = useState<string | null>(null);
   const [invocationError, setInvocationError] = useState<string | null>(null);
+  const [toolAuthorizations, setToolAuthorizations] = useState<ToolAuthorizationSummary[]>([]);
+  const [toolAuthorizationInspections, setToolAuthorizationInspections] = useState<Record<string, ToolAuthorizationInspection>>({});
+  const [capabilityBusy, setCapabilityBusy] = useState<string | null>(null);
+  const [capabilityError, setCapabilityError] = useState<string | null>(null);
   const [advanced, setAdvanced] = useState(false);
   const [userSettings, setUserSettings] = useState<UserSettings | null>(null);
   const [settingsHistory, setSettingsHistory] = useState<UserSettingsRevision[]>([]);
@@ -4240,6 +4248,32 @@ export function App() {
     }
   }
 
+  async function refreshToolAuthorizations() {
+    setCapabilityBusy("list");
+    setCapabilityError(null);
+    try {
+      setToolAuthorizations(await listProtectedRootCapabilities());
+    } catch (error) {
+      setCapabilityError(errorMessage(error));
+    } finally {
+      setCapabilityBusy(null);
+    }
+  }
+
+  async function inspectToolAuthorization(actionId: string) {
+    setCapabilityBusy(actionId);
+    setCapabilityError(null);
+    try {
+      const inspection = await getProtectedRootCapability(actionId);
+      if (!inspection) throw new Error(`Tool authorization for action ${actionId} was not found.`);
+      setToolAuthorizationInspections((current) => ({ ...current, [actionId]: inspection }));
+    } catch (error) {
+      setCapabilityError(errorMessage(error));
+    } finally {
+      setCapabilityBusy(null);
+    }
+  }
+
   useEffect(() => {
     let active = true;
     getLocalServiceStatus()
@@ -4282,6 +4316,13 @@ export function App() {
       })
       .catch((error) => {
         if (active) setInvocationError(errorMessage(error));
+      });
+    listProtectedRootCapabilities()
+      .then((capabilities) => {
+        if (active) setToolAuthorizations(capabilities);
+      })
+      .catch((error) => {
+        if (active) setCapabilityError(errorMessage(error));
       });
     getUpdateConfiguration()
       .then((configuration) => {
@@ -9317,6 +9358,43 @@ export function App() {
                       {userSettings?.interface_complexity === "developer" && <TechnicalDetails title="Canonical action evidence" summary={`${inspection.events.length} Root-owned events`}>
                         <p className="form-note">Read-only canonical evidence. Developer mode exposes exact intent, execution, receipt, reconciliation, correlation, and causation records without granting Root mutation authority.</p>
                         <pre aria-label={`Canonical action ${action.action_id} evidence`} aria-readonly="true" role="textbox" tabIndex={0}>{JSON.stringify(inspection, null, 2)}</pre>
+                      </TechnicalDetails>}
+                    </div>}
+                  </div>;
+                })}
+              </div>}
+            </article>
+
+            <article className="agent-section-card governed-capability-section" aria-label="Governed capabilities">
+              <div className="section-heading compact-heading">
+                <div><h3>Governed capabilities</h3><p className="muted">{advanced ? "Inspect the exact bounded access Protected Root issued to physical Tool execution." : "MetaCog keeps tool access limited to what each action needs."}</p></div>
+                <button className="secondary" type="button" disabled={capabilityBusy !== null} onClick={() => void refreshToolAuthorizations()}>{capabilityBusy === "list" ? "Refreshing…" : "Refresh"}</button>
+              </div>
+              {capabilityError && <p className="error-message" role="alert">{capabilityError}</p>}
+              {toolAuthorizations.length === 0 ? <p className="empty-state">No governed tool activity yet.</p> : <div className="instance-list">
+                {toolAuthorizations.map((authorization) => {
+                  const inspection = toolAuthorizationInspections[authorization.action_id];
+                  return <div className="instance-row governed-capability-row" key={authorization.permit_id} data-capability-state={authorization.state}>
+                    <span>
+                      <strong>{authorization.tool_name}</strong>
+                      <small>{advanced ? `${authorization.state.replaceAll("_", " ")} · ${authorization.effect_class.replaceAll("_", " ")} access` : `Bounded tool access · ${authorization.state.replaceAll("_", " ")}`}</small>
+                      {advanced && <small>{authorization.filesystem_scope_count} filesystem · {authorization.network_scope_count} network · {authorization.secret_slot_count} secret slot{authorization.secret_slot_count === 1 ? "" : "s"} · process spawn {authorization.process_spawn ? "allowed" : "denied"}</small>}
+                    </span>
+                    {advanced && <div className="memory-actions">
+                      <button className="secondary" type="button" disabled={capabilityBusy !== null} onClick={() => void inspectToolAuthorization(authorization.action_id)}>{capabilityBusy === authorization.action_id ? "Loading…" : inspection ? "Refresh evidence" : "Inspect access"}</button>
+                    </div>}
+                    {advanced && inspection && <div className="action-inspection capability-inspection">
+                      <p><strong>Manifest</strong> {authorization.tool_name} v{authorization.tool_manifest.version} · <code>{authorization.tool_manifest.content_hash.digest_hex.slice(0, 12)}…</code></p>
+                      <p>Workflow fence revision {inspection.attempt_revision} · generation {inspection.lease_generation} · {inspection.platform}</p>
+                      {inspection.scopes.filesystem.map((scope) => <p key={`${scope.access}-${scope.root}`}><strong>Filesystem {scope.access}</strong> <code>{scope.root}</code></p>)}
+                      {inspection.scopes.network.map((scope) => <p key={scope.destination}><strong>Network</strong> <code>{scope.destination}</code></p>)}
+                      {inspection.scopes.secret_slots.map((slot) => <p key={slot}><strong>Secret slot type</strong> <code>{slot}</code></p>)}
+                      {(inspection.scopes.truncated.filesystem || inspection.scopes.truncated.network || inspection.scopes.truncated.secret_slots) && <p className="warning-box">The scope preview is bounded; the exact complete scope hash remains available in Developer evidence.</p>}
+                      <p>Sandbox: filesystem {inspection.sandbox.filesystem_scope.replaceAll("_", " ")} · network {inspection.sandbox.network.replaceAll("_", " ")} · process tree {inspection.sandbox.process_tree.replaceAll("_", " ")} · secrets {inspection.sandbox.secrets.replaceAll("_", " ")}</p>
+                      <button className="link-button" type="button" disabled={actionBusy !== null} onClick={() => void inspectCanonicalAction(authorization.action_id)}>Load governed action evidence →</button>
+                      {userSettings?.interface_complexity === "developer" && <TechnicalDetails title="Exact capability evidence" summary={`Permit ${authorization.permit_id.slice(0, 8)} · read-only`}>
+                        <p className="form-note">Exact content-minimized manifest, runner, workflow fence, policy, scope, proposal, argument, and permit hashes. Raw arguments, credential values, opaque secret handles, database access, and Root mutation authority are excluded.</p>
+                        <pre aria-label={`Tool authorization ${authorization.action_id} evidence`} aria-readonly="true" role="textbox" tabIndex={0}>{JSON.stringify(inspection, null, 2)}</pre>
                       </TechnicalDetails>}
                     </div>}
                   </div>;

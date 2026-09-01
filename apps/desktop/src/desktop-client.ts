@@ -1271,6 +1271,53 @@ export interface CanonicalActionSummary {
   updated_at: string;
 }
 
+export type ToolAuthorizationState = "not_yet_active" | "active" | "workflow_inactive" | "expired";
+export interface ToolAuthorizationSummary {
+  action_id: string;
+  permit_id: string;
+  attempt_id: string;
+  tool_manifest: { id: string; version: number; content_hash: { algorithm: string; domain: string; digest_hex: string } };
+  tool_name: string;
+  effect_class: ActionEffectClass;
+  filesystem_scope_count: number;
+  network_scope_count: number;
+  secret_slot_count: number;
+  process_spawn: boolean;
+  state: ToolAuthorizationState;
+  issued_at: string;
+  expires_at: string;
+}
+
+export interface ToolAuthorizationInspection {
+  summary: ToolAuthorizationSummary;
+  runner: CanonicalSourceRef;
+  input_schema: CanonicalSourceRef;
+  output_schema: CanonicalSourceRef;
+  receipt_semantics: string;
+  reconciler: CanonicalSourceRef | null;
+  platform_support: Array<"windows" | "macos" | "linux">;
+  runtime_identity: { instance_id: string; build_hash: { algorithm: string; domain: string; digest_hex: string }; protocol_version: number; started_at: string };
+  runtime_actor: string;
+  task_contract: { id: string; version: number; content_hash: { algorithm: string; domain: string; digest_hex: string } };
+  attempt_revision: number;
+  lease_generation: number;
+  argument_hash: { algorithm: string; domain: string; digest_hex: string };
+  proposal_hash: { algorithm: string; domain: string; digest_hex: string };
+  permit_hash: { algorithm: string; domain: string; digest_hex: string };
+  policy: { content_hash: { algorithm: string; domain: string; digest_hex: string }; payload: CanonicalVersionedPayload };
+  capability_scope_hash: { algorithm: string; domain: string; digest_hex: string };
+  scopes: {
+    filesystem: Array<{ root: string; access: "read" | "write" }>;
+    network: Array<{ destination: string }>;
+    secret_slots: string[];
+    process_spawn: boolean;
+    truncated: { filesystem: boolean; network: boolean; secret_slots: boolean };
+  };
+  limits: { timeout_ms: number; max_output_bytes: number; max_memory_bytes: number; max_child_processes: number };
+  sandbox: { filesystem_scope: string; network: string; process_tree: string; secrets: string; environment: string; resources: string; protected_paths: string };
+  platform: "windows" | "macos" | "linux";
+}
+
 export interface CanonicalVersionedPayload {
   type_id: string;
   schema_version: number;
@@ -2247,6 +2294,14 @@ export function listProtectedRootInvocations(limit = 100): Promise<CanonicalInvo
 
 export function getProtectedRootInvocation(invocationId: string, modelRunLimit = 100): Promise<CanonicalInvocationInspection | null> {
   return invoke("protected_root_invocation", { invocationId, modelRunLimit });
+}
+
+export function listProtectedRootCapabilities(limit = 100): Promise<ToolAuthorizationSummary[]> {
+  return invoke("protected_root_capabilities", { limit });
+}
+
+export function getProtectedRootCapability(actionId: string): Promise<ToolAuthorizationInspection | null> {
+  return invoke("protected_root_capability", { actionId });
 }
 
 export function cancelProtectedRootWorkflow(request: CanonicalWorkflowCancelRequest): Promise<CanonicalWorkflowAttempt> {

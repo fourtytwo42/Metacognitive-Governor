@@ -56,10 +56,13 @@ use mcg_contracts::{
 };
 use mcg_domain::{AgentLeaseId, EvaluationId};
 use mcg_platform::{
-    MAX_ROOT_INVOCATION_MODEL_RUNS, MAX_ROOT_INVOCATION_SUMMARIES, MAX_ROOT_WORKFLOW_INVOCATIONS,
-    PlatformError, ROOT_ACTION_COMPENSATE_REQUEST_TYPE, ROOT_ACTION_COMPENSATE_RESPONSE_TYPE,
+    MAX_ROOT_INVOCATION_MODEL_RUNS, MAX_ROOT_INVOCATION_SUMMARIES,
+    MAX_ROOT_TOOL_AUTHORIZATION_SUMMARIES, MAX_ROOT_WORKFLOW_INVOCATIONS, PlatformError,
+    ROOT_ACTION_COMPENSATE_REQUEST_TYPE, ROOT_ACTION_COMPENSATE_RESPONSE_TYPE,
     ROOT_ACTION_LIST_REQUEST_TYPE, ROOT_ACTION_LIST_RESPONSE_TYPE, ROOT_ACTION_SHOW_REQUEST_TYPE,
-    ROOT_ACTION_SHOW_RESPONSE_TYPE, ROOT_INVOCATION_LIST_REQUEST_TYPE,
+    ROOT_ACTION_SHOW_RESPONSE_TYPE, ROOT_CAPABILITY_LIST_REQUEST_TYPE,
+    ROOT_CAPABILITY_LIST_RESPONSE_TYPE, ROOT_CAPABILITY_SHOW_REQUEST_TYPE,
+    ROOT_CAPABILITY_SHOW_RESPONSE_TYPE, ROOT_INVOCATION_LIST_REQUEST_TYPE,
     ROOT_INVOCATION_LIST_RESPONSE_TYPE, ROOT_INVOCATION_SHOW_REQUEST_TYPE,
     ROOT_INVOCATION_SHOW_RESPONSE_TYPE, ROOT_STATUS_REQUEST_TYPE, ROOT_STATUS_RESPONSE_TYPE,
     ROOT_WORKFLOW_ACTIVITY_REQUEST_TYPE, ROOT_WORKFLOW_ACTIVITY_RESPONSE_TYPE,
@@ -4184,6 +4187,16 @@ struct InvocationShowRequest {
     model_run_limit: usize,
 }
 
+#[derive(serde::Deserialize)]
+struct CapabilityListRequest {
+    limit: usize,
+}
+
+#[derive(serde::Deserialize)]
+struct CapabilityShowRequest {
+    action_id: ActionId,
+}
+
 impl ReplayWindow {
     fn insert(&mut self, request_id: RequestId) -> bool {
         if !self.seen.insert(request_id) {
@@ -4326,6 +4339,8 @@ where
             | ROOT_ACTION_COMPENSATE_REQUEST_TYPE
             | ROOT_INVOCATION_LIST_REQUEST_TYPE
             | ROOT_INVOCATION_SHOW_REQUEST_TYPE
+            | ROOT_CAPABILITY_LIST_REQUEST_TYPE
+            | ROOT_CAPABILITY_SHOW_REQUEST_TYPE
     );
     if !session.verifies(&request.session_capability)
         || request.envelope.session_id != session.session_id
@@ -4486,6 +4501,23 @@ async fn dispatch_root_ipc_request(
                 )?,
             )
         }
+        ROOT_CAPABILITY_LIST_REQUEST_TYPE => {
+            let list: CapabilityListRequest = serde_json::from_value(request_value)?;
+            if list.limit == 0 || list.limit > MAX_ROOT_TOOL_AUTHORIZATION_SUMMARIES {
+                return Err(PlatformError::InvalidInspectionBound.into());
+            }
+            (
+                ROOT_CAPABILITY_LIST_RESPONSE_TYPE,
+                serde_json::to_value(runtime.tool_authorizations(list.limit, Utc::now())?)?,
+            )
+        }
+        ROOT_CAPABILITY_SHOW_REQUEST_TYPE => {
+            let show: CapabilityShowRequest = serde_json::from_value(request_value)?;
+            (
+                ROOT_CAPABILITY_SHOW_RESPONSE_TYPE,
+                serde_json::to_value(runtime.tool_authorization(show.action_id, Utc::now())?)?,
+            )
+        }
         _ => return Err(PlatformError::InvalidSession.into()),
     })
 }
@@ -4613,7 +4645,8 @@ mod tests {
     use mcg_domain::{AgentInstanceId, RunId, TaskEnvelope, TaskState};
     use mcg_platform::{
         cancel_root_workflow, exchange_root_rpc, query_root_action, query_root_actions,
-        query_root_invocation, query_root_invocations, query_root_status, query_root_workflow,
+        query_root_capabilities, query_root_capability, query_root_invocation,
+        query_root_invocations, query_root_status, query_root_workflow,
         query_root_workflow_activity, query_root_workflows, root_ipc_session_path,
     };
     use mcg_providers::{
@@ -8039,6 +8072,45 @@ mod tests {
         assert!(inspection.receipts.is_empty());
         assert!(inspection.reconciliation_jobs.is_empty());
         assert_eq!(inspection.events.len(), 1);
+
+        server.abort();
+        remove_root_ipc_session(temporary.path(), session.session_id);
+    }
+
+    #[tokio::test]
+    async fn authenticated_local_ipc_projects_bounded_tool_authority_without_secret_handles() {
+        let (temporary, _config, runtime, execution, _actor, now) = authorized_filesystem_fixture();
+        execute_authorized_filesystem_action(
+            &runtime,
+            &ScriptedActionGateway(GatewayOutcome::LaunchFailed),
+            execution.id,
+            execution.revision,
+            execution.lease_generation,
+            RuntimeActorId::new(),
+            now,
+        )
+        .await
+        .expect("persist Tool authority before launch failure");
+        let session = create_root_ipc_session(temporary.path()).expect("IPC session");
+        let server = start_root_ipc(runtime, session.clone()).expect("IPC server");
+
+        let summaries = query_root_capabilities(temporary.path(), 10)
+            .await
+            .expect("Tool authorization list");
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].action_id, execution.action_id);
+        let inspection = query_root_capability(temporary.path(), execution.action_id)
+            .await
+            .expect("Tool authorization show")
+            .expect("Tool authorization inspection");
+        assert_eq!(inspection.summary, summaries[0]);
+        assert_eq!(inspection.scopes.filesystem.len(), 1);
+        assert_eq!(inspection.scopes.network.len(), 0);
+        assert!(!inspection.scopes.process_spawn);
+        let serialized = serde_json::to_string(&inspection).expect("serialize inspection");
+        assert!(!serialized.contains("secret_handles"));
+        assert!(!serialized.contains("arguments"));
+        assert!(query_root_capabilities(temporary.path(), 0).await.is_err());
 
         server.abort();
         remove_root_ipc_session(temporary.path(), session.session_id);
