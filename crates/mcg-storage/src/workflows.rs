@@ -13,11 +13,14 @@ use mcg_contracts::{
     WorkflowSourceAttachment, WorkflowState, decode_canonical_cbor_v1,
 };
 use mcg_domain::{
-    AgentLeaseId, PluginInstallation, PluginInvocationId, PluginInvocationRecord,
-    PluginInvocationState, PluginRevision, RunId, TaskEnvelope, TaskState, WorkItemId,
+    AgentLeaseId, ApprovalId, PluginInstallation, PluginInvocationId, PluginInvocationRecord,
+    PluginInvocationState, PluginRevision, RunId, TaskEnvelope, TaskId, TaskState, ToolRequestId,
+    WorkItemId,
 };
 use mcg_projects::ProjectModel;
+use mcg_tools::{ApprovalRequest, ApprovalState};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::{
@@ -35,6 +38,7 @@ const WORKFLOW_CREATED_TYPE_ID: &str = "mcg.workflow_created.v1";
 const WORKFLOW_CLAIMED_TYPE_ID: &str = "mcg.workflow_claimed.v1";
 const WORKFLOW_HEARTBEAT_TYPE_ID: &str = "mcg.workflow_heartbeat.v1";
 const WORKFLOW_LEASE_EXPIRED_TYPE_ID: &str = "mcg.workflow_lease_expired.v1";
+const WORKFLOW_WAIT_BOUND_TYPE_ID: &str = "mcg.workflow_wait_bound.v1";
 const WORKFLOW_WAIT_SATISFIED_TYPE_ID: &str = "mcg.workflow_wait_satisfied.v1";
 const WORKFLOW_CANCELLATION_RECOVERED_TYPE_ID: &str = "mcg.workflow_cancellation_recovered.v1";
 const WORKFLOW_RETRIED_TYPE_ID: &str = "mcg.workflow_retried.v1";
@@ -129,6 +133,23 @@ pub(crate) enum AgentTurnWorkflowSettlement {
     WaitingForApproval,
     WorkCompleted,
     Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct ApprovalWaitBinding {
+    schema_version: u16,
+    approval: SourceRef,
+    approval_id: ApprovalId,
+    tool_request_id: ToolRequestId,
+    task_id: TaskId,
+    compatibility_agent_lease_id: AgentLeaseId,
+    requested_at: DateTime<Utc>,
+    expires_at: DateTime<Utc>,
+}
+
+struct StoredApproval {
+    approval: ApprovalRequest,
+    resolved_at: Option<DateTime<Utc>>,
 }
 
 /// Computes the authoritative canonical hash for a task-contract version.
@@ -1216,6 +1237,196 @@ fn validate_successful_plugin_action(
     Ok(())
 }
 
+fn approval_wait_source(approval: &ApprovalRequest) -> Result<SourceRef, StorageError> {
+    let source_type = StableTypeId::parse("mcg.approval_wait_source.v1")
+        .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+    let payload = VersionedPayload::canonical_v1(
+        source_type.clone(),
+        &serde_json::json!({
+            "schema_version": approval.schema_version,
+            "approval_id": approval.id,
+            "tool_request_id": approval.tool_request_id,
+            "task_id": approval.task_id,
+            "action": approval.action,
+            "resource": approval.resource,
+            "reason": approval.reason,
+            "origin": approval.origin,
+            "requested_at": approval.requested_at,
+            "expires_at": approval.expires_at,
+        }),
+    )
+    .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+    Ok(SourceRef {
+        source_type,
+        locator: approval.id.to_string(),
+        content_hash: payload
+            .content_hash("MetaCog.ApprovalWaitSource")
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?,
+    })
+}
+
+fn approval_wait_binding(
+    approval: &ApprovalRequest,
+    lease_id: AgentLeaseId,
+) -> Result<ApprovalWaitBinding, StorageError> {
+    Ok(ApprovalWaitBinding {
+        schema_version: 1,
+        approval: approval_wait_source(approval)?,
+        approval_id: approval.id,
+        tool_request_id: approval.tool_request_id,
+        task_id: approval.task_id,
+        compatibility_agent_lease_id: lease_id,
+        requested_at: approval.requested_at,
+        expires_at: approval.expires_at,
+    })
+}
+
+fn load_stored_approval(
+    transaction: &Transaction<'_>,
+    request_id: ToolRequestId,
+) -> Result<Option<StoredApproval>, StorageError> {
+    let row = transaction
+        .query_row(
+            "SELECT state, approval_json, resolved_at FROM approvals WHERE tool_request_id = ?1",
+            [request_id.to_string()],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((state, json, resolved_at)) = row else {
+        return Ok(None);
+    };
+    let approval: ApprovalRequest = serde_json::from_str(&json)?;
+    if state != crate::approval_state_name(approval.state) {
+        return Err(StorageError::Conflict(
+            "approval row state disagrees with its durable evidence".into(),
+        ));
+    }
+    let resolved_at = resolved_at
+        .map(|value| {
+            DateTime::parse_from_rfc3339(&value)
+                .map(|value| value.with_timezone(&Utc))
+                .map_err(|error| {
+                    StorageError::InvalidData(format!(
+                        "stored approval resolution timestamp is invalid: {error}"
+                    ))
+                })
+        })
+        .transpose()?;
+    Ok(Some(StoredApproval {
+        approval,
+        resolved_at,
+    }))
+}
+
+fn load_approval_wait_binding_for_lease(
+    transaction: &Transaction<'_>,
+    lease_id: AgentLeaseId,
+    now: DateTime<Utc>,
+) -> Result<ApprovalWaitBinding, StorageError> {
+    let source = load_active_agent_turn_source(transaction, lease_id, now)?;
+    let checkpoint = transaction
+        .query_row(
+            "SELECT pending_tool_request_id, checkpoint_json FROM agent_turn_checkpoints
+             WHERE lease_id = ?1 AND run_id = ?2 AND instance_id = ?3 AND task_id = ?4",
+            params![
+                lease_id.to_string(),
+                source.run.id.to_string(),
+                source.instance.id.to_string(),
+                source.task.id.to_string(),
+            ],
+            |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()?
+        .ok_or_else(|| {
+            StorageError::Conflict(
+                "approval-waiting agent has no exact pending tool-request checkpoint".into(),
+            )
+        })?;
+    let request_id = checkpoint
+        .0
+        .ok_or_else(|| {
+            StorageError::Conflict(
+                "approval-waiting agent checkpoint has no pending tool request".into(),
+            )
+        })?
+        .parse::<ToolRequestId>()
+        .map_err(|_| {
+            StorageError::InvalidData("pending approval tool-request id is invalid".into())
+        })?;
+    let checkpoint_json: serde_json::Value = serde_json::from_str(&checkpoint.1)?;
+    if checkpoint_json.get("pending_tool_request_id") != Some(&serde_json::json!(request_id))
+        || checkpoint_json.pointer("/request/instance/id")
+            != Some(&serde_json::json!(source.instance.id))
+        || checkpoint_json.pointer("/request/instance/run_id")
+            != Some(&serde_json::json!(source.run.id))
+        || checkpoint_json.pointer("/request/instance/task_id")
+            != Some(&serde_json::json!(source.task.id))
+        || checkpoint_json.pointer("/request/lease/id") != Some(&serde_json::json!(source.lease.id))
+        || checkpoint_json.pointer("/request/lease/instance_id")
+            != Some(&serde_json::json!(source.instance.id))
+    {
+        return Err(StorageError::Conflict(
+            "approval-waiting checkpoint evidence is missing or substituted".into(),
+        ));
+    }
+    let stored = load_stored_approval(transaction, request_id)?.ok_or_else(|| {
+        StorageError::Conflict("approval-waiting checkpoint has no durable approval".into())
+    })?;
+    if stored.approval.state != ApprovalState::Pending
+        || stored.resolved_at.is_some()
+        || stored.approval.task_id != source.task.id
+        || stored.approval.expires_at <= now
+    {
+        return Err(StorageError::Conflict(
+            "approval wait source is stale, resolved, expired, or belongs to another task".into(),
+        ));
+    }
+    approval_wait_binding(&stored.approval, lease_id)
+}
+
+fn load_current_approval_wait_binding(
+    transaction: &Transaction<'_>,
+    attempt: &WorkflowAttempt,
+) -> Result<ApprovalWaitBinding, StorageError> {
+    let event_json = transaction
+        .query_row(
+            "SELECT event_json FROM workflow_events
+             WHERE workflow_id = ?1 ORDER BY sequence DESC LIMIT 1",
+            [attempt.workflow_id.to_string()],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .ok_or_else(|| StorageError::Conflict("approval wait has no binding event".into()))?;
+    let event: WorkflowEvent = serde_json::from_str(&event_json)?;
+    let payload = event_payload_value(&event)?;
+    if event.type_id.as_str() != WORKFLOW_WAIT_BOUND_TYPE_ID
+        || event.attempt_id != attempt.attempt_id
+        || event_attempt(&event)? != *attempt
+        || payload.get("attempt_id") != Some(&serde_json::json!(attempt.attempt_id))
+        || payload.get("to")
+            != Some(&serde_json::json!(WorkflowState::Waiting(
+                WaitReason::Approval
+            )))
+    {
+        return Err(StorageError::Conflict(
+            "approval wait binding event is missing or substituted".into(),
+        ));
+    }
+    serde_json::from_value(
+        payload
+            .get("approval_wait")
+            .cloned()
+            .ok_or_else(|| StorageError::Conflict("approval wait binding is missing".into()))?,
+    )
+    .map_err(StorageError::from)
+}
+
 fn resume_approval_wait_in_transaction(
     transaction: &Transaction<'_>,
     mut attempt: WorkflowAttempt,
@@ -1225,6 +1436,27 @@ fn resume_approval_wait_in_transaction(
     if attempt.state != WorkflowState::Waiting(WaitReason::Approval) {
         return Err(StorageError::Conflict(
             "only an approval-waiting workflow can resume through this path".into(),
+        ));
+    }
+    let binding = load_current_approval_wait_binding(transaction, &attempt)?;
+    if binding.compatibility_agent_lease_id != lease_id {
+        return Err(StorageError::Conflict(
+            "approval wake was bound to a different compatibility lease".into(),
+        ));
+    }
+    let stored = load_stored_approval(transaction, binding.tool_request_id)?
+        .ok_or_else(|| StorageError::Conflict("approval wake source no longer exists".into()))?;
+    let expected_binding = approval_wait_binding(&stored.approval, lease_id)?;
+    let resolved_at = stored.resolved_at.ok_or_else(|| {
+        StorageError::Conflict("approval wake source has no durable resolution".into())
+    })?;
+    if expected_binding != binding
+        || stored.approval.state != ApprovalState::Approved
+        || resolved_at < binding.requested_at
+        || resolved_at > binding.expires_at
+    {
+        return Err(StorageError::Conflict(
+            "approval wake source is unresolved, expired, or substituted".into(),
         ));
     }
     let expected_revision = attempt.revision;
@@ -1246,7 +1478,7 @@ fn resume_approval_wait_in_transaction(
         CorrelationId::new(),
         cause,
         &format!("resume-agent-lease:{lease_id}:{expected_revision}:{expected_generation}"),
-        WORKFLOW_TRANSITIONED_TYPE_ID,
+        WORKFLOW_WAIT_SATISFIED_TYPE_ID,
         now,
         &serde_json::json!({
             "attempt_id": attempt.attempt_id,
@@ -1254,11 +1486,34 @@ fn resume_approval_wait_in_transaction(
             "to": attempt.state,
             "cancellation_effects": null,
             "compatibility_agent_lease_id": lease_id,
+            "wait_reason": WaitReason::Approval,
+            "approval_wait": binding,
+            "approval_resolved_at": resolved_at,
             "attempt": attempt,
         }),
     )?;
     insert_event(transaction, &event)?;
     Ok(attempt)
+}
+
+/// Atomically satisfies the exact approval wake bound to an attached compatibility workflow.
+/// Absence of an attachment preserves pre-cutover compatibility behavior.
+pub(crate) fn resume_attached_agent_approval_wait_in_transaction(
+    transaction: &Transaction<'_>,
+    lease_id: AgentLeaseId,
+    now: DateTime<Utc>,
+) -> Result<Option<WorkflowAttempt>, StorageError> {
+    let source_type = stable_type_id("mcg.agent_turn_source.v1")?;
+    let Some(attachment) = load_workflow_source_attachment_by_source(
+        transaction,
+        source_type.as_str(),
+        &lease_id.to_string(),
+    )?
+    else {
+        return Ok(None);
+    };
+    let workflow = load_agent_turn_workflow_attachment(transaction, attachment)?;
+    resume_approval_wait_in_transaction(transaction, workflow.attempt, lease_id, now).map(Some)
 }
 
 /// Advances an attached compatibility-agent workflow inside the caller's legacy
@@ -1318,6 +1573,15 @@ pub(crate) fn settle_attached_agent_turn_workflow_in_transaction(
     }
     attempt.updated_at = now;
     update_attempt_cas(transaction, attempt, expected_revision, expected_generation)?;
+    let approval_wait = if settlement == AgentTurnWorkflowSettlement::WaitingForApproval {
+        Some(load_approval_wait_binding_for_lease(
+            transaction,
+            lease_id,
+            now,
+        )?)
+    } else {
+        None
+    };
     let (sequence, cause) = next_event_position(transaction, attempt.workflow_id)?;
     let event = workflow_event(
         attempt,
@@ -1325,7 +1589,11 @@ pub(crate) fn settle_attached_agent_turn_workflow_in_transaction(
         CorrelationId::new(),
         cause,
         &format!("settle-agent-lease:{lease_id}:{label}:{expected_revision}:{expected_generation}"),
-        WORKFLOW_TRANSITIONED_TYPE_ID,
+        if approval_wait.is_some() {
+            WORKFLOW_WAIT_BOUND_TYPE_ID
+        } else {
+            WORKFLOW_TRANSITIONED_TYPE_ID
+        },
         now,
         &serde_json::json!({
             "attempt_id": attempt.attempt_id,
@@ -1334,6 +1602,8 @@ pub(crate) fn settle_attached_agent_turn_workflow_in_transaction(
             "cancellation_effects": null,
             "compatibility_agent_lease_id": lease_id,
             "settlement": label,
+            "wait_reason": approval_wait.as_ref().map(|_| WaitReason::Approval),
+            "approval_wait": approval_wait,
             "attempt": attempt,
         }),
     )?;
@@ -4100,7 +4370,9 @@ mod tests {
 
     #[test]
     fn active_agent_lease_is_attached_from_exact_authoritative_source_rows() {
-        let mut store = SqliteEventStore::open_in_memory().unwrap();
+        let temporary = tempfile::tempdir().unwrap();
+        let database = temporary.path().join("approval-wake.sqlite3");
+        let mut store = SqliteEventStore::open(&database).unwrap();
         let observed_at = now();
         let task = TaskEnvelope::new("complete the compatibility agent turn");
         store.create_task(&task).unwrap();
@@ -4151,6 +4423,17 @@ mod tests {
             completed_at: None,
         };
         store.create_agent_run(&run, &plan).unwrap();
+        store
+            .connection
+            .execute(
+                "INSERT INTO task_launches(task_id, run_id, created_at) VALUES (?1, ?2, ?3)",
+                params![
+                    task.id.to_string(),
+                    run.id.to_string(),
+                    observed_at.to_rfc3339()
+                ],
+            )
+            .unwrap();
         let run = store
             .transition_agent_run(
                 run.id,
@@ -4281,6 +4564,54 @@ mod tests {
             "failed revalidation cannot mutate canonical authority"
         );
 
+        let tool_request_id = ToolRequestId::new();
+        let approval = ApprovalRequest {
+            schema_version: mcg_tools::TOOL_SCHEMA_VERSION,
+            id: ApprovalId::new(),
+            tool_request_id,
+            task_id: task.id,
+            action: "fixture.write".into(),
+            resource: "fixture.txt".into(),
+            reason: "exercise an exact canonical approval wake".into(),
+            origin: None,
+            state: ApprovalState::Pending,
+            requested_at: observed_at + chrono::Duration::seconds(1),
+            expires_at: observed_at + chrono::Duration::days(30),
+        };
+        store.create_approval(&approval).unwrap();
+        let checkpoint_json = serde_json::json!({
+            "schema_version": AGENT_RUN_SCHEMA_VERSION,
+            "request": {
+                "instance": {
+                    "id": instance.id,
+                    "run_id": run.id,
+                    "task_id": task.id,
+                },
+                "lease": {
+                    "id": lease.id,
+                    "instance_id": instance.id,
+                },
+            },
+            "pending_tool_request_id": tool_request_id,
+        });
+        store
+            .connection
+            .execute(
+                "INSERT INTO agent_turn_checkpoints(
+                    lease_id, run_id, instance_id, task_id, pending_tool_request_id,
+                    checkpoint_json, updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    lease.id.to_string(),
+                    run.id.to_string(),
+                    instance.id.to_string(),
+                    task.id.to_string(),
+                    tool_request_id.to_string(),
+                    serde_json::to_string(&checkpoint_json).unwrap(),
+                    (observed_at + chrono::Duration::seconds(1)).to_rfc3339(),
+                ],
+            )
+            .unwrap();
         store
             .settle_agent_turn_error(
                 instance.id,
@@ -4298,26 +4629,104 @@ mod tests {
         assert_eq!(waiting.revision, 3);
         assert_eq!(waiting.lease_generation, 1);
         assert!(waiting.lease_owner.is_none());
+        let wait_event = store
+            .workflow_events(waiting.workflow_id)
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(wait_event.type_id.as_str(), WORKFLOW_WAIT_BOUND_TYPE_ID);
+        let wait_payload = event_payload_value(&wait_event).unwrap();
+        assert_eq!(
+            wait_payload["approval_wait"]["approval_id"],
+            serde_json::json!(approval.id)
+        );
+        drop(store);
+        let mut store = SqliteEventStore::open(&database).unwrap();
 
+        assert!(matches!(
+            store.resume_launched_agent_turn(task.id, observed_at + chrono::Duration::seconds(3)),
+            Err(StorageError::Conflict(_))
+        ));
+        assert_eq!(
+            store.workflow_attempt(waiting.attempt_id).unwrap().unwrap(),
+            waiting,
+            "an unresolved approval cannot wake canonical work"
+        );
         store
-            .transition_task(task.id, TaskState::Active)
-            .expect("resume compatibility task");
+            .resolve_approval(&mcg_tools::ApprovalResolution {
+                approval_id: approval.id,
+                state: ApprovalState::Approved,
+                resolved_by: "fixture-owner".into(),
+                reason: Some("approved for the wake test".into()),
+                resolved_at: observed_at + chrono::Duration::seconds(2),
+            })
+            .unwrap();
+        let valid_resolved_at = (observed_at + chrono::Duration::seconds(2)).to_rfc3339();
         store
-            .transition_agent_run(
-                run.id,
-                AgentRunState::Running,
-                OrganizationalMetrics::default(),
-                observed_at + chrono::Duration::seconds(3),
+            .connection
+            .execute(
+                "UPDATE approvals SET resolved_at = ?1 WHERE approval_id = ?2",
+                params![
+                    (observed_at + chrono::Duration::days(31)).to_rfc3339(),
+                    approval.id.to_string()
+                ],
             )
-            .expect("resume compatibility run");
+            .unwrap();
+        assert!(matches!(
+            store.resume_launched_agent_turn(task.id, observed_at + chrono::Duration::seconds(3)),
+            Err(StorageError::Conflict(_))
+        ));
         store
-            .transition_agent_instance(
-                instance.id,
-                AgentState::Running,
-                instance.confidence,
-                observed_at + chrono::Duration::seconds(3),
+            .connection
+            .execute(
+                "UPDATE approvals SET resolved_at = ?1 WHERE approval_id = ?2",
+                params![valid_resolved_at, approval.id.to_string()],
             )
-            .expect("resume compatibility instance");
+            .unwrap();
+        let approved_json: String = store
+            .connection
+            .query_row(
+                "SELECT approval_json FROM approvals WHERE approval_id = ?1",
+                [approval.id.to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let mut substituted: ApprovalRequest = serde_json::from_str(&approved_json).unwrap();
+        substituted.action = "substituted.action".into();
+        store
+            .connection
+            .execute(
+                "UPDATE approvals SET approval_json = ?1 WHERE approval_id = ?2",
+                params![
+                    serde_json::to_string(&substituted).unwrap(),
+                    approval.id.to_string()
+                ],
+            )
+            .unwrap();
+        assert!(matches!(
+            store.resume_launched_agent_turn(task.id, observed_at + chrono::Duration::seconds(3)),
+            Err(StorageError::Conflict(_))
+        ));
+        assert_eq!(
+            store.workflow_attempt(waiting.attempt_id).unwrap().unwrap(),
+            waiting,
+            "substituted approval evidence cannot wake canonical work"
+        );
+        store
+            .connection
+            .execute(
+                "UPDATE approvals SET approval_json = ?1 WHERE approval_id = ?2",
+                params![approved_json, approval.id.to_string()],
+            )
+            .unwrap();
+        store
+            .resume_launched_agent_turn(task.id, observed_at + chrono::Duration::seconds(3))
+            .expect("atomically satisfy the canonical wait and resume legacy projections");
+        let ready = store.workflow_attempt(waiting.attempt_id).unwrap().unwrap();
+        assert_eq!(ready.state, WorkflowState::Ready);
+        assert_eq!(ready.revision, 4);
+        assert_eq!(ready.lease_generation, 1);
+        assert!(ready.lease_owner.is_none());
         let resumed = store
             .claim_active_agent_lease_workflow(
                 lease.id,
@@ -4330,6 +4739,29 @@ mod tests {
         assert_eq!(resumed.workflow.attempt.revision, 5);
         assert_eq!(resumed.workflow.attempt.lease_generation, 2);
         assert_eq!(resumed.workflow.attempt.lease_owner, Some(owner));
+        let resume_events = store
+            .workflow_events(resumed.workflow.attempt.workflow_id)
+            .unwrap();
+        assert_eq!(
+            resume_events[resume_events.len() - 2].type_id.as_str(),
+            WORKFLOW_WAIT_SATISFIED_TYPE_ID
+        );
+        let replayed = store
+            .claim_active_agent_lease_workflow(
+                lease.id,
+                owner,
+                120,
+                observed_at + chrono::Duration::seconds(4),
+            )
+            .expect("same-owner wake replay");
+        assert_eq!(replayed.workflow.attempt, resumed.workflow.attempt);
+        assert_eq!(
+            store
+                .workflow_events(resumed.workflow.attempt.workflow_id)
+                .unwrap(),
+            resume_events,
+            "wake replay cannot append or redispatch"
+        );
 
         let target = ProviderModelRef {
             provider_id: "fixture-provider".into(),

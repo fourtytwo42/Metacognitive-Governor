@@ -25,6 +25,7 @@ use crate::{
     invocations::commit_completion_certificate_in_transaction,
     workflows::{
         AgentTurnVerificationTarget, AgentTurnWorkflowSettlement,
+        resume_attached_agent_approval_wait_in_transaction,
         settle_attached_agent_turn_workflow_in_transaction,
     },
 };
@@ -919,6 +920,7 @@ impl SqliteEventStore {
         instance.state = AgentState::Running;
         instance.updated_at = at;
         let transaction = self.connection.transaction()?;
+        resume_attached_agent_approval_wait_in_transaction(&transaction, lease.id, at)?;
         let changed = transaction.execute(
             "UPDATE agent_runs SET state = 'running', run_json = ?1, updated_at = ?2
              WHERE run_id = ?3 AND state = 'waiting'",
