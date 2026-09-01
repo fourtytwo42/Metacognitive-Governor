@@ -2,7 +2,7 @@
 
 **Status:** Root-bound model-egress permit kernel, deterministic Root gateway, and isolated credential-resolving OpenAI-compatible provider runner implemented; production caller migration, retry/stream/cancellation, product inspection, and the broader capability gateway remain open
 
-**Product checkpoints:** `0e4c0e8` (`Add Root-bound model egress permits`), `deb4136` (`Add deterministic permit-consuming provider gateway`), and `50f29fd` (`Add isolated governed provider runner`)
+**Product checkpoints:** `0e4c0e8` (`Add Root-bound model egress permits`), `deb4136` (`Add deterministic permit-consuming provider gateway`), `50f29fd` (`Add isolated governed provider runner`), and `ad378b6` (`Pin governed provider runner identity`)
 
 ## Authority boundary
 
