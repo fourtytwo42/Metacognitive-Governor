@@ -22,7 +22,7 @@ Schema 56 adds:
 - append-only `model_run_versions` plus a one-revision-at-a-time CAS head;
 - immutable `completion_certificates` and ordered Work/Verify invocation lineage.
 
-The storage API validates exact attempt, workflow, TaskContract, context, Runtime build, and invocation-role bindings. Model-run transitions are restricted to `Planned → Dispatched → terminal` or `Planned → Cancelled`; stale revisions, rewritten historical fields, late terminal rewinds, and idempotency substitution fail closed. A CompletionCertificate cannot be persisted until every named Work and Verify invocation has a completed model run under the same attempt and TaskContract.
+The storage API validates exact attempt, workflow, TaskContract, context, Runtime build, and invocation-role bindings. Model-run transitions are restricted to `Planned → Dispatched → terminal` or `Planned → Cancelled`; stale revisions, rewritten historical fields, late terminal rewinds, and idempotency substitution fail closed. A CompletionCertificate cannot be persisted until every named Work and Verify invocation has a completed model run under the same attempt and TaskContract. Root now persists the certificate and terminal workflow transition in one SQLite transaction; injected transition failure rolls the certificate back, and exact terminal replay returns the original evidence.
 
 Runtime receives no database handle through this slice. These APIs live only on the existing authoritative `SqliteEventStore`, which production opens through Protected Root.
 
@@ -205,7 +205,7 @@ Strict whole-storage Clippy still reaches the repository’s documented pre-exis
 
 Stage 5 is not complete until all of the following are implemented and qualified:
 
-1. Complete the compatibility-turn verification bridge: checkpoint `87887ae` now atomically moves approval waits to `Waiting(Approval)`, reclaims approved resumes under a fresh lease generation, moves a completed compatibility Work result to `Verifying`, and moves terminal errors or denied/cancelled approvals to `Failed` in the same transaction as the legacy projection. A completed Work response still cannot assert success: dispatch an independent Verify invocation over its exact evidence, persist a Root-owned CompletionCertificate, and settle the canonical terminal state.
+1. Complete the compatibility-turn verification bridge: checkpoint `87887ae` now atomically moves approval waits to `Waiting(Approval)`, reclaims approved resumes under a fresh lease generation, moves a completed compatibility Work result to `Verifying`, and moves terminal errors or denied/cancelled approvals to `Failed` in the same transaction as the legacy projection. Root's generic certificate-plus-terminal settlement is now itself atomic and exact-replay safe, and newly attached compatibility contracts bind acceptance clauses to the exact planned `SuccessCondition` values needed for objective report mapping. A completed Work response still cannot assert success: persist the immutable objective report, dispatch an independent Verify invocation over that exact evidence, and use the atomic Root certificate settlement together with the legacy task/run projection.
 2. Run packaged active cancellation/service replacement, direct remote-inventory transport qualification, broader combined workflow/Runtime crash injection, native GUI UAT, migration, and matched Windows/Linux/macOS package gates.
 
 No real provider is required for this stage’s correctness. Root-bound remote egress permits and secret handles begin in Stage 6.

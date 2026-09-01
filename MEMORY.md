@@ -2,6 +2,15 @@
 
 Durable project context lives here. Update this file whenever information should survive chat context compression or future agent handoff.
 
+### 2026-09-01 - Completion certificate and workflow settlement are atomic
+
+- Context: Generic Root completion persisted a valid `CompletionCertificate` and only then transitioned the canonical workflow in a second transaction, which could expose a certificate while leaving the attempt `Verifying`. Compatibility contracts also copied top-level task prose into acceptance clauses even though objective evaluation reports cover exact planned `SuccessCondition` values.
+- Decision: Add one storage transaction that validates completed role-correct Work/Verify lineage, persists or exactly replays the immutable certificate, and transitions the exact revision/generation-fenced Verifying attempt to its verdict-derived terminal state. Derive new compatibility acceptance clauses from the attached lease's exact planned success conditions, retaining the old task-prose fallback only when the plan has no conditions.
+- Files: `crates/mcg-storage/src/{invocations.rs,workflows.rs}`, `crates/mcg-runtime/src/lib.rs`, tracked NewPRD Stage 5/status/traceability documents, and `MEMORY.md`. The other agent's untracked `docs/NewPRD/STAGE_3_DURABLE_WORKFLOW.md` remains untouched.
+- Commands/tests: Injected workflow-update failure proves certificate rollback; exact terminal replay returns the original result; Storage 117/117, Runtime 111 active with two explicit Windows Sandbox qualifications ignored, Protected Root 15/15, and the real Runtime-worker process suite 11/11 pass. Formatting and diff checks pass. Strict whole-crate Clippy still stops in the recorded pre-existing Storage/Runtime/Codex documentation/size/style backlog; a focused output audit names none of the new completion helpers.
+- Result: The reusable Root certificate terminal-commit primitive no longer has a transaction gap, and new compatibility attempts expose objectively mappable acceptance criteria. This does not yet dispatch compatibility Verify or co-settle the legacy task/run evaluation.
+- Follow-up: Persist a stable immutable objective report, dispatch independent Verify for every attached completed lease using exact Work response/evaluation evidence, and atomically persist all certificates with canonical and legacy terminal projections.
+
 ### 2026-09-01 - Compatibility turns atomically enter canonical Verify or failure
 
 - Context: Protected Root governed each physical compatibility-agent model call, but the canonical attempt remained `Running` when the legacy turn committed, waited for approval, or failed. This allowed the canonical and compatibility projections to diverge across a crash and left approval resume bound to the original generation.

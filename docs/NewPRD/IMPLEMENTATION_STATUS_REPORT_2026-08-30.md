@@ -101,7 +101,7 @@ Checkpoint `87887ae` closes the next truthful state-alignment slice:
 - changed, expired, or otherwise stale canonical authority rejects and rolls back the legacy settlement, retaining the compatibility instance and lease for recovery;
 - legacy-only embedded/test callers without a schema-60 attachment retain their prior behavior.
 
-Focused wait/resume/success/failure/stale-authority coverage, Storage 116/116, Runtime 111 active with two explicit Windows Sandbox qualifications ignored, Protected Root 15/15, formatting, and diff checks pass. Independent Verify invocation, CompletionCertificate persistence, and terminal `Succeeded`/verified failure settlement remain open and must not be inferred from the completed Work response.
+Focused wait/resume/success/failure/stale-authority coverage passes. The next completion foundation makes generic Root certificate persistence plus terminal workflow transition one rollback-safe transaction, with injected-failure and exact-terminal-replay coverage; newly attached compatibility contracts also derive acceptance clauses from the exact planned `SuccessCondition` values rather than unrelated task prose. Storage is 117/117 and the real worker process suite is 11/11 at this checkpoint. Independent compatibility Verify dispatch, immutable objective-report preparation, and atomic co-settlement with the legacy task/run projection remain open and must not be inferred from the completed Work response.
 
 The pushed schema-55 and governed-runner checkpoints add:
 
