@@ -43,6 +43,7 @@ use mcg_contracts::{
     WorkflowAttempt, WorkflowCancelRequest, WorkflowId, WorkflowState, canonical_contract_hash,
     decode_canonical_cbor_v1,
 };
+use mcg_domain::AgentLeaseId;
 use mcg_platform::{
     MAX_ROOT_INVOCATION_MODEL_RUNS, MAX_ROOT_INVOCATION_SUMMARIES, MAX_ROOT_WORKFLOW_INVOCATIONS,
     PlatformError, ROOT_ACTION_COMPENSATE_REQUEST_TYPE, ROOT_ACTION_COMPENSATE_RESPONSE_TYPE,
@@ -68,12 +69,12 @@ use mcg_providers::{
 };
 use mcg_runtime::{AppRuntime, RuntimeError};
 use mcg_storage::{
-    ModelEgressAuthorizationReceipt, ModelSecretHandleBinding, ModelSecretSlot,
-    ReconciliationResolutionReceipt, RootMigrationReceipt, STORAGE_SCHEMA_VERSION, StorageError,
-    acquire_data_directory_lock, create_backup_bundle_from_snapshot, inspect_database_before_root,
-    model_descriptor_source_ref, model_destination_source_ref, model_disclosure_hash,
-    model_egress_policy_binding, model_proposal_hash, model_provider_source_ref,
-    snapshot_database_before_root,
+    AgentTurnWorkflowAttachment, ModelEgressAuthorizationReceipt, ModelSecretHandleBinding,
+    ModelSecretSlot, ReconciliationResolutionReceipt, RootMigrationReceipt, STORAGE_SCHEMA_VERSION,
+    StorageError, acquire_data_directory_lock, create_backup_bundle_from_snapshot,
+    inspect_database_before_root, model_descriptor_source_ref, model_destination_source_ref,
+    model_disclosure_hash, model_egress_policy_binding, model_proposal_hash,
+    model_provider_source_ref, snapshot_database_before_root,
 };
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -148,6 +149,23 @@ pub type RuntimeModelEgressAuthorizationReceipt = ModelEgressAuthorizationReceip
 pub struct GovernedModelProviderDispatchReceipt {
     pub response: ModelResponse,
     pub completed_run: mcg_storage::ModelRunRecord,
+}
+
+/// Creates or replays the canonical workflow authority for one active compatibility agent lease.
+///
+/// Protected Root accepts only the opaque legacy lease identity. The authoritative store derives
+/// the exact source snapshot, `TaskContract`, workflow, and attempt atomically, preventing Runtime
+/// from supplying broader or substituted authority.
+///
+/// # Errors
+/// Returns a protected-root error for unknown, inactive, expired, inconsistent, or unreadable
+/// legacy authority.
+pub fn attach_active_agent_lease_workflow(
+    runtime: &AppRuntime,
+    lease_id: AgentLeaseId,
+    now: chrono::DateTime<Utc>,
+) -> Result<AgentTurnWorkflowAttachment, ProtectedRootError> {
+    Ok(runtime.root_attach_active_agent_lease_workflow(lease_id, now)?)
 }
 
 #[derive(Debug, Clone)]

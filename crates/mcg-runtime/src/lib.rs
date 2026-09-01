@@ -149,13 +149,13 @@ use mcg_providers::{
 };
 use mcg_storage::{
     ActionAuthorizationReceipt, ActionExecutionRecoveryReport, AgentRecoveryReport,
-    AgentTurnDisposition, BackupMcpSecret, BackupProviderSecret, BackupSecretSnapshot,
-    DataDirectoryLock, ModelEgressAuthorizationReceipt, ModelSecretHandleBinding,
-    ReconciliationClaimReceipt, ReconciliationRecoveryReport, ReconciliationResolutionReceipt,
-    RecoveryReport, RootMigrationReceipt, RootOwnership, RuntimeResponseArtifact,
-    STORAGE_SCHEMA_VERSION, SqliteEventStore, StorageError, WorkflowRecoveryReport,
-    acquire_data_directory_lock, create_encrypted_backup_bundle_from_snapshot,
-    decrypt_backup_bundle_secrets,
+    AgentTurnDisposition, AgentTurnWorkflowAttachment, BackupMcpSecret, BackupProviderSecret,
+    BackupSecretSnapshot, DataDirectoryLock, ModelEgressAuthorizationReceipt,
+    ModelSecretHandleBinding, ReconciliationClaimReceipt, ReconciliationRecoveryReport,
+    ReconciliationResolutionReceipt, RecoveryReport, RootMigrationReceipt, RootOwnership,
+    RuntimeResponseArtifact, STORAGE_SCHEMA_VERSION, SqliteEventStore, StorageError,
+    WorkflowRecoveryReport, acquire_data_directory_lock,
+    create_encrypted_backup_bundle_from_snapshot, decrypt_backup_bundle_secrets,
 };
 pub use mcg_storage::{
     AgentTurnCommit, AutomaticExperimentDisposition, AutomaticExperimentOutcome,
@@ -3966,6 +3966,25 @@ impl AppRuntime {
     /// Returns a runtime error when workflow projections cannot be read.
     pub fn canonical_workflows(&self) -> Result<Vec<WorkflowAttempt>, RuntimeError> {
         Ok(self.store()?.workflow_attempts()?)
+    }
+
+    /// Root-only compatibility cutover for one active agent lease.
+    ///
+    /// The authoritative store derives every canonical identity, policy, hash, and snapshot from
+    /// the persisted compatibility authority. This facade intentionally accepts no caller-authored
+    /// contract material.
+    ///
+    /// # Errors
+    /// Returns a runtime error for missing, expired, inactive, inconsistent, or unreadable source
+    /// authority.
+    pub fn root_attach_active_agent_lease_workflow(
+        &self,
+        lease_id: AgentLeaseId,
+        now: DateTime<Utc>,
+    ) -> Result<AgentTurnWorkflowAttachment, RuntimeError> {
+        Ok(self
+            .store()?
+            .attach_active_agent_lease_workflow(lease_id, now)?)
     }
 
     /// Loads one canonical workflow with its exact TaskContract and ordered event history.

@@ -13,6 +13,7 @@ mcg-action-runner = { path = "../../apps/mcg-action-runner", default-features = 
 mcg-provider-runner = { path = "../../apps/mcg-provider-runner", default-features = false }
 mcg-config = { path = "../mcg-config" }
 mcg-contracts = { path = "../mcg-contracts" }
+mcg-domain = { path = "../mcg-domain" }
 mcg-platform = { path = "../mcg-platform" }
 mcg-providers = { path = "../mcg-providers" }
 mcg-runtime = { path = "../mcg-runtime" }

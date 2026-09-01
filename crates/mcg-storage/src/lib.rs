@@ -91,10 +91,13 @@ pub use invocations::RuntimeResponseArtifact;
 pub use plugins::PluginRecoveryReport;
 pub use scheduler::{ScheduleClaim, ScheduleWakeMutation};
 pub use shadow_workspaces::ShadowWorkspaceMutation;
-pub use workflows::{TaskContractHead, WorkflowRecoveryReport, task_contract_content_hash};
+pub use workflows::{
+    AgentTurnWorkflowAttachment, TaskContractHead, WorkflowRecoveryReport,
+    task_contract_content_hash,
+};
 
 type EventRow = (i64, String, i64, String, Option<String>, String, String);
-pub const STORAGE_SCHEMA_VERSION: i64 = 59;
+pub const STORAGE_SCHEMA_VERSION: i64 = 60;
 
 const MIGRATION_1: &str = r"
 CREATE TABLE IF NOT EXISTS events (
@@ -2181,6 +2184,35 @@ BEFORE DELETE ON model_secret_handle_bindings BEGIN
 END;
 ";
 
+const MIGRATION_60: &str = r"
+CREATE TABLE IF NOT EXISTS workflow_source_attachments (
+    source_type TEXT NOT NULL,
+    source_locator TEXT NOT NULL,
+    source_hash_json TEXT NOT NULL,
+    workflow_id TEXT NOT NULL UNIQUE,
+    attempt_id TEXT NOT NULL UNIQUE,
+    task_contract_id TEXT NOT NULL,
+    task_contract_version INTEGER NOT NULL CHECK(task_contract_version > 0),
+    task_contract_hash_json TEXT NOT NULL,
+    attachment_json TEXT NOT NULL,
+    attached_at TEXT NOT NULL,
+    PRIMARY KEY(source_type, source_locator),
+    FOREIGN KEY(attempt_id) REFERENCES workflow_attempts(attempt_id),
+    FOREIGN KEY(task_contract_id, task_contract_version)
+        REFERENCES task_contract_versions(task_contract_id, version)
+);
+CREATE INDEX IF NOT EXISTS workflow_source_attachments_contract
+    ON workflow_source_attachments(task_contract_id, task_contract_version);
+CREATE TRIGGER IF NOT EXISTS workflow_source_attachments_no_update
+BEFORE UPDATE ON workflow_source_attachments BEGIN
+    SELECT RAISE(FAIL, 'workflow source attachments are immutable evidence');
+END;
+CREATE TRIGGER IF NOT EXISTS workflow_source_attachments_no_delete
+BEFORE DELETE ON workflow_source_attachments BEGIN
+    SELECT RAISE(FAIL, 'workflow source attachments are durable evidence');
+END;
+";
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RootOwnership {
     pub runtime_identity: RuntimeIdentity,
@@ -2456,6 +2488,7 @@ impl SqliteEventStore {
             (57_i64, MIGRATION_57),
             (58_i64, MIGRATION_58),
             (59_i64, MIGRATION_59),
+            (60_i64, MIGRATION_60),
         ] {
             let applied = self.connection.query_row(
                 "SELECT EXISTS(SELECT 1 FROM mcg_schema WHERE version = ?1)",
@@ -6336,7 +6369,11 @@ mod tests {
             store
                 .connection
                 .execute_batch(
-                    "DROP TABLE completion_certificate_invocations;
+                    "DROP TABLE workflow_source_attachments;
+                     DROP TABLE model_secret_handle_bindings;
+                     DROP TABLE model_invocation_permits;
+                     DROP TABLE model_invocation_proposals;
+                     DROP TABLE completion_certificate_invocations;
                      DROP TABLE completion_certificates;
                      DROP TABLE model_run_heads;
                      DROP TABLE model_run_versions;
@@ -6354,7 +6391,7 @@ mod tests {
                      DROP TABLE task_contract_heads;
                      DROP TABLE task_contract_versions;
                      DROP TABLE root_ownership;
-                     DELETE FROM mcg_schema WHERE version IN (51, 52, 53, 54, 55, 56, 57, 58, 59);",
+                     DELETE FROM mcg_schema WHERE version IN (51, 52, 53, 54, 55, 56, 57, 58, 59, 60);",
                 )
                 .expect("downgrade fixture to schema 50");
         }

@@ -3863,7 +3863,11 @@ mod tests {
         rusqlite::Connection::open(&database)
             .unwrap()
             .execute_batch(
-                "DROP TABLE completion_certificate_invocations;
+                "DROP TABLE workflow_source_attachments;
+                 DROP TABLE model_secret_handle_bindings;
+                 DROP TABLE model_invocation_permits;
+                 DROP TABLE model_invocation_proposals;
+                 DROP TABLE completion_certificate_invocations;
                  DROP TABLE completion_certificates;
                  DROP TABLE model_run_heads;
                  DROP TABLE model_run_versions;
@@ -3871,7 +3875,7 @@ mod tests {
                  DROP TABLE context_manifests;
                  DROP INDEX action_envelopes_one_compensation;
                  ALTER TABLE action_envelopes DROP COLUMN compensates_action_id;
-                 DELETE FROM mcg_schema WHERE version IN (55, 56, 57, 58);",
+                 DELETE FROM mcg_schema WHERE version IN (55, 56, 57, 58, 59, 60);",
             )
             .unwrap();
 

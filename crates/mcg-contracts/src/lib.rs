@@ -752,6 +752,54 @@ impl WorkflowAttempt {
     }
 }
 
+pub const WORKFLOW_SOURCE_SNAPSHOT_HASH_DOMAIN: &str = "MetaCog.WorkflowSourceSnapshot";
+
+/// Immutable evidence that one pre-canonical product record was attached to one exact workflow.
+///
+/// The snapshot contains only the bounded source state observed at attachment time. It does not
+/// assert that older execution history was canonical or reconstruct details that were not retained.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowSourceAttachment {
+    pub schema_version: u32,
+    pub source: SourceRef,
+    pub source_snapshot: VersionedPayload,
+    pub workflow_id: WorkflowId,
+    pub attempt_id: AttemptId,
+    pub task_contract: VersionedRef<TaskContractId>,
+    pub attached_at: DateTime<Utc>,
+}
+
+impl WorkflowSourceAttachment {
+    pub const SCHEMA_VERSION: u32 = 1;
+    pub const TYPE_ID: &'static str = "mcg.workflow_source_attachment.v1";
+
+    /// Validates exact source/snapshot identity and canonical workflow references.
+    ///
+    /// # Errors
+    /// Returns an invalid-contract error for malformed, substituted, or unsupported evidence.
+    pub fn validate(&self) -> Result<(), ContractError> {
+        if self.schema_version != Self::SCHEMA_VERSION || self.task_contract.version == 0 {
+            return Err(ContractError::InvalidContract(
+                "workflow source attachment version is unsupported",
+            ));
+        }
+        self.source.validate()?;
+        self.source_snapshot.validate()?;
+        self.task_contract.content_hash.validate()?;
+        if self.source.source_type != self.source_snapshot.type_id
+            || self.source.content_hash
+                != self
+                    .source_snapshot
+                    .content_hash(WORKFLOW_SOURCE_SNAPSHOT_HASH_DOMAIN)?
+        {
+            return Err(ContractError::InvalidContract(
+                "workflow source attachment does not bind its exact snapshot",
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Ordered Root-owned workflow evidence. Projection consumers never author these events.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkflowEvent {
@@ -2699,6 +2747,51 @@ mod tests {
         assert_eq!(TaskContract::TYPE_ID, "mcg.task_contract.v1");
         assert_eq!(WorkflowAttempt::TYPE_ID, "mcg.workflow_attempt.v1");
         assert_eq!(WorkflowEvent::TYPE_ID, "mcg.workflow_event.v1");
+    }
+
+    #[test]
+    fn workflow_source_attachment_binds_the_exact_canonical_snapshot() {
+        let source_type = StableTypeId::parse("mcg.agent_turn_source.v1").unwrap();
+        let snapshot = VersionedPayload::canonical_v1(
+            source_type.clone(),
+            &json!({
+                "task_id": "task-1",
+                "run_id": "run-1",
+                "lease_id": "lease-1",
+                "task_sha256": "a".repeat(64),
+                "run_sha256": "b".repeat(64),
+                "lease_sha256": "c".repeat(64),
+            }),
+        )
+        .unwrap();
+        let mut attachment = WorkflowSourceAttachment {
+            schema_version: WorkflowSourceAttachment::SCHEMA_VERSION,
+            source: SourceRef {
+                source_type,
+                locator: "lease-1".into(),
+                content_hash: snapshot
+                    .content_hash(WORKFLOW_SOURCE_SNAPSHOT_HASH_DOMAIN)
+                    .unwrap(),
+            },
+            source_snapshot: snapshot,
+            workflow_id: WorkflowId::new(),
+            attempt_id: AttemptId::new(),
+            task_contract: VersionedRef {
+                id: TaskContractId::new(),
+                version: 1,
+                content_hash: fixture_hash("attached-task-contract"),
+            },
+            attached_at: Utc::now(),
+        };
+        attachment.validate().unwrap();
+
+        attachment.source.locator = "substituted-lease".into();
+        attachment.source_snapshot = VersionedPayload::canonical_v1(
+            attachment.source.source_type.clone(),
+            &json!({"lease_id": "substituted-lease"}),
+        )
+        .unwrap();
+        assert!(attachment.validate().is_err());
     }
 
     #[test]

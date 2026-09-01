@@ -1,10 +1,17 @@
 use chrono::{DateTime, Utc};
-use mcg_contracts::{
-    AttemptId, ContentHash, CorrelationId, EventId, RuntimeActorId, StableTypeId, TaskContract,
-    TaskContractId, TaskContractStatus, VersionedPayload, VersionedRef, WaitReason,
-    WorkflowAttempt, WorkflowEvent, WorkflowId, WorkflowState, decode_canonical_cbor_v1,
+use mcg_agents::{
+    AgentInstance, AgentLease, AgentLeaseState, AgentRun, AgentRunState, AgentState, WorkPlan,
 };
+use mcg_contracts::{
+    AttemptId, ConfigurationId, ContentHash, ContractClause, CorrelationId, EventId, PolicyBinding,
+    RetryPolicy, RuntimeActorId, SourceRef, StableTypeId, TaskContract, TaskContractId,
+    TaskContractStatus, VersionedPayload, VersionedRef, WORKFLOW_SOURCE_SNAPSHOT_HASH_DOMAIN,
+    WaitReason, WorkflowAttempt, WorkflowEvent, WorkflowId, WorkflowSourceAttachment,
+    WorkflowState, decode_canonical_cbor_v1,
+};
+use mcg_domain::{AgentLeaseId, TaskEnvelope, TaskState};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use sha2::{Digest, Sha256};
 
 use crate::{
     SqliteEventStore, StorageError,
@@ -40,6 +47,15 @@ pub struct TaskContractHead {
     pub revision: u64,
 }
 
+/// Atomic evidence that one active compatibility agent lease now has canonical authority.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentTurnWorkflowAttachment {
+    pub task_contract: TaskContract,
+    pub attempt: WorkflowAttempt,
+    pub attachment: WorkflowSourceAttachment,
+    pub creation_event: WorkflowEvent,
+}
+
 /// Computes the authoritative canonical hash for a task-contract version.
 ///
 /// # Errors
@@ -51,6 +67,101 @@ pub fn task_contract_content_hash(contract: &TaskContract) -> Result<ContentHash
     payload
         .content_hash(TASK_CONTRACT_HASH_DOMAIN)
         .map_err(|error| StorageError::InvalidData(error.to_string()))
+}
+
+fn create_workflow_in_transaction(
+    transaction: &Transaction<'_>,
+    contract: &TaskContract,
+    attempt: &WorkflowAttempt,
+    correlation_id: CorrelationId,
+    now: DateTime<Utc>,
+) -> Result<WorkflowEvent, StorageError> {
+    validate_initial_workflow(contract, attempt)?;
+    if let Some(existing) =
+        load_attempt_by_idempotency(transaction, attempt.workflow_id, &attempt.idempotency_key)?
+    {
+        let event =
+            load_event_by_idempotency(transaction, attempt.workflow_id, &attempt.idempotency_key)?
+                .ok_or_else(|| {
+                    StorageError::InvalidData(
+                        "workflow exists without its atomic creation event".into(),
+                    )
+                })?;
+        if event.type_id.as_str() != WORKFLOW_CREATED_TYPE_ID
+            || event_attempt(&event)? != *attempt
+            || existing.workflow_id != attempt.workflow_id
+        {
+            return Err(StorageError::Conflict(
+                "workflow create idempotency key was replayed with different content".into(),
+            ));
+        }
+        return Ok(event);
+    }
+
+    let contract_hash = task_contract_content_hash(contract)?;
+    if attempt.task_contract.content_hash != contract_hash {
+        return Err(StorageError::InvalidData(
+            "workflow attempt does not bind the canonical task-contract hash".into(),
+        ));
+    }
+
+    transaction.execute(
+        "INSERT INTO task_contract_versions(
+            task_contract_id, version, type_id, schema_version, content_hash_json,
+            contract_json, status, created_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            contract.id.to_string(),
+            sql_u64(contract.version, "task contract version")?,
+            TaskContract::TYPE_ID,
+            i64::from(TaskContract::SCHEMA_VERSION),
+            serde_json::to_string(&contract_hash)?,
+            serde_json::to_string(contract)?,
+            task_contract_status_label(contract.status),
+            contract.created_at.to_rfc3339(),
+        ],
+    )?;
+    transaction.execute(
+        "INSERT INTO task_contract_heads(task_contract_id, current_version, revision)
+         VALUES (?1, ?2, 1)",
+        params![
+            contract.id.to_string(),
+            sql_u64(contract.version, "task contract version")?,
+        ],
+    )?;
+    for dependency in &contract.dependencies {
+        transaction.execute(
+            "INSERT INTO task_contract_dependencies(
+                task_contract_id, task_contract_version, dependency_id, dependency_version
+             ) VALUES (?1, ?2, ?3, ?4)",
+            params![
+                contract.id.to_string(),
+                sql_u64(contract.version, "task contract version")?,
+                dependency.id.to_string(),
+                sql_u64(dependency.version, "dependency version")?,
+            ],
+        )?;
+    }
+    insert_attempt(transaction, attempt)?;
+
+    let event = workflow_event(
+        attempt,
+        1,
+        correlation_id,
+        None,
+        &attempt.idempotency_key,
+        WORKFLOW_CREATED_TYPE_ID,
+        now,
+        &serde_json::json!({
+            "task_contract_id": contract.id,
+            "task_contract_version": contract.version,
+            "attempt_id": attempt.attempt_id,
+            "state": attempt.state,
+            "attempt": attempt,
+        }),
+    )?;
+    insert_event(transaction, &event)?;
+    Ok(event)
 }
 
 impl SqliteEventStore {
@@ -68,101 +179,127 @@ impl SqliteEventStore {
         correlation_id: CorrelationId,
         now: DateTime<Utc>,
     ) -> Result<WorkflowEvent, StorageError> {
-        validate_initial_workflow(contract, attempt)?;
         let transaction = self.connection.transaction()?;
-
-        if let Some(existing) = load_attempt_by_idempotency(
-            &transaction,
-            attempt.workflow_id,
-            &attempt.idempotency_key,
-        )? {
-            let event = load_event_by_idempotency(
-                &transaction,
-                attempt.workflow_id,
-                &attempt.idempotency_key,
-            )?
-            .ok_or_else(|| {
-                StorageError::InvalidData(
-                    "workflow exists without its atomic creation event".into(),
-                )
-            })?;
-            if event.type_id.as_str() != WORKFLOW_CREATED_TYPE_ID
-                || event_attempt(&event)? != *attempt
-                || existing.workflow_id != attempt.workflow_id
-            {
-                return Err(StorageError::Conflict(
-                    "workflow create idempotency key was replayed with different content".into(),
-                ));
-            }
-            transaction.commit()?;
-            return Ok(event);
-        }
-
-        let contract_hash = task_contract_content_hash(contract)?;
-        if attempt.task_contract.content_hash != contract_hash {
-            return Err(StorageError::InvalidData(
-                "workflow attempt does not bind the canonical task-contract hash".into(),
-            ));
-        }
-
-        transaction.execute(
-            "INSERT INTO task_contract_versions(
-                task_contract_id, version, type_id, schema_version, content_hash_json,
-                contract_json, status, created_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![
-                contract.id.to_string(),
-                sql_u64(contract.version, "task contract version")?,
-                TaskContract::TYPE_ID,
-                i64::from(TaskContract::SCHEMA_VERSION),
-                serde_json::to_string(&contract_hash)?,
-                serde_json::to_string(contract)?,
-                task_contract_status_label(contract.status),
-                contract.created_at.to_rfc3339(),
-            ],
-        )?;
-        transaction.execute(
-            "INSERT INTO task_contract_heads(task_contract_id, current_version, revision)
-             VALUES (?1, ?2, 1)",
-            params![
-                contract.id.to_string(),
-                sql_u64(contract.version, "task contract version")?,
-            ],
-        )?;
-        for dependency in &contract.dependencies {
-            transaction.execute(
-                "INSERT INTO task_contract_dependencies(
-                    task_contract_id, task_contract_version, dependency_id, dependency_version
-                 ) VALUES (?1, ?2, ?3, ?4)",
-                params![
-                    contract.id.to_string(),
-                    sql_u64(contract.version, "task contract version")?,
-                    dependency.id.to_string(),
-                    sql_u64(dependency.version, "dependency version")?,
-                ],
-            )?;
-        }
-        insert_attempt(&transaction, attempt)?;
-
-        let event = workflow_event(
-            attempt,
-            1,
-            correlation_id,
-            None,
-            &attempt.idempotency_key,
-            WORKFLOW_CREATED_TYPE_ID,
-            now,
-            &serde_json::json!({
-                "task_contract_id": contract.id,
-                "task_contract_version": contract.version,
-                "attempt_id": attempt.attempt_id,
-                "state": attempt.state,
-                "attempt": attempt,
-            }),
-        )?;
-        insert_event(&transaction, &event)?;
+        let event =
+            create_workflow_in_transaction(&transaction, contract, attempt, correlation_id, now)?;
         transaction.commit()?;
         Ok(event)
+    }
+
+    /// Atomically creates one canonical workflow and its immutable pre-canonical source link.
+    ///
+    /// Exact replay returns the original evidence. Reusing either source identity or workflow
+    /// identity with different content fails closed.
+    ///
+    /// # Errors
+    /// Returns a storage error for invalid evidence, substituted bindings, conflicts, or commit
+    /// failure.
+    pub fn create_attached_workflow(
+        &mut self,
+        contract: &TaskContract,
+        attempt: &WorkflowAttempt,
+        attachment: &WorkflowSourceAttachment,
+        correlation_id: CorrelationId,
+        now: DateTime<Utc>,
+    ) -> Result<(WorkflowEvent, WorkflowSourceAttachment), StorageError> {
+        validate_workflow_source_attachment(contract, attempt, attachment)?;
+        let transaction = self.connection.transaction()?;
+        let event =
+            create_workflow_in_transaction(&transaction, contract, attempt, correlation_id, now)?;
+        let stored = insert_or_replay_workflow_source_attachment(&transaction, attachment)?;
+        transaction.commit()?;
+        Ok((event, stored))
+    }
+
+    /// Attaches one exact active compatibility agent lease to a newly canonical workflow.
+    ///
+    /// Root derives the contract and source snapshot from the authoritative task, run, work plan,
+    /// instance, and lease rows inside the same transaction. Callers supply only the lease identity
+    /// and observation time. Existing exact attachment evidence is returned without consulting
+    /// mutable compatibility projections.
+    ///
+    /// # Errors
+    /// Returns a storage error for unknown, expired, inactive, inconsistent, malformed, or
+    /// concurrently substituted compatibility authority.
+    pub fn attach_active_agent_lease_workflow(
+        &mut self,
+        lease_id: AgentLeaseId,
+        now: DateTime<Utc>,
+    ) -> Result<AgentTurnWorkflowAttachment, StorageError> {
+        let source_type = stable_type_id("mcg.agent_turn_source.v1")?;
+        let source_locator = lease_id.to_string();
+        let transaction = self.connection.transaction()?;
+
+        if let Some(attachment) = load_workflow_source_attachment_by_source(
+            &transaction,
+            source_type.as_str(),
+            &source_locator,
+        )? {
+            let receipt = load_agent_turn_workflow_attachment(&transaction, attachment)?;
+            transaction.commit()?;
+            return Ok(receipt);
+        }
+
+        let source = load_active_agent_turn_source(&transaction, lease_id, now)?;
+        let (task_contract, mut attempt, attachment) =
+            derive_agent_turn_workflow(&source, source_type, now)?;
+        attempt.task_contract.content_hash = task_contract_content_hash(&task_contract)?;
+        let mut attachment = attachment;
+        attachment.task_contract = attempt.task_contract.clone();
+        let creation_event = create_workflow_in_transaction(
+            &transaction,
+            &task_contract,
+            &attempt,
+            CorrelationId::new(),
+            now,
+        )?;
+        insert_or_replay_workflow_source_attachment(&transaction, &attachment)?;
+        transaction.commit()?;
+        Ok(AgentTurnWorkflowAttachment {
+            task_contract,
+            attempt,
+            attachment,
+            creation_event,
+        })
+    }
+
+    /// Loads the immutable canonical attachment for one exact pre-canonical source identity.
+    ///
+    /// # Errors
+    /// Returns a storage error when stored evidence is malformed or column bindings diverge.
+    pub fn workflow_source_attachment(
+        &self,
+        source_type: &StableTypeId,
+        source_locator: &str,
+    ) -> Result<Option<WorkflowSourceAttachment>, StorageError> {
+        load_workflow_source_attachment_by_source(
+            &self.connection,
+            source_type.as_str(),
+            source_locator,
+        )
+    }
+
+    /// Loads the immutable source attachment for one canonical workflow.
+    ///
+    /// # Errors
+    /// Returns a storage error when stored evidence is malformed or column bindings diverge.
+    pub fn workflow_source_attachment_for_workflow(
+        &self,
+        workflow_id: WorkflowId,
+    ) -> Result<Option<WorkflowSourceAttachment>, StorageError> {
+        let row = self
+            .connection
+            .query_row(
+                "SELECT source_type, source_locator, source_hash_json, workflow_id, attempt_id,
+                        task_contract_id, task_contract_version, task_contract_hash_json,
+                        attachment_json, attached_at
+                 FROM workflow_source_attachments WHERE workflow_id = ?1",
+                [workflow_id.to_string()],
+                workflow_source_attachment_row,
+            )
+            .optional()?;
+        row.map(|row| validate_loaded_workflow_source_attachment(&self.connection, row))
+            .transpose()
     }
 
     /// Loads one authoritative task-contract version.
@@ -1084,6 +1221,526 @@ fn retry_backoff_elapsed(attempt: &WorkflowAttempt, now: DateTime<Utc>) -> bool 
             .is_ok_and(|elapsed| elapsed >= attempt.retry_policy.initial_backoff_ms)
 }
 
+struct ActiveAgentTurnSource {
+    task: TaskEnvelope,
+    task_json: String,
+    run: AgentRun,
+    run_json: String,
+    plan_json: String,
+    instance: AgentInstance,
+    instance_json: String,
+    lease: AgentLease,
+    lease_json: String,
+}
+
+type ActiveAgentTurnSourceRow = (String, String, String, String, String);
+
+fn load_active_agent_turn_source(
+    transaction: &Transaction<'_>,
+    lease_id: AgentLeaseId,
+    now: DateTime<Utc>,
+) -> Result<ActiveAgentTurnSource, StorageError> {
+    let row = transaction
+        .query_row(
+            "SELECT tasks.task_json, agent_runs.run_json, work_plans.plan_json,
+                    agent_instances.instance_json, agent_leases.lease_json
+             FROM agent_leases
+             INNER JOIN agent_instances
+                ON agent_instances.instance_id = agent_leases.instance_id
+             INNER JOIN agent_runs ON agent_runs.run_id = agent_instances.run_id
+             INNER JOIN work_plans ON work_plans.run_id = agent_runs.run_id
+             INNER JOIN tasks ON tasks.task_id = agent_runs.task_id
+             WHERE agent_leases.lease_id = ?1",
+            [lease_id.to_string()],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .optional()?
+        .ok_or(StorageError::AgentLeaseNotFound(lease_id))?;
+    decode_active_agent_turn_source(row, lease_id, now)
+}
+
+fn decode_active_agent_turn_source(
+    row: ActiveAgentTurnSourceRow,
+    lease_id: AgentLeaseId,
+    now: DateTime<Utc>,
+) -> Result<ActiveAgentTurnSource, StorageError> {
+    let (task_json, run_json, plan_json, instance_json, lease_json) = row;
+    let task: TaskEnvelope = serde_json::from_str(&task_json)?;
+    let run: AgentRun = serde_json::from_str(&run_json)?;
+    let plan: WorkPlan = serde_json::from_str(&plan_json)?;
+    let instance: AgentInstance = serde_json::from_str(&instance_json)?;
+    let lease: AgentLease = serde_json::from_str(&lease_json)?;
+    let planned_item = plan.items.iter().find(|item| item.id == lease.work_item_id);
+    if lease.id != lease_id
+        || lease.instance_id != instance.id
+        || instance.run_id != run.id
+        || instance.task_id != task.id
+        || run.task_id != task.id
+        || plan.run_id != run.id
+        || plan.task_id != task.id
+        || planned_item.is_none()
+        || task.state != TaskState::Active
+        || run.state != AgentRunState::Running
+        || instance.state != AgentState::Running
+        || lease.state != AgentLeaseState::Active
+        || lease.expires_at <= now
+    {
+        return Err(StorageError::Conflict(
+            "agent turn source is inactive, expired, or identity-inconsistent".into(),
+        ));
+    }
+    Ok(ActiveAgentTurnSource {
+        task,
+        task_json,
+        run,
+        run_json,
+        plan_json,
+        instance,
+        instance_json,
+        lease,
+        lease_json,
+    })
+}
+
+#[allow(clippy::too_many_lines)] // Keep the complete legacy-to-canonical authority derivation auditable.
+fn derive_agent_turn_workflow(
+    source: &ActiveAgentTurnSource,
+    source_type: StableTypeId,
+    now: DateTime<Utc>,
+) -> Result<(TaskContract, WorkflowAttempt, WorkflowSourceAttachment), StorageError> {
+    let snapshot = VersionedPayload::canonical_v1(
+        source_type.clone(),
+        &serde_json::json!({
+            "task_id": source.task.id,
+            "task_schema_version": source.task.schema_version,
+            "task_sha256": sha256_text(&source.task_json),
+            "run_id": source.run.id,
+            "run_schema_version": source.run.schema_version,
+            "run_sha256": sha256_text(&source.run_json),
+            "plan_sha256": sha256_text(&source.plan_json),
+            "instance_id": source.instance.id,
+            "instance_schema_version": source.instance.schema_version,
+            "instance_sha256": sha256_text(&source.instance_json),
+            "lease_id": source.lease.id,
+            "lease_schema_version": source.lease.schema_version,
+            "lease_sha256": sha256_text(&source.lease_json),
+        }),
+    )
+    .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+    let source_ref = SourceRef {
+        source_type,
+        locator: source.lease.id.to_string(),
+        content_hash: snapshot
+            .content_hash(WORKFLOW_SOURCE_SNAPSHOT_HASH_DOMAIN)
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?,
+    };
+    let requirement = ContractClause {
+        clause_id: "legacy-agent-lease-goal".into(),
+        statement: source.lease.goal.clone(),
+        source_refs: vec![source_ref.clone()],
+    };
+    let constraints = source
+        .task
+        .constraints
+        .iter()
+        .enumerate()
+        .map(|(index, statement)| ContractClause {
+            clause_id: format!("legacy-constraint-{}", index + 1),
+            statement: statement.clone(),
+            source_refs: vec![source_ref.clone()],
+        })
+        .collect();
+    let acceptance_criteria = source
+        .task
+        .success_conditions
+        .iter()
+        .enumerate()
+        .map(|(index, statement)| ContractClause {
+            clause_id: format!("legacy-acceptance-{}", index + 1),
+            statement: statement.clone(),
+            source_refs: vec![source_ref.clone()],
+        })
+        .collect();
+    let permitted_side_effects = agent_turn_policy(
+        "mcg.agent_turn_side_effect_policy.v1",
+        "MetaCog.AgentTurnSideEffects",
+        &serde_json::json!({
+            "lease_id": source.lease.id,
+            "tool_permissions": source.lease.tool_permissions,
+        }),
+    )?;
+    let authority = agent_turn_policy(
+        "mcg.agent_turn_authority_policy.v1",
+        "MetaCog.AgentTurnAuthority",
+        &serde_json::json!({
+            "task_id": source.task.id,
+            "run_id": source.run.id,
+            "instance_id": source.instance.id,
+            "role_id": source.instance.role_id,
+            "lease_id": source.lease.id,
+            "work_item_id": source.lease.work_item_id,
+        }),
+    )?;
+    let environment = agent_turn_policy(
+        "mcg.agent_turn_environment_policy.v1",
+        "MetaCog.AgentTurnEnvironment",
+        &serde_json::json!({
+            "project_id": source.task.project_id,
+            "thread_id": source.task.thread_id,
+            "context_fingerprint": source.instance.context_fingerprint,
+            "source_snapshot_hash": source_ref.content_hash,
+        }),
+    )?;
+    let risk = agent_turn_policy(
+        "mcg.agent_turn_risk_policy.v1",
+        "MetaCog.AgentTurnRisk",
+        &serde_json::json!({"risk": source.task.risk}),
+    )?;
+    let budgets = agent_turn_policy(
+        "mcg.agent_turn_budget_policy.v1",
+        "MetaCog.AgentTurnBudget",
+        &serde_json::json!({
+            "max_tokens": source.lease.budget.limit.max_tokens,
+            "max_cost_usd": optional_f64_string(source.lease.budget.limit.max_cost_usd)?,
+            "max_duration_seconds": source.lease.budget.limit.max_duration_seconds,
+            "consumed_tokens": source.lease.budget.consumed_tokens,
+            "consumed_cost_usd": f64_string(source.lease.budget.consumed_cost_usd)?,
+            "elapsed_seconds": source.lease.budget.elapsed_seconds,
+        }),
+    )?;
+    let rollback = agent_turn_policy(
+        "mcg.agent_turn_rollback_policy.v1",
+        "MetaCog.AgentTurnRollback",
+        &serde_json::json!({
+            "mode": "reconcile_governed_effects",
+            "legacy_source": source_ref,
+        }),
+    )?;
+    let task_contract_id = TaskContractId::new();
+    let task_contract = TaskContract {
+        id: task_contract_id,
+        version: 1,
+        previous_version: None,
+        user_intent_ref: source_ref.clone(),
+        objective: source.task.goal.clone(),
+        non_goals: Vec::new(),
+        requirements: vec![requirement],
+        constraints,
+        assumptions: Vec::new(),
+        acceptance_criteria,
+        dependencies: Vec::new(),
+        permitted_side_effects,
+        authority,
+        environment: environment.clone(),
+        risk,
+        budgets,
+        rollback: rollback.clone(),
+        status: TaskContractStatus::Active,
+        created_at: now,
+    };
+    let workflow_id = WorkflowId::new();
+    let attempt_id = AttemptId::new();
+    let placeholder_contract_hash = source_ref.content_hash.clone();
+    let attempt = WorkflowAttempt {
+        workflow_id,
+        attempt_id,
+        task_contract: VersionedRef {
+            id: task_contract_id,
+            version: 1,
+            content_hash: placeholder_contract_hash.clone(),
+        },
+        parent_attempt_id: None,
+        attempt_number: 1,
+        state: WorkflowState::Ready,
+        revision: 1,
+        lease_owner: None,
+        lease_generation: 0,
+        lease_expires_at: None,
+        heartbeat_at: None,
+        checkpoint: None,
+        environment_snapshot: environment.content_hash,
+        configuration: VersionedRef {
+            id: ConfigurationId::new(),
+            version: 1,
+            content_hash: source_ref.content_hash.clone(),
+        },
+        idempotency_key: format!("attach-agent-lease:{}", source.lease.id),
+        retry_policy: RetryPolicy {
+            max_attempts: u32::from(source.lease.max_retries)
+                .checked_add(1)
+                .ok_or_else(|| StorageError::InvalidData("agent retry limit overflowed".into()))?,
+            initial_backoff_ms: 1_000,
+            maximum_backoff_ms: 60_000,
+        },
+        compensation_policy: rollback,
+        created_at: now,
+        updated_at: now,
+    };
+    let attachment = WorkflowSourceAttachment {
+        schema_version: WorkflowSourceAttachment::SCHEMA_VERSION,
+        source: source_ref,
+        source_snapshot: snapshot,
+        workflow_id,
+        attempt_id,
+        task_contract: attempt.task_contract.clone(),
+        attached_at: now,
+    };
+    Ok((task_contract, attempt, attachment))
+}
+
+fn agent_turn_policy(
+    type_id: &str,
+    hash_domain: &str,
+    value: &serde_json::Value,
+) -> Result<PolicyBinding, StorageError> {
+    let payload = VersionedPayload::canonical_v1(stable_type_id(type_id)?, value)
+        .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+    let content_hash = payload
+        .content_hash(hash_domain)
+        .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+    Ok(PolicyBinding {
+        payload,
+        content_hash,
+    })
+}
+
+fn sha256_text(value: &str) -> String {
+    format!("{:x}", Sha256::digest(value.as_bytes()))
+}
+
+fn f64_string(value: f64) -> Result<String, StorageError> {
+    value
+        .is_finite()
+        .then(|| value.to_string())
+        .ok_or_else(|| StorageError::InvalidData("agent budget contains a non-finite cost".into()))
+}
+
+fn optional_f64_string(value: Option<f64>) -> Result<Option<String>, StorageError> {
+    value.map(f64_string).transpose()
+}
+
+fn insert_or_replay_workflow_source_attachment(
+    transaction: &Transaction<'_>,
+    attachment: &WorkflowSourceAttachment,
+) -> Result<WorkflowSourceAttachment, StorageError> {
+    if let Some(existing) = load_workflow_source_attachment_by_source(
+        transaction,
+        attachment.source.source_type.as_str(),
+        &attachment.source.locator,
+    )? {
+        if existing != *attachment {
+            return Err(StorageError::Conflict(
+                "workflow source identity was replayed with different evidence".into(),
+            ));
+        }
+        return Ok(existing);
+    }
+    transaction.execute(
+        "INSERT INTO workflow_source_attachments(
+            source_type, source_locator, source_hash_json, workflow_id, attempt_id,
+            task_contract_id, task_contract_version, task_contract_hash_json,
+            attachment_json, attached_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        params![
+            attachment.source.source_type.as_str(),
+            attachment.source.locator.as_str(),
+            serde_json::to_string(&attachment.source.content_hash)?,
+            attachment.workflow_id.to_string(),
+            attachment.attempt_id.to_string(),
+            attachment.task_contract.id.to_string(),
+            sql_u64(attachment.task_contract.version, "task contract version")?,
+            serde_json::to_string(&attachment.task_contract.content_hash)?,
+            serde_json::to_string(attachment)?,
+            attachment.attached_at.to_rfc3339(),
+        ],
+    )?;
+    Ok(attachment.clone())
+}
+
+fn load_agent_turn_workflow_attachment(
+    transaction: &Transaction<'_>,
+    attachment: WorkflowSourceAttachment,
+) -> Result<AgentTurnWorkflowAttachment, StorageError> {
+    let attempt = load_attempt(transaction, attachment.attempt_id)?.ok_or_else(|| {
+        StorageError::InvalidData("workflow source attachment references a missing attempt".into())
+    })?;
+    let task_contract = load_task_contract(
+        transaction,
+        attachment.task_contract.id,
+        attachment.task_contract.version,
+    )?
+    .ok_or_else(|| {
+        StorageError::InvalidData(
+            "workflow source attachment references a missing task contract".into(),
+        )
+    })?;
+    validate_workflow_source_attachment(&task_contract, &attempt, &attachment)?;
+    let creation_event =
+        load_event_by_idempotency(transaction, attempt.workflow_id, &attempt.idempotency_key)?
+            .ok_or_else(|| {
+                StorageError::InvalidData(
+                    "workflow source attachment references a missing creation event".into(),
+                )
+            })?;
+    if creation_event.type_id.as_str() != WORKFLOW_CREATED_TYPE_ID
+        || event_attempt(&creation_event)? != attempt
+    {
+        return Err(StorageError::InvalidData(
+            "workflow source attachment creation evidence is inconsistent".into(),
+        ));
+    }
+    Ok(AgentTurnWorkflowAttachment {
+        task_contract,
+        attempt,
+        attachment,
+        creation_event,
+    })
+}
+
+type WorkflowSourceAttachmentRow = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    i64,
+    String,
+    String,
+    String,
+);
+
+fn workflow_source_attachment_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<WorkflowSourceAttachmentRow> {
+    Ok((
+        row.get(0)?,
+        row.get(1)?,
+        row.get(2)?,
+        row.get(3)?,
+        row.get(4)?,
+        row.get(5)?,
+        row.get(6)?,
+        row.get(7)?,
+        row.get(8)?,
+        row.get(9)?,
+    ))
+}
+
+fn load_workflow_source_attachment_by_source(
+    connection: &Connection,
+    source_type: &str,
+    source_locator: &str,
+) -> Result<Option<WorkflowSourceAttachment>, StorageError> {
+    let row = connection
+        .query_row(
+            "SELECT source_type, source_locator, source_hash_json, workflow_id, attempt_id,
+                    task_contract_id, task_contract_version, task_contract_hash_json,
+                    attachment_json, attached_at
+             FROM workflow_source_attachments
+             WHERE source_type = ?1 AND source_locator = ?2",
+            params![source_type, source_locator],
+            workflow_source_attachment_row,
+        )
+        .optional()?;
+    row.map(|row| validate_loaded_workflow_source_attachment(connection, row))
+        .transpose()
+}
+
+fn validate_loaded_workflow_source_attachment(
+    connection: &Connection,
+    row: WorkflowSourceAttachmentRow,
+) -> Result<WorkflowSourceAttachment, StorageError> {
+    let attachment = validate_stored_workflow_source_attachment(row)?;
+    let attempt = load_attempt(connection, attachment.attempt_id)?.ok_or_else(|| {
+        StorageError::InvalidData("workflow source attachment references a missing attempt".into())
+    })?;
+    let task_contract = load_task_contract(
+        connection,
+        attachment.task_contract.id,
+        attachment.task_contract.version,
+    )?
+    .ok_or_else(|| {
+        StorageError::InvalidData(
+            "workflow source attachment references a missing task contract".into(),
+        )
+    })?;
+    validate_workflow_source_attachment(&task_contract, &attempt, &attachment)?;
+    Ok(attachment)
+}
+
+fn validate_stored_workflow_source_attachment(
+    row: WorkflowSourceAttachmentRow,
+) -> Result<WorkflowSourceAttachment, StorageError> {
+    let (
+        source_type,
+        source_locator,
+        source_hash_json,
+        workflow_id,
+        attempt_id,
+        task_contract_id,
+        task_contract_version,
+        task_contract_hash_json,
+        attachment_json,
+        attached_at,
+    ) = row;
+    let attachment: WorkflowSourceAttachment = serde_json::from_str(&attachment_json)?;
+    attachment
+        .validate()
+        .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+    let source_hash: ContentHash = serde_json::from_str(&source_hash_json)?;
+    let task_contract_hash: ContentHash = serde_json::from_str(&task_contract_hash_json)?;
+    let task_contract_version = u64::try_from(task_contract_version).map_err(|_| {
+        StorageError::InvalidData("negative workflow attachment contract version".into())
+    })?;
+    if source_type != attachment.source.source_type.as_str()
+        || source_locator != attachment.source.locator
+        || source_hash != attachment.source.content_hash
+        || workflow_id != attachment.workflow_id.to_string()
+        || attempt_id != attachment.attempt_id.to_string()
+        || task_contract_id != attachment.task_contract.id.to_string()
+        || task_contract_version != attachment.task_contract.version
+        || task_contract_hash != attachment.task_contract.content_hash
+        || attached_at != attachment.attached_at.to_rfc3339()
+    {
+        return Err(StorageError::InvalidData(
+            "workflow source attachment columns diverge from immutable evidence".into(),
+        ));
+    }
+    Ok(attachment)
+}
+
+fn validate_workflow_source_attachment(
+    contract: &TaskContract,
+    attempt: &WorkflowAttempt,
+    attachment: &WorkflowSourceAttachment,
+) -> Result<(), StorageError> {
+    attachment
+        .validate()
+        .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+    let contract_hash = task_contract_content_hash(contract)?;
+    if attachment.workflow_id != attempt.workflow_id
+        || attachment.attempt_id != attempt.attempt_id
+        || attachment.task_contract != attempt.task_contract
+        || attachment.task_contract.id != contract.id
+        || attachment.task_contract.version != contract.version
+        || attachment.task_contract.content_hash != contract_hash
+    {
+        return Err(StorageError::Conflict(
+            "workflow source attachment does not bind the exact canonical workflow".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_initial_workflow(
     contract: &TaskContract,
     attempt: &WorkflowAttempt,
@@ -1554,10 +2211,16 @@ fn increment(value: u64, label: &str) -> Result<u64, StorageError> {
 #[cfg(test)]
 mod tests {
     use chrono::TimeZone;
+    use mcg_agents::{
+        AGENT_RUN_SCHEMA_VERSION, ConfidenceEstimate, ExecutivePlanner, LeaseBudget,
+        OrganizationGenome, OrganizationalMetrics, PlannedWork, PlanningRequest, RoleKind,
+        SuccessCondition, TaskComplexity,
+    };
     use mcg_contracts::{
         ConfigurationId, ContractClause, HashAlgorithm, PolicyBinding, RetryPolicy, SourceRef,
-        VersionedRef, WaitReason,
+        VersionedRef, WORKFLOW_SOURCE_SNAPSHOT_HASH_DOMAIN, WaitReason,
     };
+    use mcg_domain::{AgentInstanceId, RunId};
 
     use super::*;
 
@@ -1663,6 +2326,35 @@ mod tests {
         (contract, attempt)
     }
 
+    fn source_attachment(attempt: &WorkflowAttempt, locator: &str) -> WorkflowSourceAttachment {
+        let source_type = StableTypeId::parse("mcg.agent_turn_source.v1").unwrap();
+        let source_snapshot = VersionedPayload::canonical_v1(
+            source_type.clone(),
+            &serde_json::json!({
+                "lease_id": locator,
+                "task_snapshot_sha256": "a".repeat(64),
+                "run_snapshot_sha256": "b".repeat(64),
+                "lease_snapshot_sha256": "c".repeat(64),
+            }),
+        )
+        .unwrap();
+        WorkflowSourceAttachment {
+            schema_version: WorkflowSourceAttachment::SCHEMA_VERSION,
+            source: SourceRef {
+                source_type,
+                locator: locator.to_owned(),
+                content_hash: source_snapshot
+                    .content_hash(WORKFLOW_SOURCE_SNAPSHOT_HASH_DOMAIN)
+                    .unwrap(),
+            },
+            source_snapshot,
+            workflow_id: attempt.workflow_id,
+            attempt_id: attempt.attempt_id,
+            task_contract: attempt.task_contract.clone(),
+            attached_at: now(),
+        }
+    }
+
     fn waiting_fixture(
         store: &mut SqliteEventStore,
         reason: WaitReason,
@@ -1723,6 +2415,221 @@ mod tests {
             event
         );
         assert_eq!(store.workflow_events(attempt.workflow_id).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn attached_workflow_is_atomic_immutable_and_exactly_replayable() {
+        let mut store = SqliteEventStore::open_in_memory().unwrap();
+        let (contract, attempt) = fixture();
+        let attachment = source_attachment(&attempt, "lease:legacy-1");
+        let correlation = CorrelationId::new();
+
+        let (event, stored) = store
+            .create_attached_workflow(&contract, &attempt, &attachment, correlation, now())
+            .unwrap();
+        assert_eq!(stored, attachment);
+        assert_eq!(
+            store
+                .workflow_source_attachment(&attachment.source.source_type, "lease:legacy-1")
+                .unwrap(),
+            Some(attachment.clone())
+        );
+        assert_eq!(
+            store
+                .workflow_source_attachment_for_workflow(attempt.workflow_id)
+                .unwrap(),
+            Some(attachment.clone())
+        );
+        assert_eq!(
+            store
+                .create_attached_workflow(&contract, &attempt, &attachment, correlation, now(),)
+                .unwrap(),
+            (event, attachment.clone())
+        );
+        assert_eq!(store.workflow_events(attempt.workflow_id).unwrap().len(), 1);
+
+        assert!(
+            store
+                .connection
+                .execute(
+                    "UPDATE workflow_source_attachments SET source_locator = ?1",
+                    ["lease:mutated"],
+                )
+                .is_err()
+        );
+        assert!(
+            store
+                .connection
+                .execute("DELETE FROM workflow_source_attachments", [])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn conflicting_source_attachment_rolls_back_the_entire_new_workflow() {
+        let mut store = SqliteEventStore::open_in_memory().unwrap();
+        let (first_contract, first_attempt) = fixture();
+        let first_attachment = source_attachment(&first_attempt, "lease:legacy-conflict");
+        store
+            .create_attached_workflow(
+                &first_contract,
+                &first_attempt,
+                &first_attachment,
+                CorrelationId::new(),
+                now(),
+            )
+            .unwrap();
+
+        let (second_contract, second_attempt) = fixture();
+        let conflicting_attachment = source_attachment(&second_attempt, "lease:legacy-conflict");
+        let error = store
+            .create_attached_workflow(
+                &second_contract,
+                &second_attempt,
+                &conflicting_attachment,
+                CorrelationId::new(),
+                now(),
+            )
+            .unwrap_err();
+        assert!(matches!(error, StorageError::Conflict(_)));
+        assert_eq!(
+            store.task_contract_version(second_contract.id, 1).unwrap(),
+            None
+        );
+        assert_eq!(
+            store.workflow_attempt(second_attempt.attempt_id).unwrap(),
+            None
+        );
+        assert!(
+            store
+                .workflow_events(second_attempt.workflow_id)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            store
+                .workflow_source_attachment(
+                    &first_attachment.source.source_type,
+                    "lease:legacy-conflict",
+                )
+                .unwrap(),
+            Some(first_attachment)
+        );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // The full persisted authority chain is intentional evidence.
+    fn active_agent_lease_is_attached_from_exact_authoritative_source_rows() {
+        let mut store = SqliteEventStore::open_in_memory().unwrap();
+        let observed_at = now();
+        let task = TaskEnvelope::new("complete the compatibility agent turn");
+        store.create_task(&task).unwrap();
+        let task = store.transition_task(task.id, TaskState::Active).unwrap().0;
+        let organization = OrganizationGenome::consumer_default(observed_at);
+        store.record_organization_revision(&organization).unwrap();
+        let planning = PlanningRequest {
+            run_id: RunId::new(),
+            task: task.clone(),
+            complexity: TaskComplexity::Atomic,
+            work: vec![PlannedWork::atomic(
+                "produce one governed answer",
+                RoleKind::Coder,
+                vec![SuccessCondition::Custom {
+                    description: "return verified output".into(),
+                }],
+            )],
+            require_independent_evaluation: false,
+        };
+        let plan = ExecutivePlanner::default()
+            .plan(&organization, &planning, observed_at)
+            .unwrap();
+        let run = AgentRun {
+            schema_version: AGENT_RUN_SCHEMA_VERSION,
+            id: planning.run_id,
+            task_id: task.id,
+            organization_revision_id: organization.revision_id,
+            state: AgentRunState::Planned,
+            metrics: OrganizationalMetrics::default(),
+            created_at: observed_at,
+            updated_at: observed_at,
+            completed_at: None,
+        };
+        store.create_agent_run(&run, &plan).unwrap();
+        let run = store
+            .transition_agent_run(
+                run.id,
+                AgentRunState::Running,
+                OrganizationalMetrics::default(),
+                observed_at,
+            )
+            .unwrap()
+            .0;
+        let instance = AgentInstance {
+            schema_version: AGENT_RUN_SCHEMA_VERSION,
+            id: AgentInstanceId::new(),
+            role_id: plan.items[0].assigned_role,
+            run_id: run.id,
+            task_id: task.id,
+            state: AgentState::Created,
+            model: None,
+            context_fingerprint: "sha256:compatibility-context".into(),
+            confidence: ConfidenceEstimate::new(5_000, 0).unwrap(),
+            created_at: observed_at,
+            updated_at: observed_at,
+        };
+        let lease = AgentLease {
+            schema_version: AGENT_RUN_SCHEMA_VERSION,
+            id: AgentLeaseId::new(),
+            instance_id: instance.id,
+            work_item_id: plan.items[0].id,
+            goal: plan.items[0].goal.clone(),
+            budget: LeaseBudget {
+                limit: plan.items[0].budget.clone(),
+                consumed_tokens: 0,
+                consumed_cost_usd: 0.0,
+                elapsed_seconds: 0,
+            },
+            tool_permissions: vec!["project.read".into()],
+            reporting_interval_seconds: 30,
+            max_retries: 2,
+            escalation_conditions: Vec::new(),
+            state: AgentLeaseState::Active,
+            acquired_at: observed_at,
+            expires_at: observed_at
+                + chrono::Duration::seconds(
+                    i64::try_from(organization.policy.default_lease_seconds).unwrap(),
+                ),
+            heartbeat_at: observed_at,
+        };
+        let (running_instance, _) = store
+            .dispatch_agent_work(&instance, &lease, observed_at)
+            .unwrap();
+        assert_eq!(running_instance.state, AgentState::Running);
+
+        let receipt = store
+            .attach_active_agent_lease_workflow(lease.id, observed_at)
+            .unwrap();
+        assert_eq!(receipt.task_contract.objective, task.goal);
+        assert_eq!(receipt.attempt.state, WorkflowState::Ready);
+        assert_eq!(
+            receipt.attempt.task_contract,
+            receipt.attachment.task_contract
+        );
+        assert_eq!(
+            receipt.attachment.source.source_type.as_str(),
+            "mcg.agent_turn_source.v1"
+        );
+        assert_eq!(receipt.attachment.source.locator, lease.id.to_string());
+        assert_eq!(receipt.creation_event.sequence, 1);
+        assert_eq!(
+            store
+                .attach_active_agent_lease_workflow(
+                    lease.id,
+                    observed_at + chrono::Duration::hours(1),
+                )
+                .unwrap(),
+            receipt
+        );
     }
 
     #[test]

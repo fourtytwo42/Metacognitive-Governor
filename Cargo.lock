@@ -4301,6 +4301,7 @@ dependencies = [
  "mcg-api",
  "mcg-config",
  "mcg-contracts",
+ "mcg-domain",
  "mcg-platform",
  "mcg-provider-runner",
  "mcg-providers",
