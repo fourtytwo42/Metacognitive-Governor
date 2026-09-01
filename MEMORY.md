@@ -2,6 +2,15 @@
 
 Durable project context lives here. Update this file whenever information should survive chat context compression or future agent handoff.
 
+### 2026-09-01 - Plugin browser consumes exact Root authority
+
+- Context: The exact Browser capability, same-origin workflow, and `BrowserOrigin` grant existed, but no physical browser could consume schema-61 authority through Protected Root.
+- Decision: Reuse the fixed adjacent `mcg-process-runner` only through a distinct `--governed-browser` mode. Bind exact runner/browser bytes, a Root-owned ephemeral-profile root, origin, bounded non-script workflow, viewport/timeout, irreversible action, manual reconciler, platform/sandbox evidence, and Tool permit. Allow only same-origin GET/HEAD traffic; deny cross-origin requests, mutation, downloads, new contexts, persistent sessions, arbitrary script/CDP, and credential injection. Return only minimized operation-bound evidence. Treat every invalid post-contact result or timeout as durable `OutcomeUnknown` with manual/no-redispatch recovery.
+- Files: `apps/mcg-process-runner`, `crates/mcg-protected-root`, `Cargo.lock`, `scripts/check-packaging.mjs`, tracked Stage 6/plan/status/traceability documents, and `MEMORY.md`. The separately owned untracked `docs/NewPRD/STAGE_3_DURABLE_WORKFLOW.md` remains untouched.
+- Commands/tests: Process runner 9 unit, 8 HTTP, 3 process, one active browser identity, and one explicit real-Chromium workflow test; Protected Root 35/35 plus real-child recovery 1/1; Runtime 114 active with two explicit Windows Sandbox qualifications ignored; whole-workspace all-target check; strict process-runner and changed-boundary Root lint; deterministic substituted-authority policy qualification; optimized Windows sidecar verification; docs/packaging/format/diff gates.
+- Result: Product checkpoint `a5352369c88307229c8f3da177f7a5e200cf6bc4` is pushed with exact local/remote parity. Real Chromium proves same-origin assertion/type/click/navigation, cross-origin request blocking, mutating-form denial before POST, timeout uncertainty, secret-minimized response evidence, and complete temporary-profile cleanup. Root rejects forged completed observations, preserves uncertainty through reopen, never redispatches, and escalates to manual review.
+- Follow-up: Run installed-package browser success and adversarial UAT on Windows/Linux/macOS; add stronger optional platform browser sandboxes; continue legacy/stdio MCP and general hook/browser/computer/process/Codex/remote executor migration; complete parent-task plugin-to-independent-Verify/CompletionCertificate E2E.
+
 ### 2026-09-01 - Exact plugin browser authority contracts
 
 - Context: The browser boundary audit found no browser-specific plugin operation or durable scope, so a plugin could not request narrowly scoped browser work without being confused with ambient network authority.
