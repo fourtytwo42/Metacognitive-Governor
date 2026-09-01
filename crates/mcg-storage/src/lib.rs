@@ -83,6 +83,7 @@ pub use egress::{
     model_descriptor_source_ref, model_destination_source_ref, model_disclosure_hash,
     model_egress_policy_binding, model_egress_route_payload, model_permit_hash,
     model_permit_source_ref, model_proposal_hash, model_provider_source_ref,
+    model_secret_slots_for_auth,
 };
 pub use experiments::{
     AutomaticExperimentDisposition, AutomaticExperimentOutcome, AutomaticSupervisionMutation,

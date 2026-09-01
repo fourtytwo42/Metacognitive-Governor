@@ -34,7 +34,7 @@ use tokio::{
 use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 
-pub const PROVIDER_RUNNER_PROTOCOL_VERSION: u32 = 2;
+pub const PROVIDER_RUNNER_PROTOCOL_VERSION: u32 = 3;
 pub const PROVIDER_RUNNER_REQUEST_MAX_BYTES: usize = 16 * 1024 * 1024;
 pub const PROVIDER_RUNNER_RESPONSE_MAX_BYTES: usize = 16 * 1024 * 1024;
 pub const PROVIDER_RUNNER_STREAM_FRAME_MAX_BYTES: usize = 16 * 1024 * 1024;
@@ -835,7 +835,7 @@ fn validate_handle_bindings(
         ProviderAuthMode::None => &[],
         ProviderAuthMode::ApiKey | ProviderAuthMode::BearerToken => &[RunnerSecretSlot::Primary],
         ProviderAuthMode::ChatGptBrowserOauth | ProviderAuthMode::ChatGptDeviceCode => {
-            return Err("unsupported_oauth");
+            &[RunnerSecretSlot::Primary, RunnerSecretSlot::OAuthIdToken]
         }
     };
     if authorization.secret_handles.len() != expected_slots.len()
@@ -881,9 +881,30 @@ fn build_provider<S: ProviderCredentialStore + ?Sized>(
             builder = builder.credential(credential);
         }
         ProviderAuthMode::ChatGptBrowserOauth | ProviderAuthMode::ChatGptDeviceCode => {
-            return Err(ProviderError::Configuration(
-                "isolated OAuth provider execution is not yet supported".into(),
-            ));
+            let access_token = store
+                .load(&connection.id, ProviderSecretSlot::Primary)?
+                .ok_or_else(|| {
+                    ProviderError::Authentication(
+                        "authorized OAuth access credential is unavailable".into(),
+                    )
+                })?;
+            let id_token = store
+                .load(&connection.id, ProviderSecretSlot::OAuthIdToken)?
+                .ok_or_else(|| {
+                    ProviderError::Authentication(
+                        "authorized OAuth identity credential is unavailable".into(),
+                    )
+                })?;
+            return OpenAiCompatibleProviderBuilder::openai_subscription_execution(
+                connection.clone(),
+                access_token,
+                &id_token,
+                RetryPolicy {
+                    max_attempts: 1,
+                    initial_backoff: Duration::ZERO,
+                    max_backoff: Duration::ZERO,
+                },
+            );
         }
     }
     builder.build()
@@ -1571,7 +1592,19 @@ mod tests {
         at: chrono::DateTime<Utc>,
     ) -> ProviderRunnerAuthorization {
         let artifact = model_provider_request_artifact(request).expect("request artifact");
-        let handle = SecretHandleId::new();
+        let secret_slots = match connection.auth_mode {
+            ProviderAuthMode::None => Vec::new(),
+            ProviderAuthMode::ApiKey | ProviderAuthMode::BearerToken => {
+                vec![RunnerSecretSlot::Primary]
+            }
+            ProviderAuthMode::ChatGptBrowserOauth | ProviderAuthMode::ChatGptDeviceCode => {
+                vec![RunnerSecretSlot::Primary, RunnerSecretSlot::OAuthIdToken]
+            }
+        };
+        let handles = secret_slots
+            .iter()
+            .map(|_| SecretHandleId::new())
+            .collect::<Vec<_>>();
         let policy_payload = VersionedPayload::canonical_v1(
             StableTypeId::parse("test.provider_runner_policy.v1").expect("policy type"),
             &serde_json::json!({"allow": true}),
@@ -1651,7 +1684,7 @@ mod tests {
             limits: proposal.requested_limits,
             policy,
             expires_at: proposal.deadline,
-            secret_handles: vec![handle],
+            secret_handles: handles.clone(),
             issued_at: at,
         };
         let permit_hash = model_permit_hash(&permit).expect("permit hash");
@@ -1663,13 +1696,17 @@ mod tests {
                 locator: permit.id.to_string(),
                 content_hash: permit_hash.clone(),
             },
-            secret_handles: vec![RunnerSecretHandleBinding {
-                handle_id: handle,
-                permit_id: permit.id,
-                connection_id: connection.id.clone(),
-                slot: RunnerSecretSlot::Primary,
-                expires_at: permit.expires_at,
-            }],
+            secret_handles: handles
+                .into_iter()
+                .zip(secret_slots)
+                .map(|(handle_id, slot)| RunnerSecretHandleBinding {
+                    handle_id,
+                    permit_id: permit.id,
+                    connection_id: connection.id.clone(),
+                    slot,
+                    expires_at: permit.expires_at,
+                })
+                .collect(),
             permit,
             permit_hash,
         }
@@ -1782,6 +1819,97 @@ mod tests {
             String::from_utf8(server.await.expect("server result")).expect("http request text");
         assert!(observed_request.contains("authorization: Bearer runner-fixture-secret"));
         assert!(observed_request.contains("POST /v1/responses HTTP/1.1"));
+    }
+
+    #[test]
+    fn oauth_execution_uses_only_permitted_access_and_identity_credentials() {
+        let connection = ProviderConnection {
+            contract_version: mcg_providers::CONTRACT_VERSION,
+            id: "isolated-oauth-fixture".into(),
+            display_name: "Isolated OAuth Fixture".into(),
+            kind: ProviderKind::OpenAi,
+            base_url: mcg_providers::CHATGPT_CODEX_BASE_URL.into(),
+            auth_mode: ProviderAuthMode::ChatGptDeviceCode,
+            organization: None,
+            project: None,
+        };
+        let model = ModelDescriptor {
+            id: "gpt-fixture".into(),
+            display_name: "GPT Fixture".into(),
+            owned_by: Some("openai".into()),
+            context_window: Some(1_024),
+            capabilities: ModelCapabilities {
+                responses: Some(true),
+                ..ModelCapabilities::default()
+            },
+            price: None,
+            metadata: serde_json::Value::Null,
+        };
+        let request = ModelRequest {
+            contract_version: mcg_providers::CONTRACT_VERSION,
+            model: model.id.clone(),
+            client_request_id: Some("isolated-oauth-request-1".into()),
+            instructions: None,
+            messages: Vec::new(),
+            tools: Vec::new(),
+            tool_choice: None,
+            structured_output: None,
+            reasoning: None,
+            temperature: None,
+            top_p: None,
+            max_output_tokens: Some(50),
+            metadata: serde_json::Value::Null,
+        };
+        let at = Utc::now();
+        let authorization = fixture_authorization(&connection, &model, &request, at);
+        assert_eq!(
+            authorization
+                .secret_handles
+                .iter()
+                .map(|binding| binding.slot)
+                .collect::<Vec<_>>(),
+            vec![RunnerSecretSlot::Primary, RunnerSecretSlot::OAuthIdToken]
+        );
+        let store = MemoryProviderCredentialStore::default();
+        store
+            .save(
+                &connection.id,
+                ProviderSecretSlot::Primary,
+                &ProviderCredential::new("oauth-access-secret").expect("access credential"),
+            )
+            .expect("save access credential");
+        store
+            .save(
+                &connection.id,
+                ProviderSecretSlot::OAuthIdToken,
+                &ProviderCredential::new("oauth-id-secret").expect("identity credential"),
+            )
+            .expect("save identity credential");
+        let runner_request = ProviderRunnerRequest {
+            protocol_version: PROVIDER_RUNNER_PROTOCOL_VERSION,
+            request_id: Uuid::new_v4(),
+            execution: ProviderRunnerExecution::Complete,
+            authorization,
+            connection: connection.clone(),
+            model,
+            request,
+        };
+        validate_runner_request(&runner_request, at).expect("OAuth runner authority");
+        let scoped = ScopedCredentialStore {
+            inner: &store,
+            bindings: &runner_request.authorization.secret_handles,
+            connection_id: &connection.id,
+        };
+        build_provider(&connection, &scoped).expect("execution-only OAuth provider");
+        assert!(
+            scoped
+                .load(&connection.id, ProviderSecretSlot::OAuthRefreshToken)
+                .is_err(),
+            "the isolated provider execution cannot read the renewable credential"
+        );
+        let encoded = serde_json::to_vec(&runner_request).expect("OAuth runner request");
+        assert!(!String::from_utf8_lossy(&encoded).contains("oauth-access-secret"));
+        assert!(!String::from_utf8_lossy(&encoded).contains("oauth-id-secret"));
     }
 
     #[tokio::test]

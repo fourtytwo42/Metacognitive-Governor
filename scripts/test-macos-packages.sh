@@ -246,7 +246,7 @@ import pathlib
 import sys
 
 report = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
-assert report["protocol_version"] == 2
+assert report["protocol_version"] == 3
 assert report["role"] == "provider_adapter"
 assert report["storage_linked"] is False
 assert report["credential_store"] == "operating_system"

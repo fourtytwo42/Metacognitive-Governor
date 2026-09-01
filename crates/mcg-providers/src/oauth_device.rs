@@ -321,24 +321,7 @@ impl OAuthTokenSet {
     /// but malformed. Access-token claims are preferred for Codex compatibility;
     /// the ID token remains a fallback for issuer variants that place it there.
     pub fn account_id(&self) -> Result<Option<String>, ProviderError> {
-        for token in [&self.access_token, &self.id_token] {
-            let parts = token.expose().split('.').collect::<Vec<_>>();
-            if parts.len() != 3 {
-                continue;
-            }
-            let payload = URL_SAFE_NO_PAD
-                .decode(parts[1])
-                .map_err(|error| ProviderError::Authentication(error.to_string()))?;
-            let claims: serde_json::Value = serde_json::from_slice(&payload)
-                .map_err(|error| ProviderError::Authentication(error.to_string()))?;
-            if let Some(account_id) = claims
-                .pointer("/https:~1~1api.openai.com~1auth/chatgpt_account_id")
-                .and_then(serde_json::Value::as_str)
-            {
-                return Ok(Some(account_id.into()));
-            }
-        }
-        Ok(None)
+        oauth_account_id_from_credentials(&self.access_token, &self.id_token)
     }
 
     /// Rotates OAuth tokens through the issuer while preserving any fields the
@@ -408,6 +391,30 @@ impl OAuthTokenSet {
                 .unwrap_or_else(|| self.refresh_token.clone()),
         })
     }
+}
+
+pub(crate) fn oauth_account_id_from_credentials(
+    access_token: &ProviderCredential,
+    id_token: &ProviderCredential,
+) -> Result<Option<String>, ProviderError> {
+    for token in [access_token, id_token] {
+        let parts = token.expose().split('.').collect::<Vec<_>>();
+        if parts.len() != 3 {
+            continue;
+        }
+        let payload = URL_SAFE_NO_PAD
+            .decode(parts[1])
+            .map_err(|error| ProviderError::Authentication(error.to_string()))?;
+        let claims: serde_json::Value = serde_json::from_slice(&payload)
+            .map_err(|error| ProviderError::Authentication(error.to_string()))?;
+        if let Some(account_id) = claims
+            .pointer("/https:~1~1api.openai.com~1auth/chatgpt_account_id")
+            .and_then(serde_json::Value::as_str)
+        {
+            return Ok(Some(account_id.into()));
+        }
+    }
+    Ok(None)
 }
 
 async fn fetch_chatgpt_json(

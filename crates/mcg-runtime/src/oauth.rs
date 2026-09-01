@@ -506,6 +506,29 @@ impl AppRuntime {
         self.oauth_refresh.refresh_explicit(connection_id).await
     }
 
+    /// Holds the Root-owned credential rotation gate for one OAuth provider execution.
+    /// Non-OAuth connections do not need a gate and return `None`.
+    ///
+    /// # Errors
+    /// Returns an error when the provider connection is missing or authoritative
+    /// provider state cannot be read.
+    pub async fn lock_openai_oauth_execution(
+        &self,
+        connection_id: &str,
+    ) -> Result<Option<tokio::sync::OwnedMutexGuard<()>>, RuntimeError> {
+        let guard = self.oauth_refresh.lock_connection(connection_id).await;
+        if self
+            .oauth_refresh
+            .oauth_connection(connection_id)?
+            .is_some()
+        {
+            Ok(Some(guard))
+        } else {
+            drop(guard);
+            Ok(None)
+        }
+    }
+
     async fn ensure_oauth_session_capacity(&self, connection_id: &str) -> Result<(), RuntimeError> {
         let mut sessions = self.oauth_state.sessions.lock().await;
         let now = Instant::now();
@@ -657,6 +680,22 @@ mod tests {
             .expect("store")
             .event_count()
             .expect("events");
+
+        let execution_guard = runtime
+            .lock_openai_oauth_execution("subscription")
+            .await
+            .expect("OAuth execution gate")
+            .expect("subscription execution guard");
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(25),
+                runtime.refresh_openai_oauth("subscription")
+            )
+            .await
+            .is_err(),
+            "credential rotation must wait until governed provider execution releases its gate"
+        );
+        drop(execution_guard);
 
         let (first, second, third) = tokio::join!(
             runtime

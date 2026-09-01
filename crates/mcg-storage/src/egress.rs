@@ -817,17 +817,7 @@ fn validate_secret_handles(
     bindings: &[ModelSecretHandleBinding],
     connection: &ProviderConnection,
 ) -> Result<(), StorageError> {
-    let expected_slots = match connection.auth_mode {
-        ProviderAuthMode::None => Vec::new(),
-        ProviderAuthMode::ApiKey | ProviderAuthMode::BearerToken => {
-            vec![ModelSecretSlot::Primary]
-        }
-        ProviderAuthMode::ChatGptBrowserOauth | ProviderAuthMode::ChatGptDeviceCode => vec![
-            ModelSecretSlot::Primary,
-            ModelSecretSlot::OAuthIdToken,
-            ModelSecretSlot::OAuthRefreshToken,
-        ],
-    };
+    let expected_slots = model_secret_slots_for_auth(connection.auth_mode);
     if bindings.len() != expected_slots.len() || permit.secret_handles.len() != expected_slots.len()
     {
         return Err(StorageError::Conflict(
@@ -864,6 +854,21 @@ fn validate_secret_handles(
         ));
     }
     Ok(())
+}
+
+/// Returns the canonical least-authority credential slots for one provider execution.
+/// OAuth execution receives access and identity credentials but never the renewable token.
+#[must_use]
+pub fn model_secret_slots_for_auth(auth_mode: ProviderAuthMode) -> Vec<ModelSecretSlot> {
+    match auth_mode {
+        ProviderAuthMode::None => Vec::new(),
+        ProviderAuthMode::ApiKey | ProviderAuthMode::BearerToken => {
+            vec![ModelSecretSlot::Primary]
+        }
+        ProviderAuthMode::ChatGptBrowserOauth | ProviderAuthMode::ChatGptDeviceCode => {
+            vec![ModelSecretSlot::Primary, ModelSecretSlot::OAuthIdToken]
+        }
+    }
 }
 
 fn persist_secret_handles(
@@ -1092,6 +1097,23 @@ mod tests {
         };
         attempt.task_contract.content_hash = task_contract_content_hash(&contract).unwrap();
         (contract, attempt)
+    }
+
+    #[test]
+    fn oauth_execution_authority_excludes_the_renewable_credential() {
+        for auth_mode in [
+            ProviderAuthMode::ChatGptBrowserOauth,
+            ProviderAuthMode::ChatGptDeviceCode,
+        ] {
+            assert_eq!(
+                model_secret_slots_for_auth(auth_mode),
+                vec![ModelSecretSlot::Primary, ModelSecretSlot::OAuthIdToken]
+            );
+        }
+        assert!(
+            !model_secret_slots_for_auth(ProviderAuthMode::ChatGptDeviceCode)
+                .contains(&ModelSecretSlot::OAuthRefreshToken)
+        );
     }
 
     #[test]

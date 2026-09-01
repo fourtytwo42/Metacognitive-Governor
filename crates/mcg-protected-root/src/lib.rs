@@ -74,7 +74,7 @@ use mcg_provider_runner::{
 };
 use mcg_providers::{
     CONTRACT_VERSION, ModelDescriptor, ModelRequest, ModelResponse, ModelStreamEvent,
-    ProviderAuthMode, ProviderConnection, ProviderError, ProviderKind, ProviderStream, actual_cost,
+    ProviderConnection, ProviderError, ProviderKind, ProviderStream, actual_cost,
 };
 use mcg_runtime::{
     AppRuntime, ProtectedAgentModelDispatcher, ProtectedCompatibilityVerifier, RuntimeError,
@@ -86,7 +86,8 @@ use mcg_storage::{
     acquire_data_directory_lock, create_backup_bundle_from_snapshot, evaluation_report_source_ref,
     inspect_database_before_root, model_descriptor_source_ref, model_destination_source_ref,
     model_disclosure_hash, model_egress_policy_binding, model_egress_route_payload,
-    model_proposal_hash, model_provider_source_ref, snapshot_database_before_root,
+    model_proposal_hash, model_provider_source_ref, model_secret_slots_for_auth,
+    snapshot_database_before_root,
 };
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -360,7 +361,7 @@ pub fn authorize_runtime_model_egress(
     }
 
     let permit_id = PermitId::new();
-    let secret_slots = model_secret_slots(connection.auth_mode);
+    let secret_slots = model_secret_slots_for_auth(connection.auth_mode);
     let secret_handles = secret_slots
         .iter()
         .map(|_| SecretHandleId::new())
@@ -739,6 +740,10 @@ impl ProtectedAgentModelDispatcher for RootAgentModelDispatcher {
         let runtime = self.runtime.upgrade().ok_or_else(|| {
             ProviderError::Configuration("Protected Root runtime is unavailable".into())
         })?;
+        let _oauth_execution_guard = runtime
+            .lock_openai_oauth_execution(&target.provider_id)
+            .await
+            .map_err(protected_agent_provider_error)?;
         let (connection, catalog) = runtime
             .model_egress_route_state(&target.provider_id)
             .map_err(protected_agent_provider_error)?
@@ -779,6 +784,10 @@ impl ProtectedAgentModelDispatcher for RootAgentModelDispatcher {
         let runtime = self.runtime.upgrade().ok_or_else(|| {
             ProviderError::Configuration("Protected Root runtime is unavailable".into())
         })?;
+        let oauth_execution_guard = runtime
+            .lock_openai_oauth_execution(&target.provider_id)
+            .await
+            .map_err(protected_agent_provider_error)?;
         let (connection, catalog) = runtime
             .model_egress_route_state(&target.provider_id)
             .map_err(protected_agent_provider_error)?
@@ -799,7 +808,7 @@ impl ProtectedAgentModelDispatcher for RootAgentModelDispatcher {
             model.clone(),
         )
         .map_err(protected_agent_provider_error)?;
-        execute_compatibility_agent_model_stream(
+        let stream = execute_compatibility_agent_model_stream(
             runtime,
             &gateway,
             &connection,
@@ -812,7 +821,11 @@ impl ProtectedAgentModelDispatcher for RootAgentModelDispatcher {
             Utc::now(),
         )
         .await
-        .map_err(protected_agent_provider_error)
+        .map_err(protected_agent_provider_error)?;
+        Ok(Box::pin(stream.map(move |event| {
+            let _guard = &oauth_execution_guard;
+            event
+        })))
     }
 }
 
@@ -1679,6 +1692,9 @@ pub async fn execute_authorized_model_invocation_isolated(
         .ok_or_else(|| {
             StorageError::Conflict("model egress authorization does not exist".into())
         })?;
+    let _oauth_execution_guard = runtime
+        .lock_openai_oauth_execution(&authorization.proposal.route.provider_id)
+        .await?;
     let (connection, catalog) = runtime
         .model_egress_route_state(&authorization.proposal.route.provider_id)?
         .ok_or_else(|| StorageError::Conflict("model egress provider state disappeared".into()))?;
@@ -2434,20 +2450,6 @@ fn classify_model_destination(
             ModelDestinationClass::ThirdPartyRemote
         },
     )
-}
-
-fn model_secret_slots(auth_mode: ProviderAuthMode) -> Vec<ModelSecretSlot> {
-    match auth_mode {
-        ProviderAuthMode::None => Vec::new(),
-        ProviderAuthMode::ApiKey | ProviderAuthMode::BearerToken => {
-            vec![ModelSecretSlot::Primary]
-        }
-        ProviderAuthMode::ChatGptBrowserOauth | ProviderAuthMode::ChatGptDeviceCode => vec![
-            ModelSecretSlot::Primary,
-            ModelSecretSlot::OAuthIdToken,
-            ModelSecretSlot::OAuthRefreshToken,
-        ],
-    }
 }
 
 /// Persists exact Runtime intent before dispatch, sends it only to the authenticated generation,

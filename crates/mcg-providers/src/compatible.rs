@@ -16,6 +16,7 @@ use crate::{
     ModelProvider, ModelRequest, ModelResponse, ModelStreamEvent, OAuthTokenSet, OpenRouterRouting,
     OutputItem, PriceProvenance, ProviderAuthMode, ProviderConnection, ProviderCredential,
     ProviderError, ProviderKind, ProviderStream, RetryPolicy, ToolChoice, Usage,
+    oauth_account_id_from_credentials,
 };
 
 pub const CHATGPT_CODEX_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
@@ -51,26 +52,53 @@ impl OpenAiCompatibleProviderBuilder {
         auth_mode: ProviderAuthMode,
         tokens: &OAuthTokenSet,
     ) -> Result<OpenAiCompatibleProvider, ProviderError> {
+        Self::openai_subscription_execution(
+            ProviderConnection {
+                contract_version: CONTRACT_VERSION,
+                id: id.into(),
+                display_name: display_name.into(),
+                kind: ProviderKind::OpenAi,
+                base_url: CHATGPT_CODEX_BASE_URL.into(),
+                auth_mode,
+                organization: None,
+                project: None,
+            },
+            tokens.access_token.clone(),
+            &tokens.id_token,
+            RetryPolicy::default(),
+        )
+    }
+
+    /// Creates one execution-only OpenAI subscription provider from the exact
+    /// authorized access and identity credentials. A refresh token is deliberately
+    /// neither accepted nor available to this boundary.
+    ///
+    /// # Errors
+    /// Returns an error for a non-subscription route, malformed account claim,
+    /// invalid routing header, or provider construction failure.
+    pub fn openai_subscription_execution(
+        connection: ProviderConnection,
+        access_token: ProviderCredential,
+        id_token: &ProviderCredential,
+        retry_policy: RetryPolicy,
+    ) -> Result<OpenAiCompatibleProvider, ProviderError> {
         if !matches!(
-            auth_mode,
+            connection.auth_mode,
             ProviderAuthMode::ChatGptBrowserOauth | ProviderAuthMode::ChatGptDeviceCode
-        ) {
+        ) || connection.kind != ProviderKind::OpenAi
+            || connection.base_url != CHATGPT_CODEX_BASE_URL
+            || connection.organization.is_some()
+            || connection.project.is_some()
+        {
             return Err(ProviderError::Configuration(
-                "OpenAI subscription provider requires a ChatGPT OAuth mode".into(),
+                "OpenAI subscription execution requires the exact ChatGPT OAuth route".into(),
             ));
         }
-        let mut builder = Self::new(ProviderConnection {
-            contract_version: CONTRACT_VERSION,
-            id: id.into(),
-            display_name: display_name.into(),
-            kind: ProviderKind::OpenAi,
-            base_url: CHATGPT_CODEX_BASE_URL.into(),
-            auth_mode,
-            organization: None,
-            project: None,
-        })
-        .credential(tokens.access_token.clone());
-        if let Some(account_id) = tokens.account_id()? {
+        let account_id = oauth_account_id_from_credentials(&access_token, id_token)?;
+        let mut builder = Self::new(connection)
+            .credential(access_token)
+            .retry_policy(retry_policy);
+        if let Some(account_id) = account_id {
             let account_id = header::HeaderValue::from_str(&account_id)
                 .map_err(|error| ProviderError::Authentication(error.to_string()))?;
             builder.headers.insert(
@@ -1762,6 +1790,30 @@ mod tests {
         assert_eq!(
             provider.connection().auth_mode.billing_mode(),
             crate::BillingMode::Subscription
+        );
+        let execution = OpenAiCompatibleProviderBuilder::openai_subscription_execution(
+            provider.connection().clone(),
+            tokens.access_token.clone(),
+            &tokens.id_token,
+            RetryPolicy {
+                max_attempts: 1,
+                initial_backoff: Duration::ZERO,
+                max_backoff: Duration::ZERO,
+            },
+        )
+        .expect("execution-only subscription provider");
+        assert_eq!(execution.retry_policy.max_attempts, 1);
+        let mut substituted_route = execution.connection().clone();
+        substituted_route.base_url = "https://api.openai.com/v1".into();
+        assert!(
+            OpenAiCompatibleProviderBuilder::openai_subscription_execution(
+                substituted_route,
+                tokens.access_token,
+                &tokens.id_token,
+                RetryPolicy::default(),
+            )
+            .is_err(),
+            "subscription execution cannot cross into API billing"
         );
     }
 }

@@ -397,7 +397,7 @@ try {
         throw "Packaged provider runner qualification failed with exit code $LASTEXITCODE."
     }
     $providerQualification = $providerQualificationJson | ConvertFrom-Json
-    if ($providerQualification.protocol_version -ne 2 -or
+    if ($providerQualification.protocol_version -ne 3 -or
         $providerQualification.role -ne "provider_adapter" -or
         $providerQualification.storage_linked -ne $false -or
         $providerQualification.credential_store -ne "operating_system" -or
