@@ -36,7 +36,7 @@ The schema-59 permit kernel and deterministic in-process gateway do not send net
 
 ## Implemented isolated provider-runner checkpoint
 
-- `mcg-provider-runner` is a fixed adjacent one-request child with a bounded 16 MiB request/response protocol. Protected Root launches only that executable with a cleared environment, kill-on-drop supervision, Windows Job Object or POSIX process-group containment, concurrent bounded stdout/stderr drains, and a single deadline.
+- `mcg-provider-runner` is a fixed adjacent one-request child with a bounded 16 MiB request/response protocol. Protected Root accepts only a regular non-link executable, pins its SHA-256 identity at client construction, revalidates the bytes immediately before every launch, and refuses substitution. It launches with a cleared environment, kill-on-drop supervision, Windows Job Object or POSIX process-group containment, concurrent bounded stdout/stderr drains, and a single deadline.
 - The child independently recomputes the complete proposal, disclosure, request, and permit hashes and validates the invocation, role, attempt revision, lease generation, Runtime actor and identity, TaskContract, route, provider, model, destination, limits, expiry, permit, and exact handle map before credential or network access.
 - The Root-to-runner request contains only an opaque connection/credential-slot binding. The child loads only that exact operating-system credential, refuses credential mutation, and zeroizes transient `ProviderCredential` material on drop and process exit. API-key, bearer-token, and credential-free OpenAI-compatible routes are supported; ChatGPT OAuth remains explicitly denied until a separately governed broker exists.
 - The provider client is configured for exactly one physical attempt. Any later retry must receive a distinct invocation, permit, and `ModelRun`; the child cannot create a hidden physical retry.
@@ -49,7 +49,7 @@ The schema-59 permit kernel and deterministic in-process gateway do not send net
 - `mcg-contracts`: 20/20, including model overscope, substitution, duplicate-handle, invalid-time, and bounded-evidence failures.
 - `mcg-storage`: 113/113, including schema-59 authorization, replay, secret opacity, handle expiry, and InvocationManifest permit binding.
 - `mcg-protected-root`: 14/14 plus the real-child recovery integration test; the Root permit test covers exact route/disclosure/budget binding, opaque handle resolution, replay, destination substitution, and under-disclosure.
-- `mcg-provider-runner`: two unit tests, dependency/qualification process tests, and one real-child OpenAI-compatible loopback test pass. The dependency audit excludes storage, Protected Root, Runtime, tools, MCP, API, SQLite, and browser engines.
+- `mcg-provider-runner`: three unit tests, dependency/qualification process tests, and one real-child OpenAI-compatible loopback test pass. The added executable-substitution test replaces the initially pinned file and proves denial before launch. The dependency audit excludes storage, Protected Root, Runtime, tools, MCP, API, SQLite, and browser engines.
 - `cargo check --workspace --all-targets` passes.
 - Strict contracts Clippy passes. The new storage path passes with only the repository's recorded legacy lint classes allowed; Root passes with only its recorded legacy oversized IPC-dispatch function allowed.
 - Documentation, packaging-contract, formatting, and diff checks pass.

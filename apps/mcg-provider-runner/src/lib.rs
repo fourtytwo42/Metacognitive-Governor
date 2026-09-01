@@ -1,4 +1,5 @@
 use std::{
+    io::Read as _,
     path::{Path, PathBuf},
     process::Stdio,
     time::Duration,
@@ -110,6 +111,8 @@ pub struct ProviderRunnerResponse {
 pub enum ProviderRunnerClientError {
     #[error("provider runner is unavailable")]
     Unavailable,
+    #[error("provider runner executable identity changed")]
+    ExecutableChanged,
     #[error("provider runner request is too large")]
     RequestTooLarge,
     #[error("provider runner process could not be launched")]
@@ -133,6 +136,7 @@ pub enum ProviderRunnerClientError {
 #[derive(Debug, Clone)]
 pub struct ProviderRunnerClient {
     executable: PathBuf,
+    executable_sha256: [u8; 32],
     outer_timeout: Duration,
 }
 
@@ -166,13 +170,11 @@ impl ProviderRunnerClient {
         {
             return Err(ProviderRunnerClientError::Unavailable);
         }
-        let metadata = std::fs::symlink_metadata(executable)
-            .map_err(|_| ProviderRunnerClientError::Unavailable)?;
-        if !metadata.file_type().is_file() || is_link_or_reparse(&metadata) {
-            return Err(ProviderRunnerClientError::Unavailable);
-        }
+        let executable_sha256 =
+            executable_identity(executable).map_err(|_| ProviderRunnerClientError::Unavailable)?;
         Ok(Self {
             executable: executable.to_path_buf(),
+            executable_sha256,
             outer_timeout,
         })
     }
@@ -185,6 +187,9 @@ impl ProviderRunnerClient {
         &self,
         request: &ProviderRunnerRequest,
     ) -> Result<ModelResponse, ProviderRunnerClientError> {
+        if executable_identity(&self.executable).ok() != Some(self.executable_sha256) {
+            return Err(ProviderRunnerClientError::ExecutableChanged);
+        }
         let request_bytes =
             serde_json::to_vec(request).map_err(|_| ProviderRunnerClientError::InvalidResponse)?;
         if request_bytes.len() > PROVIDER_RUNNER_REQUEST_MAX_BYTES {
@@ -811,6 +816,27 @@ const fn runner_file_name() -> &'static str {
     }
 }
 
+fn executable_identity(path: &Path) -> Result<[u8; 32], std::io::Error> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if !metadata.file_type().is_file() || is_link_or_reparse(&metadata) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "provider runner executable is not a regular non-link file",
+        ));
+    }
+    let mut file = std::fs::File::open(path)?;
+    let mut digest = Sha256::new();
+    let mut buffer = vec![0_u8; 64 * 1024].into_boxed_slice();
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+    }
+    Ok(digest.finalize().into())
+}
+
 #[cfg(unix)]
 fn is_link_or_reparse(metadata: &std::fs::Metadata) -> bool {
     metadata.file_type().is_symlink()
@@ -1132,5 +1158,69 @@ mod tests {
         .await;
         assert_eq!(response.outcome, ProviderRunnerOutcome::Denied);
         assert_eq!(response.error_code.as_deref(), Some("authority_mismatch"));
+    }
+
+    #[tokio::test]
+    async fn client_rejects_executable_substitution_before_launch() {
+        let directory = tempfile::tempdir().expect("temporary runner directory");
+        let executable = directory.path().join(runner_file_name());
+        std::fs::write(&executable, b"verified runner bytes").expect("write runner fixture");
+        let client = ProviderRunnerClient::with_executable(&executable, Duration::from_secs(5))
+            .expect("construct pinned client");
+        std::fs::write(&executable, b"substituted runner bytes").expect("replace runner fixture");
+
+        let connection = ProviderConnection {
+            contract_version: mcg_providers::CONTRACT_VERSION,
+            id: "executable-substitution-fixture".into(),
+            display_name: "Executable Substitution Fixture".into(),
+            kind: ProviderKind::OpenAiCompatible,
+            base_url: "http://127.0.0.1:9/v1".into(),
+            auth_mode: ProviderAuthMode::None,
+            organization: None,
+            project: None,
+        };
+        let model = ModelDescriptor {
+            id: "fixture-model".into(),
+            display_name: "Fixture Model".into(),
+            owned_by: None,
+            context_window: None,
+            capabilities: ModelCapabilities::default(),
+            price: None,
+            metadata: serde_json::Value::Null,
+        };
+        let request = ModelRequest {
+            contract_version: mcg_providers::CONTRACT_VERSION,
+            model: model.id.clone(),
+            client_request_id: Some("executable-substitution-request".into()),
+            instructions: None,
+            messages: vec![Message {
+                role: MessageRole::User,
+                content: vec![ContentPart::Text {
+                    text: "hello".into(),
+                }],
+                name: None,
+            }],
+            tools: Vec::new(),
+            tool_choice: None,
+            structured_output: None,
+            reasoning: None,
+            temperature: None,
+            top_p: None,
+            max_output_tokens: Some(10),
+            metadata: serde_json::Value::Null,
+        };
+        let runner_request = ProviderRunnerRequest {
+            protocol_version: PROVIDER_RUNNER_PROTOCOL_VERSION,
+            request_id: Uuid::new_v4(),
+            authorization: fixture_authorization(&connection, &model, &request, Utc::now()),
+            connection,
+            model,
+            request,
+        };
+
+        assert!(matches!(
+            client.invoke(&runner_request).await,
+            Err(ProviderRunnerClientError::ExecutableChanged)
+        ));
     }
 }
