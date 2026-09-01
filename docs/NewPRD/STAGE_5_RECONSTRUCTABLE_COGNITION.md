@@ -1,6 +1,6 @@
 # Stage 5 — Runtime Worker and Reconstructable Deterministic Cognition
 
-**Status:** Contract/persistence foundation (`83b5629`), separate authenticated worker (`522ba92`), Root-owned real-process orchestration/recovery (`4a2a905`), authenticated Root/CLI reconstruction (`bde06f0`), progressive Desktop reconstruction (`1e94efb`), generation-safe idle service supervision (`dc54a88`), active invocation cancellation (`65f7073`), governed global agent browser (`44c6389`), canonical workflow/current-attempt invocation drill-down (`3d55d05`), and direct content-minimized remote Codex sub-agent inventory (`fb03f89`) implemented; release qualification remains open
+**Status:** Contract/persistence foundation (`83b5629`), separate authenticated worker (`522ba92`), Root-owned real-process orchestration/recovery (`4a2a905`), authenticated Root/CLI reconstruction (`bde06f0`), progressive Desktop reconstruction (`1e94efb`), generation-safe idle service supervision (`dc54a88`), active invocation cancellation (`65f7073`), governed global agent browser (`44c6389`), canonical workflow/current-attempt invocation drill-down (`3d55d05`), direct content-minimized remote Codex sub-agent inventory (`fb03f89`), and Root-owned compatibility Work → independent Verify → CompletionCertificate closure (`3447cb2`) implemented; release qualification remains open
 
 ## Delivered contract boundary
 
@@ -182,6 +182,8 @@ binding that the remote server did not persist.
 
 ## Verification
 
+- Compatibility verification checkpoint: Storage 118/118; Runtime 111 active with two explicit Windows Sandbox qualifications ignored; Protected Root 15/15 plus real-child action recovery; Runtime worker 12/12 real-process/dependency tests; API 103/103; whole-workspace all-target check; documentation, packaging, formatting, and diff gates — passed. The real worker matrix covers satisfied and failed criteria plus repeat observational Verify after a simulated crash-before-settlement. Injected legacy terminal-projection failure rolls back the certificate and canonical transition together.
+
 - `cargo test -p mcg-contracts` — 17/17 passed.
 - `cargo test -p mcg-platform` — 3/3 passed.
 - `cargo test -p mcg-runtime-worker --all-targets -- --test-threads=1` — 11/11 passed, including nine real-process/dependency tests.
@@ -205,7 +207,6 @@ Strict whole-storage Clippy still reaches the repository’s documented pre-exis
 
 Stage 5 is not complete until all of the following are implemented and qualified:
 
-1. Complete the compatibility-turn verification bridge: checkpoint `87887ae` now atomically moves approval waits to `Waiting(Approval)`, reclaims approved resumes under a fresh lease generation, moves a completed compatibility Work result to `Verifying`, and moves terminal errors or denied/cancelled approvals to `Failed` in the same transaction as the legacy projection. Root's generic certificate-plus-terminal settlement is now itself atomic and exact-replay safe, and newly attached compatibility contracts bind acceptance clauses to the exact planned `SuccessCondition` values needed for objective report mapping. A completed Work response still cannot assert success: persist the immutable objective report, dispatch an independent Verify invocation over that exact evidence, and use the atomic Root certificate settlement together with the legacy task/run projection.
-2. Run packaged active cancellation/service replacement, direct remote-inventory transport qualification, broader combined workflow/Runtime crash injection, native GUI UAT, migration, and matched Windows/Linux/macOS package gates.
+1. Run packaged active cancellation/service replacement, direct remote-inventory transport qualification, broader combined workflow/Runtime crash injection, native GUI UAT, migration, and matched Windows/Linux/macOS package gates.
 
 No real provider is required for this stage’s correctness. Root-bound remote egress permits and secret handles begin in Stage 6.

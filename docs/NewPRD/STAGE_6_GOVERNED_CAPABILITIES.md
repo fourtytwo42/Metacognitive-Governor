@@ -1,8 +1,8 @@
 # Stage 6 — Governed Providers, Tools, Hooks, and Plugins
 
-**Status:** Root-bound model-egress permit kernel, deterministic Root gateway, isolated credential-resolving OpenAI-compatible provider runner, fresh/resumed compatibility-agent production routing, and atomic post-call transition into canonical Verify/failure implemented; independent Verify/certificate completion, retry/stream/cancellation, product inspection, and the broader capability gateway remain open
+**Status:** Root-bound model-egress permit kernel, deterministic Root gateway, isolated credential-resolving OpenAI-compatible provider runner, fresh/resumed compatibility-agent production routing, and complete Root-owned Work → independent Verify → CompletionCertificate settlement implemented; retry/stream/cancellation, product inspection, and the broader capability gateway remain open
 
-**Product checkpoints:** `0e4c0e8` (`Add Root-bound model egress permits`), `deb4136` (`Add deterministic permit-consuming provider gateway`), `50f29fd` (`Add isolated governed provider runner`), `ad378b6` (`Pin governed provider runner identity`), `b6b2ddf` (`Route agent models through protected root`), and `87887ae` (`Settle compatibility turns into canonical workflows`)
+**Product checkpoints:** `0e4c0e8` (`Add Root-bound model egress permits`), `deb4136` (`Add deterministic permit-consuming provider gateway`), `50f29fd` (`Add isolated governed provider runner`), `ad378b6` (`Pin governed provider runner identity`), `b6b2ddf` (`Route agent models through protected root`), `87887ae` (`Settle compatibility turns into canonical workflows`), and `3447cb2` (`Verify compatibility work through protected root`)
 
 ## Authority boundary
 
@@ -54,10 +54,19 @@ The schema-59 permit kernel and deterministic in-process gateway do not send net
 - Production streaming remains refused until it has a separately authorized invocation path. OAuth-backed calls fail closed in the isolated runner until the governed broker exists.
 - Compatibility waiting, completion, and failure now share the legacy settlement transaction with the attached canonical attempt. Approval waiting becomes `Waiting(Approval)` and clears worker authority; approved resume records `Waiting(Approval) -> Ready -> Running` and increments the lease generation; completed Work becomes `Verifying` without claiming success; terminal turn errors and denied/cancelled approvals become `Failed`. A stale or expired canonical generation rejects and rolls back the legacy settlement.
 
+## Implemented independent compatibility Verify closure
+
+- Runtime freezes one stable evaluation ID and timestamp in a durable `Verifying` checkpoint, persists the immutable objective report, and cannot settle an attached Work target without one Root-produced completion.
+- Protected Root accepts only that evaluation ID. It reloads and validates the exact current prepared report, canonical attempt, TaskContract, planned `SuccessCondition` values, completed Work invocations, artifacts, and final Work response hash from authoritative storage.
+- Root launches the fixed authenticated Runtime worker under a fresh durable generation and dispatches a distinct deterministic Verify invocation. Its context contains the immutable report reference; every criterion maps to the exact TaskContract clause and objective result. Missing or substituted evidence fails closed.
+- Root constructs the CompletionCertificate from the completed Work and Verify lineage. Certificate persistence, canonical terminal transition, legacy task/run settlement, and evaluation-checkpoint completion occur in one SQLite transaction. An injected late legacy-projection failure leaves the workflow `Verifying` and persists no certificate.
+- A crash after observational Verify but before settlement may repeat Verify under a new worker/invocation identity. Both immutable runs remain inspectable, no external effect is repeated, and the same prepared report and Work evidence produce identical criterion results.
+
 ## Verified evidence
 
 - Production-route checkpoint `b6b2ddf`: Storage 116/116; Runtime 111 active with two explicit Windows Sandbox qualifications ignored; Protected Root 15/15 plus real-child action recovery; schema-50 interruption/retry/verified-backup-restore migration 1/1; focused registry-bypass and exact one-permit gateway regressions; changed-boundary Clippy; documentation, packaging, formatting, and diff gates pass.
 - Atomic settlement checkpoint `87887ae`: focused wait/resume/success/failure/stale-authority coverage, Storage 116/116, Runtime 111 active with two explicit Windows Sandbox qualifications ignored, and Protected Root 15/15 pass. Whole-storage strict Clippy still reaches the recorded legacy lint backlog; the changed files introduce no normal build, format, or diff failure.
+- Independent Verify checkpoint `3447cb2`: Storage 118/118, Runtime 111 active with two explicit Windows Sandbox qualifications ignored, Protected Root 15/15 plus real-child recovery, Runtime worker 12/12 including real satisfied/failed/replay verification, API 103/103, and the whole-workspace all-target check pass. Packaging/docs/format/diff gates pass. Strict transitive Clippy still stops in the recorded Codex/Storage/Runtime lint backlog; the new helper's only new size finding is explicitly documented and scoped.
 
 - `mcg-contracts`: 20/20, including model overscope, substitution, duplicate-handle, invalid-time, and bounded-evidence failures.
 - `mcg-storage`: 113/113, including schema-59 authorization, replay, secret opacity, handle expiry, and InvocationManifest permit binding.
@@ -77,7 +86,7 @@ The schema-59 permit kernel and deterministic in-process gateway do not send net
 
 ### 6B — Real governed provider route — substantially complete for compatibility agents
 
-- A real credential-free OpenAI-compatible Responses HTTP route passes through the isolated child in process tests. Schema 60 lets Root derive one immutable canonical contract/workflow/attempt from only an exact active compatibility agent lease ID, and fresh/resumed production compatibility-agent calls now attach, claim, authorize, dispatch, and atomically settle Work into `Verifying` or terminal errors into `Failed` without a legacy-provider fallback. Add the independent Verify/CompletionCertificate terminal bridge and opt-in external-provider qualification.
+- A real credential-free OpenAI-compatible Responses HTTP route passes through the isolated child in process tests. Schema 60 lets Root derive one immutable canonical contract/workflow/attempt from only an exact active compatibility agent lease ID, and fresh/resumed production compatibility-agent calls now attach, claim, authorize, dispatch, independently Verify, and atomically settle the certificate plus canonical/legacy terminal projections without a legacy-provider fallback. Add opt-in external-provider qualification.
 - Add streaming cancellation, response-size bounds, late/duplicate result fencing, retry fault injection, and observed provider/model fingerprint persistence.
 - Run opt-in real-provider tests and a bounded release smoke test without retaining prompts, responses, or credentials in generic logs/evidence.
 
