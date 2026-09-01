@@ -1,19 +1,20 @@
 use std::{
     path::PathBuf,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     },
     time::Duration,
 };
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use mcg_mcp::{McpCredential, McpCredentialStore, MemoryMcpCredentialStore};
 use mcg_process_runner::{
     GovernedHttpHeader, GovernedHttpHeaderValue, GovernedHttpOperation,
     HttpRunnerCapabilityEvidence, HttpRunnerClient, HttpRunnerOutcome,
     decode_governed_http_observation, execute_http_request_with_store,
-    http_qualification_request_with_evidence, http_runner_sandbox_profile,
-    runner_executable_source,
+    execute_http_request_with_stores, http_qualification_request_with_evidence,
+    http_runner_sandbox_profile, runner_executable_source,
 };
 use mcg_providers::{
     MemoryProviderCredentialStore, ProviderCredential, ProviderCredentialStore, ProviderSecretSlot,
@@ -64,6 +65,29 @@ async fn delayed_response_server(delay: Duration, response: Vec<u8>) -> (String,
         let _ = stream.shutdown().await;
     });
     (format!("http://{address}"), calls)
+}
+
+async fn capturing_server(response: Vec<u8>) -> (String, Arc<Mutex<Vec<u8>>>) {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind capturing fixture");
+    let address = listener.local_addr().expect("capturing fixture address");
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let observed = captured.clone();
+    tokio::spawn(async move {
+        let Ok((mut stream, _)) = listener.accept().await else {
+            return;
+        };
+        let mut bytes = vec![0_u8; 32 * 1024];
+        let count = stream.read(&mut bytes).await.unwrap_or_default();
+        observed
+            .lock()
+            .expect("capture request")
+            .extend_from_slice(&bytes[..count]);
+        let _ = stream.write_all(&response).await;
+        let _ = stream.shutdown().await;
+    });
+    (format!("http://{address}"), captured)
 }
 
 fn operation(method: &str, url: &str) -> GovernedHttpOperation {
@@ -237,6 +261,64 @@ async fn opaque_credential_is_resolved_only_in_runner_and_redacted_from_output()
             .expect("decode observation");
     let body = STANDARD.decode(observation.body_base64).expect("body");
     assert_eq!(body, b"[REDACTED]");
+}
+
+#[tokio::test]
+async fn opaque_mcp_bearer_is_exactly_bound_resolved_and_redacted() {
+    let secret = "fixture-mcp-private-token";
+    let body = format!("{{\"echo\":\"{secret}\"}}");
+    let response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )
+    .into_bytes();
+    let (origin, captured) = capturing_server(response).await;
+    let executable = std::env::current_exe().expect("test executable");
+    let evidence = HttpRunnerCapabilityEvidence {
+        runner: runner_executable_source(&executable).expect("test runner source"),
+        platform: mcg_process_runner::current_execution_platform(),
+        available_sandbox: http_runner_sandbox_profile(),
+        resource_ceiling: mcg_contracts::ToolResourceLimits {
+            timeout_ms: 120_000,
+            max_output_bytes: mcg_process_runner::HTTP_RUNNER_BODY_MAX_BYTES,
+            max_memory_bytes: 0,
+            max_child_processes: 0,
+        },
+    };
+    let mut operation = operation("POST", &format!("{origin}/mcp"));
+    operation.body_base64 = Some(STANDARD.encode(b"{\"jsonrpc\":\"2.0\"}"));
+    operation.headers.push(GovernedHttpHeader {
+        name: "authorization".into(),
+        value: GovernedHttpHeaderValue::McpBearer {
+            connection_id: "fixture-mcp".into(),
+        },
+    });
+    let request = http_qualification_request_with_evidence(&operation, &evidence)
+        .expect("MCP bearer qualification request");
+    let serialized = serde_json::to_string(&request).expect("serialize MCP request");
+    assert!(!serialized.contains(secret));
+    let mcp_store = MemoryMcpCredentialStore::default();
+    mcp_store
+        .save(
+            "fixture-mcp",
+            &McpCredential::new(secret).expect("MCP credential"),
+        )
+        .expect("save MCP credential");
+    let response = execute_http_request_with_stores(
+        &serde_json::to_vec(&request).expect("request bytes"),
+        &MemoryProviderCredentialStore::default(),
+        &mcp_store,
+    )
+    .await;
+    assert_eq!(response.outcome, HttpRunnerOutcome::Completed);
+    let captured = captured.lock().expect("captured request");
+    let outbound = String::from_utf8_lossy(&captured);
+    assert!(outbound.contains(&format!("authorization: Bearer {secret}")));
+    let observation =
+        decode_governed_http_observation(response.observation.as_ref().expect("observation"))
+            .expect("decode observation");
+    let body = STANDARD.decode(observation.body_base64).expect("body");
+    assert!(!String::from_utf8_lossy(&body).contains(secret));
 }
 
 #[tokio::test]

@@ -21,6 +21,7 @@ mcg-plugin-protocol = { path = "../mcg-plugin-protocol" }
 mcg-config = { path = "../mcg-config" }
 mcg-contracts = { path = "../mcg-contracts" }
 mcg-domain = { path = "../mcg-domain" }
+mcg-mcp = { path = "../mcg-mcp" }
 mcg-platform = { path = "../mcg-platform" }
 mcg-providers = { path = "../mcg-providers" }
 mcg-runtime = { path = "../mcg-runtime" }

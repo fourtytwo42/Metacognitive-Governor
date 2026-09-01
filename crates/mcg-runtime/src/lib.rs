@@ -118,7 +118,7 @@ use mcg_events::EventEnvelope;
 use mcg_mcp::{
     LEGACY_MCP_PROTOCOL_VERSION, MCP_PROTOCOL_VERSION, McpAuthMode, McpClient, McpConnection,
     McpCredential, McpCredentialStore, McpError, McpProtocolMode, McpToolCatalog,
-    MemoryMcpCredentialStore, OsMcpCredentialStore,
+    MemoryMcpCredentialStore, OsMcpCredentialStore, mcp_tool_classification,
 };
 use mcg_plugin_protocol::{
     PLUGIN_CAPABILITY_TURN_LIMIT, PLUGIN_SCHEMA_VERSION, PluginCapability,
@@ -27940,21 +27940,6 @@ fn exposed_mcp_tool_name(connection_id: &str, remote_name: &str) -> String {
         slug(remote_name, 20),
         &digest[..16]
     )
-}
-
-fn mcp_tool_classification(annotations: &serde_json::Value) -> (bool, bool, bool) {
-    let value = |name: &str, default| {
-        annotations
-            .get(name)
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(default)
-    };
-    let read_only = value("readOnlyHint", false);
-    let destructive = annotations
-        .get("destructiveHint")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(!read_only);
-    (read_only, destructive, value("openWorldHint", true))
 }
 
 fn protocol_mode_for_catalog(protocol_version: &str) -> Result<McpProtocolMode, McpError> {

@@ -60,6 +60,10 @@ use mcg_domain::{
     AgentLeaseId, EvaluationId, PluginCapabilityGrant, PluginCapabilityScope, PluginInvocationId,
     PluginRevisionId, ToolExecutionId, ToolRequestId,
 };
+use mcg_mcp::{
+    MCP_PROTOCOL_VERSION, McpAuthMode, McpProtocolMode, McpToolResult, McpTransport,
+    mcp_mirrored_header_value, mcp_tool_classification,
+};
 use mcg_platform::{
     MAX_ROOT_INVOCATION_MODEL_RUNS, MAX_ROOT_INVOCATION_SUMMARIES,
     MAX_ROOT_TOOL_AUTHORIZATION_SUMMARIES, MAX_ROOT_WORKFLOW_INVOCATIONS, PlatformError,
@@ -91,15 +95,16 @@ use mcg_process_runner::{
     GovernedProcessAuthority, GovernedProcessEnvironmentVariable, GovernedProcessOperation,
     HttpRunnerAuthorization, HttpRunnerCapabilityEvidence, HttpRunnerClient, HttpRunnerOutcome,
     HttpRunnerProtocolError, HttpRunnerRequest, HttpRunnerResponse, HttpRunnerSecretHandleBinding,
-    ProcessRunnerAuthorization, ProcessRunnerCapabilityEvidence, ProcessRunnerClient,
-    ProcessRunnerClientError, ProcessRunnerOutcome, ProcessRunnerProtocolError,
-    ProcessRunnerRequest, ProcessRunnerResponse, decode_governed_http_observation,
-    decode_governed_process_observation, executable_sha256 as governed_executable_sha256,
-    governed_http_authority_binding, governed_http_operation_payload, governed_http_reconciler,
-    governed_http_tool_manifest, governed_http_tool_policy, governed_process_authority_binding,
+    MCP_BEARER_SECRET_PROVIDER, ProcessRunnerAuthorization, ProcessRunnerCapabilityEvidence,
+    ProcessRunnerClient, ProcessRunnerClientError, ProcessRunnerOutcome,
+    ProcessRunnerProtocolError, ProcessRunnerRequest, ProcessRunnerResponse,
+    decode_governed_http_observation, decode_governed_process_observation,
+    executable_sha256 as governed_executable_sha256, governed_http_authority_binding,
+    governed_http_operation_payload, governed_http_reconciler, governed_http_tool_manifest,
+    governed_http_tool_policy, governed_process_authority_binding,
     governed_process_operation_payload, governed_process_reconciler,
     governed_process_tool_manifest, governed_process_tool_policy, http_effect_class,
-    http_request_from_authorized_action, http_secret_slot,
+    http_request_from_authorized_action, http_secret_slot, mcp_bearer_secret_slot,
     request_from_authorized_action as process_request_from_authorized_action,
     validate_governed_http_envelope, validate_governed_process_envelope,
 };
@@ -1485,6 +1490,9 @@ async fn execute_protected_plugin_capability(
     ) {
         return execute_plugin_http(dispatcher, runtime.as_ref(), &authority, request, now).await;
     }
+    if matches!(request.operation, PluginCapabilityOperation::McpCall { .. }) {
+        return execute_plugin_mcp(dispatcher, runtime.as_ref(), &authority, request, now).await;
+    }
     let (relative_path, max_bytes) = match &request.operation {
         PluginCapabilityOperation::FilesystemRead { path, max_bytes } => (path.clone(), *max_bytes),
         _ => {
@@ -1689,11 +1697,27 @@ fn plugin_http_credential_references(
     let mut references = Vec::new();
     let mut seen = BTreeSet::new();
     for header in &operation.headers {
-        if let GovernedHttpHeaderValue::Credential { provider, key } = &header.value
-            && let Ok(slot) = http_secret_slot(provider, key)
-            && seen.insert(slot.clone())
+        let reference = match &header.value {
+            GovernedHttpHeaderValue::Credential { provider, key } => {
+                http_secret_slot(provider, key)
+                    .ok()
+                    .map(|slot| (provider.clone(), key.clone(), slot))
+            }
+            GovernedHttpHeaderValue::McpBearer { connection_id } => {
+                mcp_bearer_secret_slot(connection_id).ok().map(|slot| {
+                    (
+                        MCP_BEARER_SECRET_PROVIDER.into(),
+                        connection_id.clone(),
+                        slot,
+                    )
+                })
+            }
+            GovernedHttpHeaderValue::Literal { .. } => None,
+        };
+        if let Some(reference) = reference
+            && seen.insert(reference.2.clone())
         {
-            references.push((provider.clone(), key.clone(), slot));
+            references.push(reference);
         }
     }
     references
@@ -1823,6 +1847,362 @@ fn ensure_http_tool_authorization(
         permit_ref: receipt.permit_ref,
         secret_handles,
     })
+}
+
+fn require_plugin_mcp_grant(
+    grants: &[PluginCapabilityGrant],
+    connection_id: &str,
+    tool_name: &str,
+) -> Result<(), ToolError> {
+    if grants.iter().any(|grant| {
+        grant.capability == PluginCapability::Mcp
+            && grant.scopes.iter().any(|scope| {
+                matches!(scope, PluginCapabilityScope::McpTool {
+                    connection_id: allowed_connection,
+                    tool_name: allowed_tool,
+                } if allowed_connection == connection_id && allowed_tool == tool_name)
+            })
+    }) {
+        Ok(())
+    } else {
+        Err(ToolError::Denied(format!(
+            "plugin MCP tool {connection_id}/{tool_name} is not exactly granted"
+        )))
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+async fn execute_plugin_mcp(
+    dispatcher: &RootPluginDispatcher,
+    runtime: &AppRuntime,
+    authority: &mcg_storage::PluginInvocationWorkflowAuthority,
+    request: PluginCapabilityRequest,
+    now: chrono::DateTime<Utc>,
+) -> Result<PluginCapabilityOutcome, ToolError> {
+    let PluginCapabilityOperation::McpCall {
+        connection_id,
+        tool_name,
+        arguments,
+        max_response_bytes,
+    } = &request.operation
+    else {
+        return Err(ToolError::Denied("plugin operation is not MCP".into()));
+    };
+    require_plugin_mcp_grant(
+        &authority.installation.capability_grants,
+        connection_id,
+        tool_name,
+    )?;
+    let connection = runtime
+        .mcp_connections()
+        .map_err(|error| ToolError::Execution(error.to_string()))?
+        .into_iter()
+        .find(|candidate| candidate.id == *connection_id)
+        .ok_or_else(|| ToolError::Denied("plugin MCP connection was not found".into()))?;
+    connection
+        .validate()
+        .map_err(|error| ToolError::Denied(error.to_string()))?;
+    if !connection.enabled {
+        return Err(ToolError::Denied(
+            "plugin MCP connection is disabled".into(),
+        ));
+    }
+    if connection.protocol_mode == McpProtocolMode::Legacy {
+        return Err(ToolError::Denied(
+            "legacy MCP requires a separately governed session executor".into(),
+        ));
+    }
+    let catalog = runtime
+        .mcp_catalog(connection_id)
+        .map_err(|error| ToolError::Execution(error.to_string()))?
+        .ok_or_else(|| ToolError::Denied("plugin MCP catalog was not found".into()))?;
+    catalog
+        .validate()
+        .map_err(|error| ToolError::Denied(error.to_string()))?;
+    if catalog.connection_id != *connection_id
+        || catalog.protocol_version != MCP_PROTOCOL_VERSION
+        || catalog.expires_at <= now
+    {
+        return Err(ToolError::Denied(
+            "plugin MCP catalog is stale or not the exact modern protocol".into(),
+        ));
+    }
+    let descriptor = catalog
+        .tools
+        .iter()
+        .find(|descriptor| descriptor.name == *tool_name)
+        .ok_or_else(|| ToolError::Denied("plugin MCP tool was not discovered".into()))?;
+    let classification = mcp_tool_classification(&descriptor.annotations);
+    let McpTransport::StreamableHttp { url } = &connection.transport else {
+        return Err(ToolError::Denied(
+            "stdio MCP requires a separately governed session executor".into(),
+        ));
+    };
+    let parsed = url::Url::parse(url)
+        .map_err(|_| ToolError::Denied("plugin MCP endpoint is invalid".into()))?;
+    if parsed.fragment().is_some() {
+        return Err(ToolError::Denied(
+            "plugin MCP endpoint fragments are not executable authority".into(),
+        ));
+    }
+    let rpc_id = Uuid::new_v4();
+    let rpc_body = serde_json::to_vec(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": rpc_id.to_string(),
+        "method": "tools/call",
+        "params": {
+            "name": tool_name,
+            "arguments": arguments,
+            "_meta": {
+                "io.modelcontextprotocol/protocolVersion": MCP_PROTOCOL_VERSION,
+                "io.modelcontextprotocol/clientCapabilities": {},
+            },
+        },
+    }))
+    .map_err(|error| ToolError::Denied(error.to_string()))?;
+    let mut headers = vec![
+        GovernedHttpHeader {
+            name: "accept".into(),
+            value: GovernedHttpHeaderValue::Literal {
+                value: "application/json".into(),
+            },
+        },
+        GovernedHttpHeader {
+            name: "content-type".into(),
+            value: GovernedHttpHeaderValue::Literal {
+                value: "application/json".into(),
+            },
+        },
+        GovernedHttpHeader {
+            name: "mcp-method".into(),
+            value: GovernedHttpHeaderValue::Literal {
+                value: "tools/call".into(),
+            },
+        },
+        GovernedHttpHeader {
+            name: "mcp-name".into(),
+            value: GovernedHttpHeaderValue::Literal {
+                value: mcp_mirrored_header_value(tool_name),
+            },
+        },
+        GovernedHttpHeader {
+            name: "mcp-protocol-version".into(),
+            value: GovernedHttpHeaderValue::Literal {
+                value: MCP_PROTOCOL_VERSION.into(),
+            },
+        },
+    ];
+    if connection.auth_mode == McpAuthMode::BearerToken {
+        headers.push(GovernedHttpHeader {
+            name: "authorization".into(),
+            value: GovernedHttpHeaderValue::McpBearer {
+                connection_id: connection_id.clone(),
+            },
+        });
+    }
+    let operation = GovernedHttpOperation {
+        method: "POST".into(),
+        url: parsed.to_string(),
+        origin: parsed.origin().ascii_serialization(),
+        headers,
+        body_base64: Some(STANDARD.encode(rpc_body)),
+        timeout_ms: 30_000,
+        max_response_bytes: *max_response_bytes,
+        max_redirects: 0,
+    };
+    let (operation_payload, operation_hash) =
+        governed_http_operation_payload(&operation).map_err(ToolError::Denied)?;
+    let attempt = &authority.workflow.attempt;
+    let lease_expiry = attempt
+        .lease_expires_at
+        .ok_or_else(|| ToolError::Denied("plugin MCP workflow has no active lease".into()))?;
+    let deadline = lease_expiry.min(now + Duration::seconds(PLUGIN_PERMIT_SECONDS));
+    let action_id = ActionId::new();
+    let action_authority = governed_http_authority_binding(&GovernedHttpAuthority {
+        action_id,
+        actor: dispatcher.runtime_actor,
+        operation_hash: operation_hash.clone(),
+        expires_at: deadline,
+    })
+    .map_err(ToolError::Denied)?;
+    let elevated_authority = policy_binding(
+        "mcg.plugin_mcp_authority.v1",
+        "MetaCog.PluginMcpAuthority",
+        &serde_json::json!({
+            "invocation_id": authority.invocation.id,
+            "plugin_revision_id": authority.revision.id,
+            "capability_request": request,
+            "source": authority.workflow.attachment.source,
+            "connection": connection,
+            "catalog_protocol": catalog.protocol_version,
+            "catalog_discovered_at": catalog.discovered_at,
+            "catalog_expires_at": catalog.expires_at,
+            "descriptor": descriptor,
+            "classification": {
+                "read_only": classification.0,
+                "destructive": classification.1,
+                "open_world": classification.2,
+            },
+            "physical_effect": "irreversible_post",
+        }),
+    )
+    .map_err(protected_plugin_tool_denied)?;
+    let budget = policy_binding(
+        "mcg.plugin_mcp_budget.v1",
+        "MetaCog.PluginMcpBudget",
+        &serde_json::json!({
+            "timeout_ms": operation.timeout_ms,
+            "max_response_bytes": operation.max_response_bytes,
+            "max_redirects": 0,
+        }),
+    )
+    .map_err(protected_plugin_tool_denied)?;
+    let envelope = ActionEnvelope {
+        id: action_id,
+        workflow_id: attempt.workflow_id,
+        attempt_id: attempt.attempt_id,
+        task_contract: attempt.task_contract.clone(),
+        actor: dispatcher.runtime_actor,
+        origin: Some(ActionOrigin {
+            conversation: None,
+            invocation: Some(authority.workflow.attachment.source.clone()),
+            command: None,
+            approval: None,
+            agent: None,
+            evidence: Vec::new(),
+        }),
+        authority: action_authority,
+        elevated_authority: Some(elevated_authority),
+        expected_versions: Vec::new(),
+        operation: operation_payload,
+        operation_hash,
+        effect_class: EffectClass::Irreversible,
+        preconditions: Vec::new(),
+        budget_reservation: budget,
+        idempotency_key: format!(
+            "plugin-capability:{}:{}",
+            authority.invocation.id, request.id
+        ),
+        compensation: None,
+        compensates_action: None,
+        reconciler: Some(governed_http_reconciler(&operation).map_err(ToolError::Denied)?),
+        reconciliation_deadline: Some(deadline),
+        created_at: now,
+    };
+    let execution = ActionExecution {
+        id: ActionExecutionId::new(),
+        action_id,
+        attempt_number: 1,
+        state: ActionExecutionState::Authorized,
+        revision: 1,
+        lease_generation: 0,
+        executor: None,
+        outcome: None,
+        created_at: now,
+        updated_at: now,
+    };
+    runtime
+        .authorize_canonical_action(
+            &envelope,
+            &execution,
+            attempt.revision,
+            attempt.lease_generation,
+            CorrelationId::new(),
+            now,
+        )
+        .map_err(protected_plugin_tool_denied)?;
+    #[cfg(test)]
+    let client: Arc<dyn GovernedHttpRunnerGateway> =
+        if let Some(gateway) = &dispatcher.test_http_gateway {
+            gateway.clone()
+        } else {
+            Arc::new(
+                HttpRunnerClient::adjacent_to(&dispatcher.root_executable)
+                    .map_err(|error| ToolError::Execution(error.to_string()))?,
+            )
+        };
+    #[cfg(not(test))]
+    let client: Arc<dyn GovernedHttpRunnerGateway> = Arc::new(
+        HttpRunnerClient::adjacent_to(&dispatcher.root_executable)
+            .map_err(|error| ToolError::Execution(error.to_string()))?,
+    );
+    let authorization = match ensure_http_tool_authorization(
+        runtime,
+        client.as_ref(),
+        &envelope,
+        &operation,
+        now,
+    ) {
+        Ok(authorization) => authorization,
+        Err(error) => {
+            runtime
+                .abandon_authorized_action_before_dispatch(
+                    execution.id,
+                    execution.revision,
+                    execution.lease_generation,
+                    CorrelationId::new(),
+                    &format!("abandon-plugin-mcp-authority:{}", request.id),
+                    Utc::now(),
+                )
+                .map_err(|abandon| ToolError::Execution(abandon.to_string()))?;
+            return Err(error);
+        }
+    };
+    let correlation_id = CorrelationId::new();
+    let mcp_execution = match runtime.dispatch_canonical_action(
+        execution.id,
+        execution.revision,
+        execution.lease_generation,
+        dispatcher.runtime_actor,
+        correlation_id,
+        &format!("plugin-mcp-dispatch:{}", request.id),
+        now,
+    ) {
+        Ok(execution) => execution,
+        Err(error) => {
+            runtime
+                .abandon_authorized_action_before_dispatch(
+                    execution.id,
+                    execution.revision,
+                    execution.lease_generation,
+                    CorrelationId::new(),
+                    &format!("abandon-plugin-mcp-dispatch:{}", request.id),
+                    Utc::now(),
+                )
+                .map_err(|abandon| ToolError::Execution(abandon.to_string()))?;
+            return Err(ToolError::Execution(error.to_string()));
+        }
+    };
+    let runner_request_id = Uuid::new_v4();
+    let runner_request = http_request_from_authorized_action(
+        &envelope,
+        &mcp_execution,
+        authorization,
+        runner_request_id,
+        now,
+    )
+    .map_err(|error| ToolError::Execution(error.to_string()))?;
+    let runner_result = client.invoke(&runner_request).await;
+    let outcome = settle_plugin_mcp_result(
+        runtime,
+        dispatcher.runtime_actor,
+        &request.id,
+        &envelope,
+        &mcp_execution,
+        correlation_id,
+        runner_request_id,
+        rpc_id,
+        runner_result,
+    )?;
+    let mut sessions = dispatcher
+        .capability_sessions
+        .lock()
+        .map_err(|_| ToolError::Execution("plugin capability session is unavailable".into()))?;
+    let session = sessions.get_mut(&authority.invocation.id).ok_or_else(|| {
+        ToolError::Execution("plugin capability session disappeared during dispatch".into())
+    })?;
+    session.outcomes.push(outcome.clone());
+    Ok(outcome)
 }
 
 #[allow(clippy::too_many_lines)]
@@ -2166,85 +2546,10 @@ fn settle_plugin_http_result(
             })?;
             let observation = decode_governed_http_observation(&postcondition)
                 .map_err(|error| ToolError::Execution(error.to_string()))?;
-            let observed = observe_plugin_http_result(
-                runtime,
-                dispatched,
-                correlation_id,
-                request_id,
-                postcondition.clone(),
-                response.finished_at,
-            )?;
-            if irreversible {
-                let (confirmed, _) = runtime
-                    .classify_canonical_action(
-                        observed.id,
-                        observed.revision,
-                        observed.lease_generation,
-                        EffectOutcome::EffectConfirmed {
-                            evidence: Vec::new(),
-                        },
-                        None,
-                        correlation_id,
-                        &format!("plugin-http-classify:{request_id}"),
-                        response.finished_at,
-                    )
-                    .map_err(|error| ToolError::Execution(error.to_string()))?;
-                let validated_at = Utc::now();
-                let validation = ActionValidation {
-                    action_id: confirmed.action_id,
-                    execution_id: confirmed.id,
-                    validator,
-                    evidence: Vec::new(),
-                    postconditions: vec![postcondition],
-                    validated_at,
-                };
-                let validated = runtime
-                    .validate_canonical_action_effect(
-                        confirmed.id,
-                        confirmed.revision,
-                        confirmed.lease_generation,
-                        &validation,
-                        CorrelationId::new(),
-                        &format!("validate-plugin-http:{}", confirmed.action_id),
-                        validated_at,
-                    )
-                    .map_err(|error| ToolError::Execution(error.to_string()))?;
-                let validation_event = runtime
-                    .canonical_action(validated.action_id, 32)
-                    .map_err(|error| ToolError::Execution(error.to_string()))?
-                    .and_then(|inspection| inspection.events.last().cloned())
-                    .ok_or_else(|| {
-                        ToolError::Execution("HTTP validation event is missing".into())
-                    })?;
-                runtime
-                    .commit_canonical_action_effect(
-                        validated.id,
-                        validated.revision,
-                        validated.lease_generation,
-                        validation_event.id,
-                        CorrelationId::new(),
-                        &format!("commit-plugin-http:{}", validated.action_id),
-                        Utc::now(),
-                    )
-                    .map_err(|error| ToolError::Execution(error.to_string()))?;
-            } else {
-                runtime
-                    .classify_canonical_action(
-                        observed.id,
-                        observed.revision,
-                        observed.lease_generation,
-                        EffectOutcome::NoEffectConfirmed,
-                        None,
-                        correlation_id,
-                        &format!("plugin-http-classify:{request_id}"),
-                        response.finished_at,
-                    )
-                    .map_err(|error| ToolError::Execution(error.to_string()))?;
-            }
             let body = STANDARD
                 .decode(&observation.body_base64)
                 .map_err(|_| ToolError::Execution("HTTP response body is invalid".into()))?;
-            Ok(PluginCapabilityOutcome::Succeeded {
+            let outcome = PluginCapabilityOutcome::Succeeded {
                 request_id: capability_request_id.into(),
                 outcome: serde_json::json!({
                     "status": if (200..300).contains(&observation.status_code) {
@@ -2265,8 +2570,300 @@ fn settle_plugin_http_result(
                         "detail": format!("resolved_ip={}", observation.resolved_ip),
                     }],
                 }),
+            };
+            settle_plugin_http_completed(
+                runtime,
+                validator,
+                envelope,
+                dispatched,
+                correlation_id,
+                request_id,
+                postcondition,
+                response.finished_at,
+                "http",
+                outcome,
+            )
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn settle_plugin_http_completed(
+    runtime: &AppRuntime,
+    validator: RuntimeActorId,
+    envelope: &ActionEnvelope,
+    dispatched: &ActionExecution,
+    correlation_id: CorrelationId,
+    request_id: Uuid,
+    postcondition: VersionedPayload,
+    finished_at: chrono::DateTime<Utc>,
+    family: &str,
+    outcome: PluginCapabilityOutcome,
+) -> Result<PluginCapabilityOutcome, ToolError> {
+    let observed = observe_plugin_http_result(
+        runtime,
+        dispatched,
+        correlation_id,
+        request_id,
+        postcondition.clone(),
+        finished_at,
+    )?;
+    if envelope.effect_class == EffectClass::Irreversible {
+        let (confirmed, _) = runtime
+            .classify_canonical_action(
+                observed.id,
+                observed.revision,
+                observed.lease_generation,
+                EffectOutcome::EffectConfirmed {
+                    evidence: Vec::new(),
+                },
+                None,
+                correlation_id,
+                &format!("plugin-{family}-classify:{request_id}"),
+                finished_at,
+            )
+            .map_err(|error| ToolError::Execution(error.to_string()))?;
+        let validated_at = Utc::now();
+        let validation = ActionValidation {
+            action_id: confirmed.action_id,
+            execution_id: confirmed.id,
+            validator,
+            evidence: Vec::new(),
+            postconditions: vec![postcondition],
+            validated_at,
+        };
+        let validated = runtime
+            .validate_canonical_action_effect(
+                confirmed.id,
+                confirmed.revision,
+                confirmed.lease_generation,
+                &validation,
+                CorrelationId::new(),
+                &format!("validate-plugin-{family}:{}", confirmed.action_id),
+                validated_at,
+            )
+            .map_err(|error| ToolError::Execution(error.to_string()))?;
+        let validation_event = runtime
+            .canonical_action(validated.action_id, 32)
+            .map_err(|error| ToolError::Execution(error.to_string()))?
+            .and_then(|inspection| inspection.events.last().cloned())
+            .ok_or_else(|| ToolError::Execution("HTTP validation event is missing".into()))?;
+        runtime
+            .commit_canonical_action_effect(
+                validated.id,
+                validated.revision,
+                validated.lease_generation,
+                validation_event.id,
+                CorrelationId::new(),
+                &format!("commit-plugin-{family}:{}", validated.action_id),
+                Utc::now(),
+            )
+            .map_err(|error| ToolError::Execution(error.to_string()))?;
+    } else {
+        runtime
+            .classify_canonical_action(
+                observed.id,
+                observed.revision,
+                observed.lease_generation,
+                EffectOutcome::NoEffectConfirmed,
+                None,
+                correlation_id,
+                &format!("plugin-{family}-classify:{request_id}"),
+                finished_at,
+            )
+            .map_err(|error| ToolError::Execution(error.to_string()))?;
+    }
+    Ok(outcome)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn settle_plugin_mcp_result(
+    runtime: &AppRuntime,
+    validator: RuntimeActorId,
+    capability_request_id: &str,
+    envelope: &ActionEnvelope,
+    dispatched: &ActionExecution,
+    correlation_id: CorrelationId,
+    request_id: Uuid,
+    rpc_id: Uuid,
+    result: Result<HttpRunnerResponse, ProcessRunnerClientError>,
+) -> Result<PluginCapabilityOutcome, ToolError> {
+    let response = match result {
+        Ok(response) => response,
+        Err(error) => {
+            if error.effect_may_have_occurred() {
+                classify_plugin_http_unknown(
+                    runtime,
+                    envelope,
+                    dispatched,
+                    correlation_id,
+                    request_id,
+                    Some(process_runner_client_error_code(error)),
+                    Utc::now(),
+                )?;
+                return Ok(PluginCapabilityOutcome::Failed {
+                    request_id: capability_request_id.into(),
+                    error_code: "capability_execution_uncertain".into(),
+                });
+            }
+            settle_plugin_http_no_effect(
+                runtime,
+                dispatched,
+                correlation_id,
+                request_id,
+                "mcg.mcp_runner_transport_no_effect.v1",
+                Some(process_runner_client_error_code(error)),
+                Utc::now(),
+            )?;
+            return Ok(PluginCapabilityOutcome::Failed {
+                request_id: capability_request_id.into(),
+                error_code: "mcp_request_failed".into(),
+            });
+        }
+    };
+    match response.outcome {
+        HttpRunnerOutcome::OutcomeUnknown => {
+            classify_plugin_http_unknown(
+                runtime,
+                envelope,
+                dispatched,
+                correlation_id,
+                request_id,
+                response.error_code.as_deref(),
+                response.finished_at,
+            )?;
+            Ok(PluginCapabilityOutcome::Failed {
+                request_id: capability_request_id.into(),
+                error_code: "capability_execution_uncertain".into(),
             })
         }
+        HttpRunnerOutcome::NoEffectConfirmed | HttpRunnerOutcome::Denied => {
+            settle_plugin_http_no_effect(
+                runtime,
+                dispatched,
+                correlation_id,
+                request_id,
+                "mcg.mcp_runner_no_effect.v1",
+                response.error_code.as_deref(),
+                response.finished_at,
+            )?;
+            Ok(PluginCapabilityOutcome::Failed {
+                request_id: capability_request_id.into(),
+                error_code: response.error_code.unwrap_or_else(|| "mcp_denied".into()),
+            })
+        }
+        HttpRunnerOutcome::Completed => {
+            let Some(postcondition) = response.observation else {
+                classify_plugin_http_unknown(
+                    runtime,
+                    envelope,
+                    dispatched,
+                    correlation_id,
+                    request_id,
+                    Some("mcp_observation_missing"),
+                    response.finished_at,
+                )?;
+                return Ok(PluginCapabilityOutcome::Failed {
+                    request_id: capability_request_id.into(),
+                    error_code: "mcp_response_invalid".into(),
+                });
+            };
+            let Ok(outcome) =
+                plugin_mcp_response_outcome(capability_request_id, rpc_id, &postcondition)
+            else {
+                classify_plugin_http_unknown(
+                    runtime,
+                    envelope,
+                    dispatched,
+                    correlation_id,
+                    request_id,
+                    Some("mcp_response_invalid"),
+                    response.finished_at,
+                )?;
+                return Ok(PluginCapabilityOutcome::Failed {
+                    request_id: capability_request_id.into(),
+                    error_code: "mcp_response_invalid".into(),
+                });
+            };
+            settle_plugin_http_completed(
+                runtime,
+                validator,
+                envelope,
+                dispatched,
+                correlation_id,
+                request_id,
+                postcondition,
+                response.finished_at,
+                "mcp",
+                outcome,
+            )
+        }
+    }
+}
+
+fn plugin_mcp_response_outcome(
+    capability_request_id: &str,
+    rpc_id: Uuid,
+    postcondition: &VersionedPayload,
+) -> Result<PluginCapabilityOutcome, ()> {
+    let observation = decode_governed_http_observation(postcondition).map_err(|_| ())?;
+    let body = STANDARD.decode(&observation.body_base64).map_err(|_| ())?;
+    let envelope: serde_json::Value = serde_json::from_slice(&body).map_err(|_| ())?;
+    let object = envelope.as_object().ok_or(())?;
+    if object.get("jsonrpc") != Some(&serde_json::json!("2.0"))
+        || object.get("id") != Some(&serde_json::json!(rpc_id.to_string()))
+    {
+        return Err(());
+    }
+    match (object.get("result"), object.get("error")) {
+        (Some(result), None) if (200..300).contains(&observation.status_code) => {
+            let result: McpToolResult = serde_json::from_value(result.clone()).map_err(|_| ())?;
+            let result_json = serde_json::to_string(&result).map_err(|_| ())?;
+            if result.is_error {
+                Ok(PluginCapabilityOutcome::Failed {
+                    request_id: capability_request_id.into(),
+                    error_code: "mcp_tool_error".into(),
+                })
+            } else {
+                Ok(PluginCapabilityOutcome::Succeeded {
+                    request_id: capability_request_id.into(),
+                    outcome: serde_json::json!({
+                        "status": ToolOutcomeStatus::Succeeded,
+                        "summary": "MCP tool completed through an exact Protected Root permit",
+                        "exit_code": null,
+                        "stdout": result_json,
+                        "stderr": null,
+                        "truncated": observation.truncated,
+                        "content_type": observation.content_type,
+                        "artifacts": [],
+                        "verification": [{
+                            "method": "protected-root-mcp-permit",
+                            "passed": true,
+                            "detail": format!("resolved_ip={}", observation.resolved_ip),
+                        }],
+                    }),
+                })
+            }
+        }
+        (None, Some(error)) => {
+            let error = error.as_object().ok_or(())?;
+            if error
+                .get("code")
+                .and_then(serde_json::Value::as_i64)
+                .is_none()
+                || error
+                    .get("message")
+                    .and_then(serde_json::Value::as_str)
+                    .is_none()
+            {
+                return Err(());
+            }
+            Ok(PluginCapabilityOutcome::Failed {
+                request_id: capability_request_id.into(),
+                error_code: "mcp_remote_error".into(),
+            })
+        }
+        _ => Err(()),
     }
 }
 
@@ -8016,6 +8613,7 @@ mod tests {
         PluginRevisionId, PluginSignature, PluginSignatureState, ProjectId, RunId, TaskEnvelope,
         TaskState,
     };
+    use mcg_mcp::{McpConnection, McpServerInfo, McpToolCatalog, McpToolDescriptor};
     use mcg_platform::{
         cancel_root_workflow, exchange_root_rpc, query_root_action, query_root_actions,
         query_root_capabilities, query_root_capability, query_root_invocation,
@@ -8042,6 +8640,60 @@ mod tests {
         .expect("reference payload")
         .content_hash("TestRootWorkflowRef")
         .expect("reference hash")
+    }
+
+    #[test]
+    fn plugin_mcp_response_requires_exact_jsonrpc_identity_and_shape() {
+        let rpc_id = Uuid::new_v4();
+        let observation = |body: serde_json::Value| {
+            VersionedPayload::canonical_v1(
+                StableTypeId::parse(mcg_process_runner::GOVERNED_HTTP_OBSERVATION_TYPE)
+                    .expect("observation type"),
+                &serde_json::json!({
+                    "status_code": 200,
+                    "final_url": "https://mcp.example.test/rpc",
+                    "resolved_ip": "203.0.113.10",
+                    "content_type": "application/json",
+                    "body_base64": STANDARD.encode(serde_json::to_vec(&body).expect("body")),
+                    "truncated": false,
+                }),
+            )
+            .expect("observation")
+        };
+        let exact = observation(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": rpc_id.to_string(),
+            "result": {"isError": false, "content": []},
+        }));
+        assert!(plugin_mcp_response_outcome("request", rpc_id, &exact).is_ok());
+        let substituted = observation(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": Uuid::new_v4().to_string(),
+            "result": {"isError": false, "content": []},
+        }));
+        assert!(plugin_mcp_response_outcome("request", rpc_id, &substituted).is_err());
+        let ambiguous = observation(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": rpc_id.to_string(),
+            "result": {"isError": false, "content": []},
+            "error": {"code": -32000, "message": "substituted"},
+        }));
+        assert!(plugin_mcp_response_outcome("request", rpc_id, &ambiguous).is_err());
+    }
+
+    #[test]
+    fn plugin_mcp_grant_requires_exact_connection_and_tool() {
+        let grants = vec![PluginCapabilityGrant {
+            schema_version: PLUGIN_CATALOG_SCHEMA_VERSION,
+            capability: PluginCapability::Mcp,
+            scopes: vec![PluginCapabilityScope::McpTool {
+                connection_id: "approved".into(),
+                tool_name: "exact".into(),
+            }],
+        }];
+        assert!(require_plugin_mcp_grant(&grants, "approved", "exact").is_ok());
+        assert!(require_plugin_mcp_grant(&grants, "other", "exact").is_err());
+        assert!(require_plugin_mcp_grant(&grants, "approved", "other").is_err());
     }
 
     fn workflow_policy(label: &str) -> PolicyBinding {
@@ -8407,6 +9059,29 @@ mod tests {
                 .expect("scripted HTTP outcome");
             let now = Utc::now();
             let (observation, error_code, detail) = if outcome == HttpRunnerOutcome::Completed {
+                let response_body = if operation.headers.iter().any(|header| {
+                    header.name == "mcp-method"
+                        && matches!(&header.value, GovernedHttpHeaderValue::Literal { value }
+                            if value == "tools/call")
+                }) {
+                    let body = STANDARD
+                        .decode(operation.body_base64.as_deref().expect("MCP request body"))
+                        .expect("MCP body base64");
+                    let request: serde_json::Value =
+                        serde_json::from_slice(&body).expect("MCP request JSON");
+                    serde_json::to_vec(&serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": request.get("id").expect("MCP request id"),
+                        "result": {
+                            "isError": false,
+                            "content": [{"type": "text", "text": "governed MCP"}],
+                            "structuredContent": {"governed": true},
+                        },
+                    }))
+                    .expect("MCP response JSON")
+                } else {
+                    b"{\"governed\":true}".to_vec()
+                };
                 (
                     Some(
                         VersionedPayload::canonical_v1(
@@ -8419,7 +9094,7 @@ mod tests {
                                 "final_url": operation.url.split('?').next().unwrap_or(&operation.url),
                                 "resolved_ip": "203.0.113.10",
                                 "content_type": "application/json",
-                                "body_base64": STANDARD.encode(b"{\"governed\":true}"),
+                                "body_base64": STANDARD.encode(response_body),
                                 "truncated": false,
                             }),
                         )
@@ -12254,6 +12929,296 @@ mod tests {
             mcg_contracts::ReconciliationJobState::UserActionRequired
         );
         assert_eq!(http_requests.lock().expect("HTTP requests").len(), 3);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn root_governs_exact_modern_plugin_mcp_and_preserves_unknown_without_redispatch() {
+        let temporary = tempfile::tempdir().expect("temporary Root data directory");
+        let project_root = tempfile::tempdir().expect("plugin project root");
+        let config = AppConfig::default().with_data_directory(temporary.path());
+        let discovered_at = Utc::now();
+        {
+            let mut store = SqliteEventStore::open(config.database_path()).expect("MCP store");
+            store
+                .record_mcp_configuration(
+                    &McpConnection {
+                        contract_version: mcg_mcp::MCP_CONNECTION_CONTRACT_VERSION,
+                        id: "governed-mcp".into(),
+                        display_name: "Governed MCP fixture".into(),
+                        transport: McpTransport::StreamableHttp {
+                            url: "https://mcp.example.test/rpc".into(),
+                        },
+                        auth_mode: McpAuthMode::BearerToken,
+                        protocol_mode: McpProtocolMode::Modern20260728,
+                        enabled: true,
+                    },
+                    &McpToolCatalog {
+                        connection_id: "governed-mcp".into(),
+                        protocol_version: MCP_PROTOCOL_VERSION.into(),
+                        server_info: McpServerInfo {
+                            name: "fixture".into(),
+                            version: Some("1.0.0".into()),
+                        },
+                        capabilities: serde_json::json!({"tools": {}}),
+                        tools: vec![McpToolDescriptor {
+                            name: "change_state".into(),
+                            title: Some("Change state".into()),
+                            description: Some("Fixture mutation".into()),
+                            input_schema: serde_json::json!({
+                                "type": "object",
+                                "properties": {"value": {"type": "integer"}},
+                                "required": ["value"],
+                            }),
+                            output_schema: None,
+                            annotations: serde_json::json!({
+                                "readOnlyHint": false,
+                                "destructiveHint": true,
+                                "openWorldHint": true,
+                            }),
+                        }],
+                        discovered_at,
+                        expires_at: discovered_at + Duration::hours(1),
+                    },
+                    discovered_at,
+                )
+                .expect("record MCP configuration");
+        }
+        let runtime = Arc::new(AppRuntime::open(config.clone()).expect("runtime"));
+        let project_id = ProjectId::new();
+        runtime
+            .discover_project(project_root.path(), project_id)
+            .expect("discover plugin project");
+        let mut task = TaskEnvelope::new("exercise governed plugin MCP");
+        task.project_id = Some(project_id);
+        runtime.create_task(&task).expect("create plugin task");
+        let identity = current_runtime_identity().expect("Root identity");
+        runtime
+            .initialize_root_ownership(
+                identity.clone(),
+                RootMigrationReceipt {
+                    schema_version: PROTOCOL_V1,
+                    from_storage_schema: STORAGE_SCHEMA_VERSION,
+                    to_storage_schema: STORAGE_SCHEMA_VERSION,
+                    backup_path: None,
+                    backup_sha256: None,
+                    migrated_at: Utc::now(),
+                },
+            )
+            .expect("Root ownership");
+        let plugin_requests = Arc::new(Mutex::new(Vec::new()));
+        let http_requests = Arc::new(Mutex::new(Vec::new()));
+        let plugin_gateway = Arc::new(ScriptedProtectedPluginGateway {
+            runner: SourceRef {
+                source_type: StableTypeId::parse("mcg.plugin_runner_executable.v1")
+                    .expect("runner type"),
+                locator: "mcg-plugin-runner".into(),
+                content_hash: ContentHash {
+                    algorithm: HashAlgorithm::Sha256,
+                    domain: "MetaCog.PluginRunnerExecutable".into(),
+                    digest_hex: "4".repeat(64),
+                },
+            },
+            requests: plugin_requests,
+            turns: Mutex::new(VecDeque::from([
+                PluginGuestTurn::CapabilityRequest {
+                    request: PluginCapabilityRequest {
+                        schema_version: PLUGIN_SCHEMA_VERSION,
+                        id: "mcp-success".into(),
+                        operation: PluginCapabilityOperation::McpCall {
+                            connection_id: "governed-mcp".into(),
+                            tool_name: "change_state".into(),
+                            arguments: serde_json::json!({"value": 7}),
+                            max_response_bytes: 64 * 1024,
+                        },
+                    },
+                },
+                PluginGuestTurn::Completed {
+                    output: serde_json::json!({"mcp": true}),
+                },
+            ])),
+        });
+        let http_gateway = Arc::new(ScriptedHttpGateway {
+            calls: http_requests.clone(),
+            outcomes: Mutex::new(VecDeque::from([HttpRunnerOutcome::Completed])),
+        });
+        runtime
+            .install_protected_plugin_dispatcher(Arc::new(RootPluginDispatcher {
+                runtime: Arc::downgrade(&runtime),
+                root_executable: PathBuf::from("unused-in-injected-test"),
+                runtime_actor: RuntimeActorId(identity.instance_id.0),
+                runtime_identity: identity,
+                capability_sessions: Mutex::new(BTreeMap::new()),
+                test_gateway: Some(plugin_gateway.clone()),
+                test_action_gateway: None,
+                test_process_gateway: None,
+                test_http_gateway: Some(http_gateway.clone()),
+            }))
+            .expect("install protected plugin dispatcher");
+        let module = br#"(module (func (export "_start")))"#;
+        let revision = PluginRevision {
+            schema_version: PLUGIN_CATALOG_SCHEMA_VERSION,
+            id: PluginRevisionId::new(),
+            manifest: PluginManifest {
+                schema_version: PLUGIN_SCHEMA_VERSION,
+                id: "example.protected-mcp".into(),
+                display_name: "Protected MCP fixture".into(),
+                version: "1.0.0".into(),
+                class: PluginClass::SandboxedWasi,
+                requested_capabilities: vec![PluginCapability::Mcp],
+            },
+            module_sha256: format!("{:x}", Sha256::digest(module)),
+            module_size_bytes: u64::try_from(module.len()).expect("module size"),
+            source: PluginInstallSource::LocalImport,
+            signature: PluginSignature {
+                state: PluginSignatureState::Unsigned,
+                scheme: None,
+                signer: None,
+                signature_sha256: None,
+            },
+            installed_at: Utc::now(),
+        };
+        let installation = runtime
+            .install_sandboxed_plugin(&revision, module)
+            .expect("install protected MCP plugin");
+        let installation = runtime
+            .set_plugin_capability_grants(
+                &revision.manifest.id,
+                installation.revision,
+                vec![PluginCapabilityGrant {
+                    schema_version: PLUGIN_CATALOG_SCHEMA_VERSION,
+                    capability: PluginCapability::Mcp,
+                    scopes: vec![PluginCapabilityScope::McpTool {
+                        connection_id: "governed-mcp".into(),
+                        tool_name: "change_state".into(),
+                    }],
+                }],
+            )
+            .expect("grant exact plugin MCP tool");
+        runtime
+            .set_plugin_enabled(&revision.manifest.id, installation.revision, true)
+            .expect("enable protected MCP plugin");
+
+        let succeeded = runtime
+            .invoke_sandboxed_plugin(
+                PluginInvocationId::new(),
+                &revision.manifest.id,
+                Some(task.id),
+                serde_json::json!({"goal": "MCP proof"}),
+            )
+            .await
+            .expect("invoke protected MCP plugin");
+        assert_eq!(
+            succeeded.invocation.state,
+            mcg_domain::PluginInvocationState::Succeeded
+        );
+        {
+            let calls = http_requests.lock().expect("MCP HTTP requests");
+            assert_eq!(calls.len(), 1);
+            assert_eq!(
+                calls[0].authorization.permit.allowed_effect_class,
+                EffectClass::Irreversible
+            );
+            assert_eq!(calls[0].authorization.permit.secret_handles.len(), 1);
+            assert_eq!(
+                calls[0].authorization.secret_handles[0].provider,
+                MCP_BEARER_SECRET_PROVIDER
+            );
+            assert_eq!(calls[0].authorization.secret_handles[0].key, "governed-mcp");
+            let operation: GovernedHttpOperation = serde_json::from_value(
+                decode_canonical_cbor_v1(&calls[0].operation.bytes).expect("MCP operation CBOR"),
+            )
+            .expect("MCP HTTP operation");
+            assert_eq!(operation.method, "POST");
+            assert_eq!(operation.max_redirects, 0);
+            assert!(operation.headers.iter().any(|header| {
+                matches!(&header.value, GovernedHttpHeaderValue::McpBearer { connection_id }
+                    if connection_id == "governed-mcp")
+            }));
+        }
+        let committed = runtime
+            .canonical_actions(20)
+            .expect("MCP actions")
+            .into_iter()
+            .find(|action| action.effect_class == EffectClass::Irreversible)
+            .expect("MCP irreversible action");
+        assert_eq!(committed.state, ActionExecutionState::Committed);
+
+        http_gateway
+            .outcomes
+            .lock()
+            .expect("MCP outcomes")
+            .push_back(HttpRunnerOutcome::OutcomeUnknown);
+        plugin_gateway
+            .turns
+            .lock()
+            .expect("plugin turns")
+            .push_back(PluginGuestTurn::CapabilityRequest {
+                request: PluginCapabilityRequest {
+                    schema_version: PLUGIN_SCHEMA_VERSION,
+                    id: "mcp-unknown".into(),
+                    operation: PluginCapabilityOperation::McpCall {
+                        connection_id: "governed-mcp".into(),
+                        tool_name: "change_state".into(),
+                        arguments: serde_json::json!({"value": 8}),
+                        max_response_bytes: 64 * 1024,
+                    },
+                },
+            });
+        let uncertain = runtime
+            .invoke_sandboxed_plugin(
+                PluginInvocationId::new(),
+                &revision.manifest.id,
+                Some(task.id),
+                serde_json::json!({"goal": "MCP response loss"}),
+            )
+            .await
+            .expect("settle uncertain MCP plugin");
+        assert_eq!(
+            uncertain.invocation.state,
+            mcg_domain::PluginInvocationState::Uncertain
+        );
+        assert_eq!(http_requests.lock().expect("MCP HTTP requests").len(), 2);
+        let unknown_action = runtime
+            .canonical_actions(20)
+            .expect("MCP actions")
+            .into_iter()
+            .find(|action| action.state == ActionExecutionState::OutcomeUnknown)
+            .expect("unknown MCP action");
+        let job = runtime
+            .due_canonical_reconciliations(Utc::now(), 20)
+            .expect("due MCP reconciliation")
+            .into_iter()
+            .find(|job| job.action_id == unknown_action.action_id)
+            .expect("durable MCP reconciliation job");
+        drop(runtime);
+
+        let reopened = AppRuntime::open(config).expect("reopen MCP Root");
+        assert_eq!(
+            latest_action_execution(
+                &reopened
+                    .canonical_action(unknown_action.action_id, 32)
+                    .expect("inspect reopened MCP action")
+                    .expect("reopened MCP action")
+            )
+            .expect("reopened MCP execution")
+            .state,
+            ActionExecutionState::OutcomeUnknown
+        );
+        assert_eq!(http_requests.lock().expect("MCP HTTP requests").len(), 2);
+        let recovery = reopened
+            .recover_action_reconciliations(job.deadline)
+            .expect("escalate manual MCP reconciliation");
+        assert_eq!(recovery.escalated, 1);
+        assert_eq!(
+            reopened
+                .canonical_reconciliation_job(job.id)
+                .expect("load escalated MCP reconciliation")
+                .expect("MCP reconciliation")
+                .state,
+            mcg_contracts::ReconciliationJobState::UserActionRequired
+        );
+        assert_eq!(http_requests.lock().expect("MCP HTTP requests").len(), 2);
     }
 
     #[tokio::test]

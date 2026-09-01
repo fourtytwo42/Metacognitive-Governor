@@ -185,7 +185,7 @@ impl ModernHttpMcpClient {
                 .map_err(|_| McpError::Configuration("invalid MCP method".into()))?,
         );
         if let Some(name) = tool_name {
-            let mirrored = mirror_header_value(name);
+            let mirrored = mcp_mirrored_header_value(name);
             headers.insert(
                 "mcp-name",
                 HeaderValue::from_str(&mirrored)
@@ -245,7 +245,9 @@ impl ModernHttpMcpClient {
     }
 }
 
-fn mirror_header_value(value: &str) -> String {
+/// Encodes a tool name into the bounded ASCII mirror-header representation.
+#[must_use]
+pub fn mcp_mirrored_header_value(value: &str) -> String {
     if !value.is_empty()
         && value.trim() == value
         && value.bytes().all(|byte| (0x20..=0x7e).contains(&byte))

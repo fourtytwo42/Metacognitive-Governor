@@ -223,6 +223,24 @@ pub struct McpToolCatalog {
     pub expires_at: DateTime<Utc>,
 }
 
+/// Returns the conservative canonical policy hints for one discovered MCP tool.
+/// Missing or malformed annotations default to mutable and open-world.
+#[must_use]
+pub fn mcp_tool_classification(annotations: &Value) -> (bool, bool, bool) {
+    let value = |name: &str, default| {
+        annotations
+            .get(name)
+            .and_then(Value::as_bool)
+            .unwrap_or(default)
+    };
+    let read_only = value("readOnlyHint", false);
+    let destructive = annotations
+        .get("destructiveHint")
+        .and_then(Value::as_bool)
+        .unwrap_or(!read_only);
+    (read_only, destructive, value("openWorldHint", true))
+}
+
 impl McpToolCatalog {
     /// Validates identity, protocol, cache bounds, and a deterministic unique tool list.
     ///

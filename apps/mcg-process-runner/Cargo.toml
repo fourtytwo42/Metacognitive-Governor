@@ -14,6 +14,7 @@ base64.workspace = true
 chrono.workspace = true
 futures-util.workspace = true
 mcg-contracts = { path = "../../crates/mcg-contracts" }
+mcg-mcp = { path = "../../crates/mcg-mcp" }
 mcg-providers = { path = "../../crates/mcg-providers" }
 process-wrap.workspace = true
 reqwest.workspace = true

@@ -18,6 +18,7 @@ use mcg_contracts::{
     ToolManifestId, ToolPolicy, ToolResourceLimits, VersionedPayload, VersionedRef,
     decode_canonical_cbor_v1, tool_invocation_permit_hash, tool_invocation_proposal_hash,
 };
+use mcg_mcp::{McpCredentialStore, MemoryMcpCredentialStore, OsMcpCredentialStore};
 use mcg_providers::{OsProviderCredentialStore, ProviderCredentialStore, ProviderSecretSlot};
 #[cfg(windows)]
 use process_wrap::tokio::JobObject;
@@ -54,6 +55,7 @@ pub const HTTP_RUNNER_INPUT_SCHEMA_TYPE: &str = "mcg.http_runner_input_schema.v1
 pub const HTTP_RUNNER_OUTPUT_SCHEMA_TYPE: &str = "mcg.http_runner_output_schema.v1";
 pub const HTTP_RUNNER_RECONCILER_SOURCE_TYPE: &str = "mcg.http_runner_reconciler.v1";
 pub const HTTP_RUNNER_RECEIPT_TYPE: &str = "mcg.http_runner_receipt.v1";
+pub const MCP_BEARER_SECRET_PROVIDER: &str = "@mcp";
 
 const DETAIL_MAX_BYTES: usize = 4 * 1024;
 const STDERR_MAX_BYTES: usize = 4 * 1024;
@@ -109,6 +111,7 @@ pub struct HttpRunnerRequest {
 pub enum GovernedHttpHeaderValue {
     Literal { value: String },
     Credential { provider: String, key: String },
+    McpBearer { connection_id: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -629,6 +632,13 @@ fn validate_http_operation(
                     return Err(HttpRunnerProtocolError::Invalid("HTTP credential header"));
                 }
             }
+            GovernedHttpHeaderValue::McpBearer { connection_id } => {
+                if header.name.as_str() != "authorization"
+                    || mcp_bearer_secret_slot(connection_id).is_err()
+                {
+                    return Err(HttpRunnerProtocolError::Invalid("HTTP MCP bearer header"));
+                }
+            }
         }
     }
     if operation.body_base64.as_ref().is_some_and(|value| {
@@ -667,6 +677,24 @@ pub fn http_secret_slot(provider: &str, key: &str) -> Result<StableTypeId, Strin
         .map_err(|error| error.to_string())
 }
 
+/// Derives the opaque secret slot for one protected MCP bearer credential.
+///
+/// # Errors
+/// Returns an error for a malformed MCP connection identity.
+pub fn mcp_bearer_secret_slot(connection_id: &str) -> Result<StableTypeId, String> {
+    if connection_id.is_empty()
+        || connection_id.len() > 128
+        || !connection_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err("MCP connection identity is invalid".into());
+    }
+    let digest = format!("{:x}", Sha256::digest(connection_id.as_bytes()));
+    StableTypeId::parse(format!("mcg.mcp_bearer.secret_{}.v1", &digest[..32]))
+        .map_err(|error| error.to_string())
+}
+
 /// Returns the unique opaque secret slots in deterministic first-use order.
 ///
 /// # Errors
@@ -684,11 +712,21 @@ fn http_credential_references(
     let mut slots = Vec::new();
     let mut unique = BTreeSet::new();
     for header in &operation.headers {
-        if let GovernedHttpHeaderValue::Credential { provider, key } = &header.value {
-            let slot = http_secret_slot(provider, key)?;
-            if unique.insert(slot.clone()) {
-                slots.push((provider.clone(), key.clone(), slot));
-            }
+        let reference = match &header.value {
+            GovernedHttpHeaderValue::Credential { provider, key } => (
+                provider.clone(),
+                key.clone(),
+                http_secret_slot(provider, key)?,
+            ),
+            GovernedHttpHeaderValue::McpBearer { connection_id } => (
+                MCP_BEARER_SECRET_PROVIDER.into(),
+                connection_id.clone(),
+                mcp_bearer_secret_slot(connection_id)?,
+            ),
+            GovernedHttpHeaderValue::Literal { .. } => continue,
+        };
+        if unique.insert(reference.2.clone()) {
+            slots.push(reference);
         }
     }
     Ok(slots)
@@ -845,12 +883,23 @@ impl HttpFailure {
 }
 
 pub async fn execute_http_request(bytes: &[u8]) -> HttpRunnerResponse {
-    execute_http_request_with_store(bytes, &OsProviderCredentialStore).await
+    execute_http_request_with_stores(bytes, &OsProviderCredentialStore, &OsMcpCredentialStore).await
 }
 
 pub async fn execute_http_request_with_store<S: ProviderCredentialStore + ?Sized>(
     bytes: &[u8],
     store: &S,
+) -> HttpRunnerResponse {
+    execute_http_request_with_stores(bytes, store, &MemoryMcpCredentialStore::default()).await
+}
+
+pub async fn execute_http_request_with_stores<
+    P: ProviderCredentialStore + ?Sized,
+    M: McpCredentialStore + ?Sized,
+>(
+    bytes: &[u8],
+    provider_store: &P,
+    mcp_store: &M,
 ) -> HttpRunnerResponse {
     let started_at = Utc::now();
     if bytes.is_empty() || bytes.len() > HTTP_RUNNER_REQUEST_MAX_BYTES {
@@ -867,7 +916,7 @@ pub async fn execute_http_request_with_store<S: ProviderCredentialStore + ?Sized
             started_at,
         );
     };
-    match execute_http(&request, store).await {
+    match execute_http(&request, provider_store, mcp_store).await {
         Ok(observation) => HttpRunnerResponse {
             protocol_version: HTTP_RUNNER_PROTOCOL_VERSION,
             request_id: Some(request.request_id),
@@ -904,9 +953,10 @@ fn http_failure_response(
 }
 
 #[allow(clippy::too_many_lines)] // Keep the post-contact ambiguity boundary contiguous.
-async fn execute_http<S: ProviderCredentialStore + ?Sized>(
+async fn execute_http<P: ProviderCredentialStore + ?Sized, M: McpCredentialStore + ?Sized>(
     request: &HttpRunnerRequest,
-    store: &S,
+    provider_store: &P,
+    mcp_store: &M,
 ) -> Result<VersionedPayload, HttpFailure> {
     if request.protocol_version != HTTP_RUNNER_PROTOCOL_VERSION {
         return Err(HttpFailure::denied(
@@ -921,7 +971,8 @@ async fn execute_http<S: ProviderCredentialStore + ?Sized>(
         .map_err(|_| HttpFailure::denied("method_invalid", "HTTP method is invalid"))?;
     let url = Url::parse(&operation.url)
         .map_err(|_| HttpFailure::denied("url_invalid", "HTTP URL is invalid"))?;
-    let (mut headers, mut secrets) = resolve_http_headers(request, &operation, store)?;
+    let (mut headers, mut secrets) =
+        resolve_http_headers(request, &operation, provider_store, mcp_store)?;
     let resolved = resolve_and_validate_destination(&url).await?;
     let host = url
         .host_str()
@@ -1127,10 +1178,12 @@ async fn execute_http<S: ProviderCredentialStore + ?Sized>(
     ))
 }
 
-fn resolve_http_headers<S: ProviderCredentialStore + ?Sized>(
+#[allow(clippy::too_many_lines)] // Keep secret lookup, validation, and zeroizable header material together.
+fn resolve_http_headers<P: ProviderCredentialStore + ?Sized, M: McpCredentialStore + ?Sized>(
     request: &HttpRunnerRequest,
     operation: &GovernedHttpOperation,
-    store: &S,
+    provider_store: &P,
+    mcp_store: &M,
 ) -> Result<(HeaderMap, Vec<Vec<u8>>), HttpFailure> {
     let mut headers = HeaderMap::new();
     let mut secrets = Vec::new();
@@ -1175,7 +1228,7 @@ fn resolve_http_headers<S: ProviderCredentialStore + ?Sized>(
                         "HTTP credential handle is stale or substituted",
                     ));
                 }
-                let credential = store
+                let credential = provider_store
                     .load(provider, slot)
                     .map_err(|_| {
                         HttpFailure::no_effect(
@@ -1197,6 +1250,65 @@ fn resolve_http_headers<S: ProviderCredentialStore + ?Sized>(
                     )
                 })?;
                 secrets.push(secret);
+                value
+            }
+            GovernedHttpHeaderValue::McpBearer { connection_id } => {
+                let expected = mcp_bearer_secret_slot(connection_id)
+                    .map_err(|error| HttpFailure::denied("credential_invalid", error))?;
+                let binding = request
+                    .authorization
+                    .secret_handles
+                    .iter()
+                    .find(|binding| {
+                        binding.provider == MCP_BEARER_SECRET_PROVIDER
+                            && binding.key == *connection_id
+                            && binding.slot == expected
+                    })
+                    .ok_or_else(|| {
+                        HttpFailure::denied(
+                            "credential_handle_mismatch",
+                            "MCP bearer has no exact permit handle",
+                        )
+                    })?;
+                if binding.permit_id != request.authorization.permit.id
+                    || !request
+                        .authorization
+                        .permit
+                        .secret_handles
+                        .contains(&binding.handle_id)
+                    || binding.expires_at != request.authorization.permit.expires_at
+                    || binding.expires_at <= Utc::now()
+                {
+                    return Err(HttpFailure::denied(
+                        "credential_handle_mismatch",
+                        "MCP bearer handle is stale or substituted",
+                    ));
+                }
+                let credential = mcp_store
+                    .load(connection_id)
+                    .map_err(|_| {
+                        HttpFailure::no_effect(
+                            "credential_unavailable",
+                            "authorized MCP credential store is unavailable",
+                        )
+                    })?
+                    .ok_or_else(|| {
+                        HttpFailure::no_effect(
+                            "credential_unavailable",
+                            "authorized MCP bearer is unavailable",
+                        )
+                    })?;
+                let raw_secret = credential.expose_to_host_executor().as_bytes().to_vec();
+                let mut authorization = b"Bearer ".to_vec();
+                authorization.extend_from_slice(&raw_secret);
+                let value = ReqwestHeaderValue::from_bytes(&authorization).map_err(|_| {
+                    HttpFailure::denied(
+                        "credential_invalid",
+                        "authorized MCP bearer is not a valid header value",
+                    )
+                })?;
+                secrets.push(raw_secret);
+                secrets.push(authorization);
                 value
             }
         };
@@ -1457,7 +1569,7 @@ fn validate_http_tool_authorization(
             || &binding.slot != slot
             || binding.expires_at != authorization.permit.expires_at
             || binding.expires_at <= now
-            || http_secret_slot(&binding.provider, &binding.key).as_ref() != Ok(slot)
+            || binding_secret_slot(&binding.provider, &binding.key).as_ref() != Ok(slot)
         {
             return Err(HttpFailure::denied(
                 "credential_handle_mismatch",
@@ -1466,6 +1578,14 @@ fn validate_http_tool_authorization(
         }
     }
     Ok(())
+}
+
+fn binding_secret_slot(provider: &str, key: &str) -> Result<StableTypeId, String> {
+    if provider == MCP_BEARER_SECRET_PROVIDER {
+        mcp_bearer_secret_slot(key)
+    } else {
+        http_secret_slot(provider, key)
+    }
 }
 
 /// Builds a self-contained exact request for runner qualification and tests.
