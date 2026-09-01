@@ -68,8 +68,9 @@ use mcg_contracts::{
     RuntimeInvocationRequest, RuntimeInvocationResult, SecretHandleId, SkillManifest,
     SkillManifestId, SourceRef, StableTypeId, ToolAuthorizationInspection,
     ToolAuthorizationSummary, ToolInvocationPermit, ToolInvocationProposal, ToolManifest,
-    ToolManifestId, ToolPolicy, VersionedRef, WorkflowAttempt, WorkflowCancelRequest, WorkflowId,
-    WorkflowInspection, WorkflowInvocationActivity, WorkflowState, canonical_contract_hash,
+    ToolManifestId, ToolPolicy, VersionedRef, WorkflowAttempt, WorkflowCancelRequest,
+    WorkflowEventPage, WorkflowId, WorkflowInspection, WorkflowInvocationActivity, WorkflowState,
+    canonical_contract_hash,
 };
 use mcg_domain::{
     AgentContextCheckpoint, AgentContextCheckpointCause, AgentContextCheckpointId,
@@ -4327,6 +4328,38 @@ impl AppRuntime {
             task_contract,
             events,
         }))
+    }
+
+    /// Loads one bounded contiguous page from a workflow's immutable event history.
+    ///
+    /// # Errors
+    /// Returns a runtime error for invalid bounds/cursors or malformed authoritative evidence.
+    pub fn canonical_workflow_events(
+        &self,
+        workflow_id: WorkflowId,
+        after_sequence: u64,
+        limit: usize,
+    ) -> Result<Option<WorkflowEventPage>, RuntimeError> {
+        let store = self.store()?;
+        let Some(current_attempt) = store.workflow_attempt_for_workflow(workflow_id)? else {
+            return Ok(None);
+        };
+        let (events, latest_sequence) =
+            store.workflow_events_after(workflow_id, after_sequence, limit)?;
+        let next_after_sequence = events.last().map_or(after_sequence, |event| event.sequence);
+        let page = WorkflowEventPage {
+            schema_version: WorkflowEventPage::SCHEMA_VERSION,
+            workflow_id,
+            after_sequence,
+            limit,
+            events,
+            next_after_sequence,
+            latest_sequence,
+            current_attempt,
+        };
+        page.validate()
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        Ok(Some(page))
     }
 
     /// Loads one canonical workflow together with bounded invocation activity for its current attempt.

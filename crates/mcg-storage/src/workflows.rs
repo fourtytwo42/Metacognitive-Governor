@@ -6,11 +6,11 @@ use mcg_agents::{
 use mcg_contracts::{
     ActionEnvelope, ActionExecution, ActionExecutionState, ArtifactRef, AttemptId, ConfigurationId,
     ContentHash, ContractClause, CorrelationId, EffectClass, EffectOutcome, EventId, InvocationId,
-    InvocationManifest, InvocationRole, ModelRun, ModelRunState, PolicyBinding, RetryPolicy,
-    RuntimeActorId, SourceRef, StableTypeId, TaskContract, TaskContractId, TaskContractStatus,
-    VersionedPayload, VersionedRef, WORKFLOW_SOURCE_SNAPSHOT_HASH_DOMAIN, WaitReason,
-    WorkflowAttempt, WorkflowEvent, WorkflowId, WorkflowSourceAttachment, WorkflowState,
-    decode_canonical_cbor_v1,
+    InvocationManifest, InvocationRole, MAX_WORKFLOW_EVENT_PAGE_SIZE, ModelRun, ModelRunState,
+    PolicyBinding, RetryPolicy, RuntimeActorId, SourceRef, StableTypeId, TaskContract,
+    TaskContractId, TaskContractStatus, VersionedPayload, VersionedRef,
+    WORKFLOW_SOURCE_SNAPSHOT_HASH_DOMAIN, WaitReason, WorkflowAttempt, WorkflowEvent, WorkflowId,
+    WorkflowSourceAttachment, WorkflowState, decode_canonical_cbor_v1,
 };
 use mcg_domain::{
     AgentLeaseId, PluginInstallation, PluginInvocationId, PluginInvocationRecord,
@@ -1839,6 +1839,60 @@ impl SqliteEventStore {
         .collect()
     }
 
+    /// Returns one bounded contiguous page after an exclusive workflow sequence cursor together
+    /// with the latest durable sequence visible when the page was read.
+    ///
+    /// # Errors
+    /// Returns a storage error for invalid bounds/cursors, query failures, or malformed evidence.
+    pub fn workflow_events_after(
+        &self,
+        workflow_id: WorkflowId,
+        after_sequence: u64,
+        limit: usize,
+    ) -> Result<(Vec<WorkflowEvent>, u64), StorageError> {
+        if limit == 0 || limit > MAX_WORKFLOW_EVENT_PAGE_SIZE {
+            return Err(StorageError::InvalidData(
+                "workflow event page limit is invalid".into(),
+            ));
+        }
+        let sql_after = sql_u64(after_sequence, "workflow event cursor")?;
+        let sql_limit = i64::try_from(limit).map_err(|_| {
+            StorageError::InvalidData("workflow event page limit overflowed".into())
+        })?;
+        let mut statement = self.connection.prepare(
+            "SELECT event_json FROM workflow_events
+             WHERE workflow_id = ?1 AND sequence > ?2
+             ORDER BY sequence LIMIT ?3",
+        )?;
+        let rows = statement.query_map(
+            params![workflow_id.to_string(), sql_after, sql_limit],
+            |row| row.get::<_, String>(0),
+        )?;
+        let events = rows
+            .map(|row| {
+                let json = row?;
+                serde_json::from_str(&json).map_err(StorageError::from)
+            })
+            .collect::<Result<Vec<WorkflowEvent>, StorageError>>()?;
+        drop(statement);
+        let latest = self
+            .connection
+            .query_row(
+                "SELECT MAX(sequence) FROM workflow_events WHERE workflow_id = ?1",
+                [workflow_id.to_string()],
+                |row| row.get::<_, Option<i64>>(0),
+            )?
+            .unwrap_or(0);
+        let latest_sequence = u64::try_from(latest)
+            .map_err(|_| StorageError::InvalidData("negative workflow event sequence".into()))?;
+        if after_sequence > latest_sequence {
+            return Err(StorageError::Conflict(
+                "workflow event cursor is ahead of authoritative history".into(),
+            ));
+        }
+        Ok((events, latest_sequence))
+    }
+
     /// Atomically claims a Ready attempt and increments both revision and lease generation.
     ///
     /// # Errors
@@ -3622,6 +3676,75 @@ mod tests {
             event
         );
         assert_eq!(store.workflow_events(attempt.workflow_id).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn workflow_event_pages_are_bounded_contiguous_and_cursor_fenced() {
+        let mut store = SqliteEventStore::open_in_memory().unwrap();
+        let (contract, attempt) = fixture();
+        store
+            .create_workflow(&contract, &attempt, CorrelationId::new(), now())
+            .unwrap();
+        let claimed = store
+            .claim_workflow_attempt(
+                attempt.attempt_id,
+                attempt.revision,
+                attempt.lease_generation,
+                RuntimeActorId::new(),
+                now() + chrono::Duration::minutes(5),
+                CorrelationId::new(),
+                "event-page-claim",
+                now(),
+            )
+            .unwrap();
+        store
+            .transition_workflow_attempt(
+                claimed.attempt_id,
+                claimed.revision,
+                claimed.lease_generation,
+                WorkflowState::Failed,
+                CorrelationId::new(),
+                "event-page-fail",
+                now(),
+            )
+            .unwrap();
+
+        let (first, latest) = store
+            .workflow_events_after(attempt.workflow_id, 0, 1)
+            .unwrap();
+        assert_eq!(latest, 3);
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].sequence, 1);
+        let (second, latest) = store
+            .workflow_events_after(attempt.workflow_id, 1, 1)
+            .unwrap();
+        assert_eq!(latest, 3);
+        assert_eq!(second[0].sequence, 2);
+        let (tail, latest) = store
+            .workflow_events_after(attempt.workflow_id, 2, 10)
+            .unwrap();
+        assert_eq!(latest, 3);
+        assert_eq!(tail[0].sequence, 3);
+        let (empty, latest) = store
+            .workflow_events_after(attempt.workflow_id, 3, 10)
+            .unwrap();
+        assert_eq!(latest, 3);
+        assert!(empty.is_empty());
+        assert!(
+            store
+                .workflow_events_after(attempt.workflow_id, 4, 10)
+                .is_err()
+        );
+        assert!(
+            store
+                .workflow_events_after(attempt.workflow_id, 0, 0)
+                .is_err()
+        );
+        assert!(
+            store
+                .workflow_events_after(attempt.workflow_id, 0, MAX_WORKFLOW_EVENT_PAGE_SIZE + 1,)
+                .is_err()
+        );
     }
 
     #[test]

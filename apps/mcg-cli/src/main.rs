@@ -1334,6 +1334,22 @@ enum WorkflowCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Emit ordered immutable workflow events as newline-delimited JSON.
+    Events {
+        id: String,
+        /// Exclusive durable event sequence cursor.
+        #[arg(long, default_value_t = 0)]
+        after_sequence: u64,
+        /// Maximum number of events requested from Root per page.
+        #[arg(long, default_value_t = 100)]
+        page_limit: usize,
+        /// Continue across idle periods and Root restarts until the workflow is terminal.
+        #[arg(long)]
+        follow: bool,
+        /// Delay between caught-up follow requests.
+        #[arg(long, default_value_t = 250)]
+        poll_ms: u64,
+    },
     /// Show the exact workflow together with bounded Work/Verify invocation activity.
     Activity {
         id: String,
@@ -11241,6 +11257,24 @@ async fn run_root_workflow(
                 println!("  events: {}", inspection.events.len());
             }
         }
+        WorkflowCommand::Events {
+            id,
+            after_sequence,
+            page_limit,
+            follow,
+            poll_ms,
+        } => {
+            let workflow_id = WorkflowId(uuid::Uuid::parse_str(id)?);
+            stream_root_workflow_events(
+                data_directory,
+                workflow_id,
+                *after_sequence,
+                *page_limit,
+                *follow,
+                *poll_ms,
+            )
+            .await?;
+        }
         WorkflowCommand::Activity {
             id,
             invocation_limit,
@@ -11325,6 +11359,76 @@ async fn run_root_workflow(
         }
     }
     Ok(())
+}
+
+async fn stream_root_workflow_events(
+    data_directory: &Path,
+    workflow_id: WorkflowId,
+    mut after_sequence: u64,
+    page_limit: usize,
+    follow: bool,
+    poll_ms: u64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if poll_ms == 0 || poll_ms > 60_000 {
+        return Err("workflow event poll interval must be between 1 and 60000 milliseconds".into());
+    }
+    loop {
+        let page = match mcg_platform::query_root_workflow_events(
+            data_directory,
+            workflow_id,
+            after_sequence,
+            page_limit,
+        )
+        .await
+        {
+            Ok(Some(page)) => page,
+            Ok(None) => {
+                return Err(format!("canonical workflow {workflow_id} was not found").into());
+            }
+            Err(mcg_platform::PlatformError::Io(_)) if follow => {
+                if wait_for_workflow_event_poll(poll_ms).await? {
+                    break;
+                }
+                continue;
+            }
+            Err(error) => return Err(error.into()),
+        };
+        {
+            let stdout = std::io::stdout();
+            let mut output = stdout.lock();
+            write_json_lines(&mut output, &page.events)?;
+            output.flush()?;
+        }
+        after_sequence = page.next_after_sequence;
+        if !page.caught_up() {
+            continue;
+        }
+        if page.current_attempt.state.is_terminal() || !follow {
+            break;
+        }
+        if wait_for_workflow_event_poll(poll_ms).await? {
+            break;
+        }
+    }
+    Ok(())
+}
+
+fn write_json_lines<T: serde::Serialize>(
+    output: &mut impl Write,
+    values: &[T],
+) -> Result<(), Box<dyn std::error::Error>> {
+    for value in values {
+        serde_json::to_writer(&mut *output, value)?;
+        writeln!(output)?;
+    }
+    Ok(())
+}
+
+async fn wait_for_workflow_event_poll(poll_ms: u64) -> Result<bool, std::io::Error> {
+    tokio::select! {
+        () = tokio::time::sleep(std::time::Duration::from_millis(poll_ms)) => Ok(false),
+        result = tokio::signal::ctrl_c() => result.map(|()| true),
+    }
 }
 
 async fn run_root_action(
@@ -16631,6 +16735,32 @@ mod tests {
                 command: WorkflowCommand::Show { json: false, .. }
             }
         ));
+        let events = Cli::try_parse_from([
+            "mcg",
+            "workflow",
+            "events",
+            id,
+            "--after-sequence",
+            "7",
+            "--page-limit",
+            "25",
+            "--follow",
+            "--poll-ms",
+            "500",
+        ])
+        .expect("workflow events command");
+        assert!(matches!(
+            events.command.expect("command"),
+            Command::Workflow {
+                command: WorkflowCommand::Events {
+                    after_sequence: 7,
+                    page_limit: 25,
+                    follow: true,
+                    poll_ms: 500,
+                    ..
+                }
+            }
+        ));
         let activity = Cli::try_parse_from([
             "mcg",
             "workflow",
@@ -16671,6 +16801,23 @@ mod tests {
                 }
             } if key == "owner-cancel-1"
         ));
+    }
+
+    #[test]
+    fn workflow_event_stream_uses_compact_newline_delimited_json() {
+        let mut output = Vec::new();
+        write_json_lines(
+            &mut output,
+            &[
+                serde_json::json!({"sequence": 1, "state": "ready"}),
+                serde_json::json!({"sequence": 2, "state": "running"}),
+            ],
+        )
+        .expect("write workflow event JSON lines");
+        assert_eq!(
+            String::from_utf8(output).expect("UTF-8 JSON lines"),
+            "{\"sequence\":1,\"state\":\"ready\"}\n{\"sequence\":2,\"state\":\"running\"}\n"
+        );
     }
 
     #[test]

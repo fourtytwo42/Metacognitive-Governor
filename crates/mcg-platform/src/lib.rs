@@ -14,10 +14,11 @@ use mcg_contracts::{
     ActionCompensationReceipt, ActionId, ActionInspection, ActionSummary, AuthenticatedRpcRequest,
     ContentHash, ContractError, CorrelationId, InvocationId, InvocationInspection,
     InvocationSummary, MAX_TOOL_CAPABILITY_SUMMARIES, MAX_WORKFLOW_ACTIVITY_INVOCATIONS,
-    OwnerActionCompensationRequest, PROTOCOL_V1, RequestId, RootStatus, RpcEnvelope,
-    RuntimeInstanceId, RuntimeWorkerRole, SessionId, StableTypeId, ToolAuthorizationInspection,
-    ToolAuthorizationSummary, VersionedPayload, WorkflowAttempt, WorkflowCancelRequest, WorkflowId,
-    WorkflowInspection, WorkflowInvocationActivity, canonical_cbor_v1, decode_canonical_cbor_v1,
+    MAX_WORKFLOW_EVENT_PAGE_SIZE, OwnerActionCompensationRequest, PROTOCOL_V1, RequestId,
+    RootStatus, RpcEnvelope, RuntimeInstanceId, RuntimeWorkerRole, SessionId, StableTypeId,
+    ToolAuthorizationInspection, ToolAuthorizationSummary, VersionedPayload, WorkflowAttempt,
+    WorkflowCancelRequest, WorkflowEventPage, WorkflowId, WorkflowInspection,
+    WorkflowInvocationActivity, canonical_cbor_v1, decode_canonical_cbor_v1,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
@@ -34,6 +35,7 @@ pub const RUNTIME_WORKER_EXECUTABLE_HASH_DOMAIN: &str = "MetaCog.RuntimeWorkerEx
 pub const MAX_ROOT_INVOCATION_SUMMARIES: usize = 200;
 pub const MAX_ROOT_INVOCATION_MODEL_RUNS: usize = 100;
 pub const MAX_ROOT_WORKFLOW_INVOCATIONS: usize = MAX_WORKFLOW_ACTIVITY_INVOCATIONS;
+pub const MAX_ROOT_WORKFLOW_EVENT_PAGE_SIZE: usize = MAX_WORKFLOW_EVENT_PAGE_SIZE;
 pub const MAX_ROOT_TOOL_AUTHORIZATION_SUMMARIES: usize = MAX_TOOL_CAPABILITY_SUMMARIES;
 pub const ROOT_STATUS_REQUEST_TYPE: &str = "metacog.root.status.request.v1";
 pub const ROOT_STATUS_RESPONSE_TYPE: &str = "metacog.root.status.response.v1";
@@ -43,6 +45,8 @@ pub const ROOT_WORKFLOW_SHOW_REQUEST_TYPE: &str = "metacog.root.workflow_show.re
 pub const ROOT_WORKFLOW_SHOW_RESPONSE_TYPE: &str = "metacog.root.workflow_show.response.v1";
 pub const ROOT_WORKFLOW_ACTIVITY_REQUEST_TYPE: &str = "metacog.root.workflow_activity.request.v1";
 pub const ROOT_WORKFLOW_ACTIVITY_RESPONSE_TYPE: &str = "metacog.root.workflow_activity.response.v1";
+pub const ROOT_WORKFLOW_EVENTS_REQUEST_TYPE: &str = "metacog.root.workflow_events.request.v1";
+pub const ROOT_WORKFLOW_EVENTS_RESPONSE_TYPE: &str = "metacog.root.workflow_events.response.v1";
 pub const ROOT_WORKFLOW_CANCEL_REQUEST_TYPE: &str = "metacog.root.workflow_cancel.request.v1";
 pub const ROOT_WORKFLOW_CANCEL_RESPONSE_TYPE: &str = "metacog.root.workflow_cancel.response.v1";
 pub const ROOT_ACTION_LIST_REQUEST_TYPE: &str = "metacog.root.action_list.request.v1";
@@ -589,6 +593,46 @@ pub async fn query_root_workflow_activity(
         }
     }
     Ok(activity)
+}
+
+/// Loads one bounded contiguous workflow event page over authenticated local IPC.
+///
+/// # Errors
+/// Returns an error for invalid bounds/cursors, unavailable transport, substituted evidence, or
+/// correlated protocol failure.
+pub async fn query_root_workflow_events(
+    data_directory: &Path,
+    workflow_id: WorkflowId,
+    after_sequence: u64,
+    limit: usize,
+) -> Result<Option<WorkflowEventPage>, PlatformError> {
+    if limit == 0 || limit > MAX_ROOT_WORKFLOW_EVENT_PAGE_SIZE {
+        return Err(PlatformError::InvalidInspectionBound);
+    }
+    let page: Option<WorkflowEventPage> = query_root(
+        data_directory,
+        ROOT_WORKFLOW_EVENTS_REQUEST_TYPE,
+        ROOT_WORKFLOW_EVENTS_RESPONSE_TYPE,
+        &serde_json::json!({
+            "workflow_id": workflow_id,
+            "after_sequence": after_sequence,
+            "limit": limit,
+        }),
+    )
+    .await?;
+    if let Some(page) = &page {
+        page.validate()?;
+        if page.workflow_id != workflow_id
+            || page.after_sequence != after_sequence
+            || page.limit != limit
+        {
+            return Err(ContractError::InvalidContract(
+                "workflow event page does not match its request",
+            )
+            .into());
+        }
+    }
+    Ok(page)
 }
 
 /// Requests durable, generation-fenced cancellation over authenticated local IPC.

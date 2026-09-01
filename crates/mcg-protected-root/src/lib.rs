@@ -66,19 +66,21 @@ use mcg_mcp::{
 };
 use mcg_platform::{
     MAX_ROOT_INVOCATION_MODEL_RUNS, MAX_ROOT_INVOCATION_SUMMARIES,
-    MAX_ROOT_TOOL_AUTHORIZATION_SUMMARIES, MAX_ROOT_WORKFLOW_INVOCATIONS, PlatformError,
-    ROOT_ACTION_COMPENSATE_REQUEST_TYPE, ROOT_ACTION_COMPENSATE_RESPONSE_TYPE,
-    ROOT_ACTION_LIST_REQUEST_TYPE, ROOT_ACTION_LIST_RESPONSE_TYPE, ROOT_ACTION_SHOW_REQUEST_TYPE,
-    ROOT_ACTION_SHOW_RESPONSE_TYPE, ROOT_CAPABILITY_LIST_REQUEST_TYPE,
-    ROOT_CAPABILITY_LIST_RESPONSE_TYPE, ROOT_CAPABILITY_SHOW_REQUEST_TYPE,
-    ROOT_CAPABILITY_SHOW_RESPONSE_TYPE, ROOT_INVOCATION_LIST_REQUEST_TYPE,
-    ROOT_INVOCATION_LIST_RESPONSE_TYPE, ROOT_INVOCATION_SHOW_REQUEST_TYPE,
-    ROOT_INVOCATION_SHOW_RESPONSE_TYPE, ROOT_STATUS_REQUEST_TYPE, ROOT_STATUS_RESPONSE_TYPE,
-    ROOT_WORKFLOW_ACTIVITY_REQUEST_TYPE, ROOT_WORKFLOW_ACTIVITY_RESPONSE_TYPE,
-    ROOT_WORKFLOW_CANCEL_REQUEST_TYPE, ROOT_WORKFLOW_CANCEL_RESPONSE_TYPE,
-    ROOT_WORKFLOW_LIST_REQUEST_TYPE, ROOT_WORKFLOW_LIST_RESPONSE_TYPE,
-    ROOT_WORKFLOW_SHOW_REQUEST_TYPE, ROOT_WORKFLOW_SHOW_RESPONSE_TYPE, RootIpcSession,
-    create_root_ipc_session, read_canonical_frame, remove_root_ipc_session, write_canonical_frame,
+    MAX_ROOT_TOOL_AUTHORIZATION_SUMMARIES, MAX_ROOT_WORKFLOW_EVENT_PAGE_SIZE,
+    MAX_ROOT_WORKFLOW_INVOCATIONS, PlatformError, ROOT_ACTION_COMPENSATE_REQUEST_TYPE,
+    ROOT_ACTION_COMPENSATE_RESPONSE_TYPE, ROOT_ACTION_LIST_REQUEST_TYPE,
+    ROOT_ACTION_LIST_RESPONSE_TYPE, ROOT_ACTION_SHOW_REQUEST_TYPE, ROOT_ACTION_SHOW_RESPONSE_TYPE,
+    ROOT_CAPABILITY_LIST_REQUEST_TYPE, ROOT_CAPABILITY_LIST_RESPONSE_TYPE,
+    ROOT_CAPABILITY_SHOW_REQUEST_TYPE, ROOT_CAPABILITY_SHOW_RESPONSE_TYPE,
+    ROOT_INVOCATION_LIST_REQUEST_TYPE, ROOT_INVOCATION_LIST_RESPONSE_TYPE,
+    ROOT_INVOCATION_SHOW_REQUEST_TYPE, ROOT_INVOCATION_SHOW_RESPONSE_TYPE,
+    ROOT_STATUS_REQUEST_TYPE, ROOT_STATUS_RESPONSE_TYPE, ROOT_WORKFLOW_ACTIVITY_REQUEST_TYPE,
+    ROOT_WORKFLOW_ACTIVITY_RESPONSE_TYPE, ROOT_WORKFLOW_CANCEL_REQUEST_TYPE,
+    ROOT_WORKFLOW_CANCEL_RESPONSE_TYPE, ROOT_WORKFLOW_EVENTS_REQUEST_TYPE,
+    ROOT_WORKFLOW_EVENTS_RESPONSE_TYPE, ROOT_WORKFLOW_LIST_REQUEST_TYPE,
+    ROOT_WORKFLOW_LIST_RESPONSE_TYPE, ROOT_WORKFLOW_SHOW_REQUEST_TYPE,
+    ROOT_WORKFLOW_SHOW_RESPONSE_TYPE, RootIpcSession, create_root_ipc_session,
+    read_canonical_frame, remove_root_ipc_session, write_canonical_frame,
 };
 use mcg_plugin_protocol::{
     PluginCapability, PluginCapabilityOperation, PluginCapabilityOutcome, PluginCapabilityRequest,
@@ -9473,6 +9475,13 @@ struct WorkflowActivityRequest {
 }
 
 #[derive(serde::Deserialize)]
+struct WorkflowEventsRequest {
+    workflow_id: WorkflowId,
+    after_sequence: u64,
+    limit: usize,
+}
+
+#[derive(serde::Deserialize)]
 struct ActionListRequest {
     limit: usize,
 }
@@ -9640,6 +9649,7 @@ where
             | ROOT_WORKFLOW_LIST_REQUEST_TYPE
             | ROOT_WORKFLOW_SHOW_REQUEST_TYPE
             | ROOT_WORKFLOW_ACTIVITY_REQUEST_TYPE
+            | ROOT_WORKFLOW_EVENTS_REQUEST_TYPE
             | ROOT_WORKFLOW_CANCEL_REQUEST_TYPE
             | ROOT_ACTION_LIST_REQUEST_TYPE
             | ROOT_ACTION_SHOW_REQUEST_TYPE
@@ -9744,6 +9754,20 @@ async fn dispatch_root_ipc_request(
                 serde_json::to_value(runtime.canonical_workflow_activity(
                     activity.workflow_id,
                     activity.invocation_limit,
+                )?)?,
+            )
+        }
+        ROOT_WORKFLOW_EVENTS_REQUEST_TYPE => {
+            let events: WorkflowEventsRequest = serde_json::from_value(request_value)?;
+            if events.limit == 0 || events.limit > MAX_ROOT_WORKFLOW_EVENT_PAGE_SIZE {
+                return Err(PlatformError::InvalidInspectionBound.into());
+            }
+            (
+                ROOT_WORKFLOW_EVENTS_RESPONSE_TYPE,
+                serde_json::to_value(runtime.canonical_workflow_events(
+                    events.workflow_id,
+                    events.after_sequence,
+                    events.limit,
                 )?)?,
             )
         }
@@ -9960,7 +9984,8 @@ mod tests {
         cancel_root_workflow, exchange_root_rpc, query_root_action, query_root_actions,
         query_root_capabilities, query_root_capability, query_root_invocation,
         query_root_invocations, query_root_status, query_root_workflow,
-        query_root_workflow_activity, query_root_workflows, root_ipc_session_path,
+        query_root_workflow_activity, query_root_workflow_events, query_root_workflows,
+        root_ipc_session_path,
     };
     use mcg_plugin_protocol::{
         PLUGIN_SCHEMA_VERSION, PluginCapability, PluginCapabilityOperation,
@@ -16540,7 +16565,7 @@ mod tests {
         }
         let runtime = open(config).expect("Protected Root open");
         let session = create_root_ipc_session(temporary.path()).expect("IPC session");
-        let server = start_root_ipc(runtime, session.clone()).expect("IPC server");
+        let server = start_root_ipc(runtime.clone(), session.clone()).expect("IPC server");
 
         let listed = query_root_workflows(temporary.path())
             .await
@@ -16554,6 +16579,31 @@ mod tests {
         assert_eq!(shown.task_contract, contract);
         assert_eq!(shown.attempt.state, WorkflowState::Running);
         assert_eq!(shown.events.len(), 2);
+        let first_page = query_root_workflow_events(temporary.path(), attempt.workflow_id, 0, 1)
+            .await
+            .expect("first workflow event page")
+            .expect("workflow event page");
+        assert_eq!(first_page.events.len(), 1);
+        assert_eq!(first_page.events[0].sequence, 1);
+        assert_eq!(first_page.latest_sequence, 2);
+        assert!(!first_page.caught_up());
+        let mut substituted_page = first_page.clone();
+        substituted_page.events[0].sequence = 2;
+        assert!(substituted_page.validate().is_err());
+        let mut wrong_workflow = first_page.clone();
+        wrong_workflow.events[0].workflow_id = WorkflowId::new();
+        assert!(wrong_workflow.validate().is_err());
+        let second_page = query_root_workflow_events(
+            temporary.path(),
+            attempt.workflow_id,
+            first_page.next_after_sequence,
+            1,
+        )
+        .await
+        .expect("second workflow event page")
+        .expect("workflow event page");
+        assert_eq!(second_page.events[0].sequence, 2);
+        assert!(second_page.caught_up());
 
         let request = WorkflowCancelRequest {
             attempt_id: shown.attempt.attempt_id,
@@ -16581,9 +16631,52 @@ mod tests {
             .expect("workflow inspection after cancellation");
         assert_eq!(after.attempt, cancelling);
         assert_eq!(after.events.len(), 3);
+        let cancellation_page = query_root_workflow_events(
+            temporary.path(),
+            attempt.workflow_id,
+            second_page.next_after_sequence,
+            1,
+        )
+        .await
+        .expect("post-cancellation workflow event page")
+        .expect("workflow event page");
+        assert_eq!(cancellation_page.events[0].sequence, 3);
+        assert_eq!(cancellation_page.current_attempt, cancelling);
+        assert!(cancellation_page.caught_up());
+        assert!(
+            query_root_workflow_events(temporary.path(), attempt.workflow_id, 4, 1)
+                .await
+                .is_err()
+        );
+        assert!(
+            query_root_workflow_events(temporary.path(), attempt.workflow_id, 0, 0)
+                .await
+                .is_err()
+        );
 
         server.abort();
+        let _ = server.await;
         remove_root_ipc_session(temporary.path(), session.session_id);
+        let restarted_session =
+            create_root_ipc_session(temporary.path()).expect("restarted IPC session");
+        let restarted_server =
+            start_root_ipc(runtime, restarted_session.clone()).expect("restarted IPC server");
+        let resumed_page = query_root_workflow_events(
+            temporary.path(),
+            attempt.workflow_id,
+            cancellation_page.next_after_sequence,
+            1,
+        )
+        .await
+        .expect("workflow stream resume after IPC restart")
+        .expect("resumed workflow event page");
+        assert!(resumed_page.events.is_empty());
+        assert_eq!(resumed_page.current_attempt, cancelling);
+        assert!(resumed_page.caught_up());
+
+        restarted_server.abort();
+        let _ = restarted_server.await;
+        remove_root_ipc_session(temporary.path(), restarted_session.session_id);
     }
 
     #[tokio::test]

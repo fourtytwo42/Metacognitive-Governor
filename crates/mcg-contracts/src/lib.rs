@@ -20,6 +20,7 @@ pub const PROTOCOL_V1: u16 = 1;
 pub const MAX_CANONICAL_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_MANIFEST_ITEMS: usize = 4_096;
 pub const MAX_WORKFLOW_ACTIVITY_INVOCATIONS: usize = 200;
+pub const MAX_WORKFLOW_EVENT_PAGE_SIZE: usize = 256;
 pub const MAX_CONTEXT_TRANSFORMATIONS: usize = 64;
 pub const MAX_CONTEXT_EXPANSION_STEPS: usize = 256;
 pub const MAX_MODEL_EGRESS_ROUTES: usize = 64;
@@ -847,6 +848,80 @@ pub struct WorkflowInspection {
     pub attempt: WorkflowAttempt,
     pub task_contract: TaskContract,
     pub events: Vec<WorkflowEvent>,
+}
+
+/// Bounded cursor page over one workflow's immutable, Root-owned event sequence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowEventPage {
+    pub schema_version: u32,
+    pub workflow_id: WorkflowId,
+    /// Exclusive sequence cursor supplied by the caller.
+    pub after_sequence: u64,
+    /// Requested and enforced page bound.
+    pub limit: usize,
+    /// Ordered events immediately following `after_sequence`.
+    pub events: Vec<WorkflowEvent>,
+    /// Sequence of the final returned event, or `after_sequence` for an empty page.
+    pub next_after_sequence: u64,
+    /// Latest sequence durably visible in the same authoritative inspection.
+    pub latest_sequence: u64,
+    /// Latest authoritative attempt observed with this page.
+    pub current_attempt: WorkflowAttempt,
+}
+
+impl WorkflowEventPage {
+    pub const SCHEMA_VERSION: u32 = 1;
+    pub const TYPE_ID: &'static str = "mcg.workflow_event_page.v1";
+
+    /// Validates cursor continuity, bounds, workflow identity, and the current attempt snapshot.
+    ///
+    /// # Errors
+    /// Returns an invalid-contract error for a substituted, gapped, oversized, or stale page.
+    pub fn validate(&self) -> Result<(), ContractError> {
+        if self.schema_version != Self::SCHEMA_VERSION
+            || self.limit == 0
+            || self.limit > MAX_WORKFLOW_EVENT_PAGE_SIZE
+            || self.events.len() > self.limit
+            || self.current_attempt.workflow_id != self.workflow_id
+            || self.after_sequence > self.latest_sequence
+        {
+            return Err(ContractError::InvalidContract(
+                "workflow event page metadata is invalid",
+            ));
+        }
+        let mut expected = self.after_sequence;
+        for event in &self.events {
+            expected = expected
+                .checked_add(1)
+                .ok_or(ContractError::InvalidContract(
+                    "workflow event page sequence overflowed",
+                ))?;
+            if event.schema_version != WorkflowEvent::SCHEMA_VERSION
+                || event.workflow_id != self.workflow_id
+                || event.sequence != expected
+                || event.type_id != event.payload.type_id
+            {
+                return Err(ContractError::InvalidContract(
+                    "workflow event page contains substituted or non-contiguous evidence",
+                ));
+            }
+            event.payload.validate()?;
+        }
+        if self.next_after_sequence != expected
+            || self.next_after_sequence > self.latest_sequence
+            || (self.events.len() < self.limit && self.next_after_sequence < self.latest_sequence)
+        {
+            return Err(ContractError::InvalidContract(
+                "workflow event page cursor is invalid",
+            ));
+        }
+        Ok(())
+    }
+
+    #[must_use]
+    pub const fn caught_up(&self) -> bool {
+        self.next_after_sequence == self.latest_sequence
+    }
 }
 
 /// Revision/generation-bound request to durably begin cancellation.
