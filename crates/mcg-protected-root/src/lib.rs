@@ -9057,6 +9057,15 @@ pub fn open(config: AppConfig) -> Result<Arc<AppRuntime>, ProtectedRootError> {
             "recovered canonical workflow leases, waits, and cancellation settlement"
         );
     }
+    let source_link_recovery = runtime.recover_compatibility_workflow_source_links(recovered_at)?;
+    if source_link_recovery.reattached_workflows > 0 {
+        info!(
+            inspected_active_attachments = source_link_recovery.inspected_active_attachments,
+            reattached_workflows = source_link_recovery.reattached_workflows,
+            inserted_links = source_link_recovery.inserted_links,
+            "reattached canonical workflow lookup links from active compatibility authority"
+        );
+    }
     Ok(runtime)
 }
 

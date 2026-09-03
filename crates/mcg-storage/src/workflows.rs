@@ -58,6 +58,13 @@ pub struct WorkflowRecoveryReport {
     pub quarantined_cancellations: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WorkflowSourceLinkRecoveryReport {
+    pub inspected_active_attachments: u64,
+    pub reattached_workflows: u64,
+    pub inserted_links: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskContractHead {
     pub contract: TaskContract,
@@ -1942,6 +1949,118 @@ impl SqliteEventStore {
         source_locator: &str,
     ) -> Result<Vec<WorkflowSourceLink>, StorageError> {
         load_workflow_source_links_by_source(&self.connection, source_type.as_str(), source_locator)
+    }
+
+    /// Reconstructs missing compatibility lookup links for exact active primary attachments.
+    ///
+    /// This is a startup migration/recovery path for pre-schema-62 workflows. It revalidates the
+    /// entire still-active task/run/instance/lease chain and the immutable primary attachment
+    /// before inserting links. Inactive or expired compatibility work is deliberately not guessed.
+    ///
+    /// # Errors
+    /// Returns a storage error for malformed or substituted active authority, invalid identifiers,
+    /// or atomic insertion failure.
+    pub fn recover_compatibility_workflow_source_links(
+        &mut self,
+        now: DateTime<Utc>,
+    ) -> Result<WorkflowSourceLinkRecoveryReport, StorageError> {
+        let transaction = self.connection.transaction()?;
+        let source_type = stable_type_id("mcg.agent_turn_source.v1")?;
+        let locators = {
+            let mut statement = transaction.prepare(
+                "SELECT attachment.source_locator, lease.expires_at
+                 FROM workflow_source_attachments AS attachment
+                 INNER JOIN agent_leases AS lease
+                    ON lease.lease_id = attachment.source_locator
+                 INNER JOIN agent_instances AS instance
+                    ON instance.instance_id = lease.instance_id
+                 INNER JOIN agent_runs AS run ON run.run_id = instance.run_id
+                 INNER JOIN tasks AS task ON task.task_id = run.task_id
+                 WHERE attachment.source_type = ?1
+                   AND lease.state = 'active'
+                   AND instance.state = 'running'
+                   AND run.state = 'running'
+                   AND task.state = 'active'
+                   AND NOT EXISTS (
+                       SELECT 1 FROM workflow_source_links AS link
+                       WHERE link.workflow_id = attachment.workflow_id
+                   )
+                 ORDER BY attachment.source_locator",
+            )?;
+            statement
+                .query_map([source_type.as_str()], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<Result<Vec<_>, _>>()?
+        };
+        let locators = locators
+            .into_iter()
+            .map(|(locator, expiry)| {
+                let expiry = DateTime::parse_from_rfc3339(&expiry)
+                    .map_err(|error| {
+                        StorageError::InvalidData(format!(
+                            "compatibility lease expiry is invalid during source recovery: {error}"
+                        ))
+                    })?
+                    .with_timezone(&Utc);
+                Ok((locator, expiry))
+            })
+            .collect::<Result<Vec<_>, StorageError>>()?;
+        let locators = locators
+            .into_iter()
+            .filter_map(|(locator, expiry)| (expiry > now).then_some(locator))
+            .collect::<Vec<_>>();
+        let mut report = WorkflowSourceLinkRecoveryReport {
+            inspected_active_attachments: u64::try_from(locators.len()).map_err(|_| {
+                StorageError::InvalidData("workflow source recovery count overflowed".into())
+            })?,
+            reattached_workflows: 0,
+            inserted_links: 0,
+        };
+        for locator in locators {
+            let lease_id = locator.parse::<AgentLeaseId>().map_err(|error| {
+                StorageError::InvalidData(format!(
+                    "workflow source attachment lease locator is invalid: {error}"
+                ))
+            })?;
+            let attachment = load_workflow_source_attachment_by_source(
+                &transaction,
+                source_type.as_str(),
+                &locator,
+            )?
+            .ok_or_else(|| {
+                StorageError::InvalidData(
+                    "workflow source recovery attachment disappeared during transaction".into(),
+                )
+            })?;
+            let validated = load_agent_turn_workflow_attachment(&transaction, attachment)?;
+            if !validated.source_links.is_empty() {
+                continue;
+            }
+            let source = load_active_agent_turn_source(&transaction, lease_id, now)?;
+            let links = derive_agent_turn_source_links(&source, &validated.attachment, now)?;
+            for link in &links {
+                insert_or_replay_workflow_source_link(&transaction, link)?;
+            }
+            report.reattached_workflows = increment(
+                report.reattached_workflows,
+                "recovered workflow source attachment count",
+            )?;
+            report.inserted_links = report
+                .inserted_links
+                .checked_add(u64::try_from(links.len()).map_err(|_| {
+                    StorageError::InvalidData(
+                        "recovered workflow source link count overflowed".into(),
+                    )
+                })?)
+                .ok_or_else(|| {
+                    StorageError::InvalidData(
+                        "recovered workflow source link count overflowed".into(),
+                    )
+                })?;
+        }
+        transaction.commit()?;
+        Ok(report)
     }
 
     /// Loads one authoritative task-contract version.
@@ -5466,6 +5585,26 @@ mod tests {
                  END;",
             )
             .unwrap();
+        drop(store);
+        let mut store = SqliteEventStore::open(&database).unwrap();
+
+        let recovery = store
+            .recover_compatibility_workflow_source_links(observed_at)
+            .unwrap();
+        assert_eq!(recovery.inspected_active_attachments, 1);
+        assert_eq!(recovery.reattached_workflows, 1);
+        assert_eq!(recovery.inserted_links, 3);
+        assert_eq!(
+            store
+                .recover_compatibility_workflow_source_links(observed_at)
+                .unwrap(),
+            WorkflowSourceLinkRecoveryReport {
+                inspected_active_attachments: 0,
+                reattached_workflows: 0,
+                inserted_links: 0,
+            },
+            "startup replay must not duplicate immutable lookup evidence"
+        );
 
         let owner = RuntimeActorId::new();
         let authority = store
@@ -5477,7 +5616,7 @@ mod tests {
         assert_eq!(authority.workflow.attempt.lease_generation, 1);
         assert_eq!(
             authority.workflow.source_links, receipt.source_links,
-            "the next authoritative claim backfills pre-schema-62 source links"
+            "startup recovery backfills pre-schema-62 source links before the next claim"
         );
         assert_eq!(
             store

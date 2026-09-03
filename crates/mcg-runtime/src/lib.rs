@@ -161,7 +161,7 @@ use mcg_storage::{
     ReconciliationRecoveryReport, ReconciliationResolutionReceipt, RecoveryReport,
     RootMigrationReceipt, RootOwnership, RuntimeResponseArtifact, STORAGE_SCHEMA_VERSION,
     SqliteEventStore, StorageError, ToolCapabilityAuthorizationReceipt, ToolSecretHandleBinding,
-    WorkflowRecoveryReport, acquire_data_directory_lock,
+    WorkflowRecoveryReport, WorkflowSourceLinkRecoveryReport, acquire_data_directory_lock,
     create_encrypted_backup_bundle_from_snapshot, decrypt_backup_bundle_secrets,
     evaluation_report_source_ref,
 };
@@ -3773,6 +3773,20 @@ impl AppRuntime {
         Ok(self
             .store()?
             .recover_expired_workflow_leases(CorrelationId::new(), now)?)
+    }
+
+    /// Reattaches missing compatibility lookup links from still-active exact source authority.
+    ///
+    /// # Errors
+    /// Returns a runtime error when active source evidence is malformed, substituted, or cannot
+    /// be committed atomically.
+    pub fn recover_compatibility_workflow_source_links(
+        &self,
+        now: DateTime<Utc>,
+    ) -> Result<WorkflowSourceLinkRecoveryReport, RuntimeError> {
+        Ok(self
+            .store()?
+            .recover_compatibility_workflow_source_links(now)?)
     }
 
     /// Fences expired Root-owned reconciliation workers without repeating external effects.
