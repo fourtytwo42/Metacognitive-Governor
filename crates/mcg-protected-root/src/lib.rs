@@ -1126,6 +1126,17 @@ trait GovernedHttpRunnerGateway: Send + Sync {
         &self,
         request: &HttpRunnerRequest,
     ) -> Result<HttpRunnerResponse, ProcessRunnerClientError>;
+
+    async fn invoke_with_cancellation(
+        &self,
+        request: &HttpRunnerRequest,
+        cancellation: Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
+    ) -> Result<HttpRunnerResponse, ProcessRunnerClientError> {
+        tokio::select! {
+            result = self.invoke(request) => result,
+            () = cancellation => Err(ProcessRunnerClientError::Cancelled),
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -1141,6 +1152,14 @@ impl GovernedHttpRunnerGateway for HttpRunnerClient {
         request: &HttpRunnerRequest,
     ) -> Result<HttpRunnerResponse, ProcessRunnerClientError> {
         HttpRunnerClient::invoke(self, request).await
+    }
+
+    async fn invoke_with_cancellation(
+        &self,
+        request: &HttpRunnerRequest,
+        cancellation: Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
+    ) -> Result<HttpRunnerResponse, ProcessRunnerClientError> {
+        HttpRunnerClient::invoke_with_cancellation(self, request, cancellation).await
     }
 }
 
@@ -2608,6 +2627,8 @@ async fn execute_plugin_mcp(
     let (operation_payload, operation_hash) =
         governed_http_operation_payload(&operation).map_err(ToolError::Denied)?;
     let attempt = &authority.workflow.attempt;
+    let attempt_id = attempt.attempt_id;
+    let attempt_lease_generation = attempt.lease_generation;
     let lease_expiry = attempt
         .lease_expires_at
         .ok_or_else(|| ToolError::Denied("plugin MCP workflow has no active lease".into()))?;
@@ -2777,18 +2798,47 @@ async fn execute_plugin_mcp(
         now,
     )
     .map_err(|error| ToolError::Execution(error.to_string()))?;
-    let runner_result = client.invoke(&runner_request).await;
-    let outcome = settle_plugin_mcp_result(
-        runtime,
-        dispatcher.runtime_actor,
-        &request.id,
-        &envelope,
-        &mcp_execution,
-        correlation_id,
-        runner_request_id,
-        rpc_id,
-        runner_result,
-    )?;
+    let runner_result = client
+        .invoke_with_cancellation(
+            &runner_request,
+            Box::pin(wait_for_plugin_workflow_cancellation(
+                dispatcher.runtime.upgrade().ok_or_else(|| {
+                    ToolError::Execution("Protected Root runtime disappeared".into())
+                })?,
+                attempt_id,
+                attempt_lease_generation,
+            )),
+        )
+        .await;
+    let cancellation_already_fenced =
+        matches!(runner_result, Err(ProcessRunnerClientError::Cancelled))
+            && authoritative_plugin_effect_cancellation_already_fenced(
+                runtime,
+                attempt_id,
+                attempt_lease_generation,
+                envelope.id,
+                mcp_execution.id,
+                &mcp_execution,
+            )
+            .unwrap_or(false);
+    let outcome = if cancellation_already_fenced {
+        PluginCapabilityOutcome::Failed {
+            request_id: request.id.clone(),
+            error_code: "capability_execution_uncertain".into(),
+        }
+    } else {
+        settle_plugin_mcp_result(
+            runtime,
+            dispatcher.runtime_actor,
+            &request.id,
+            &envelope,
+            &mcp_execution,
+            correlation_id,
+            runner_request_id,
+            rpc_id,
+            runner_result,
+        )?
+    };
     let mut sessions = dispatcher
         .capability_sessions
         .lock()
@@ -2884,6 +2934,8 @@ async fn execute_plugin_http(
     let (operation_payload, operation_hash) =
         governed_http_operation_payload(&operation).map_err(ToolError::Denied)?;
     let attempt = &authority.workflow.attempt;
+    let attempt_id = attempt.attempt_id;
+    let attempt_lease_generation = attempt.lease_generation;
     let lease_expiry = attempt
         .lease_expires_at
         .ok_or_else(|| ToolError::Denied("plugin HTTP workflow has no active lease".into()))?;
@@ -3035,17 +3087,62 @@ async fn execute_plugin_http(
         now,
     )
     .map_err(|error| ToolError::Execution(error.to_string()))?;
-    let runner_result = client.invoke(&runner_request).await;
-    let outcome = settle_plugin_http_result(
-        runtime,
-        dispatcher.runtime_actor,
-        &request.id,
-        &envelope,
-        &http_execution,
-        correlation_id,
-        request_id,
-        runner_result,
-    )?;
+    let runner_result = client
+        .invoke_with_cancellation(
+            &runner_request,
+            Box::pin(wait_for_plugin_workflow_cancellation(
+                dispatcher.runtime.upgrade().ok_or_else(|| {
+                    ToolError::Execution("Protected Root runtime disappeared".into())
+                })?,
+                attempt_id,
+                attempt_lease_generation,
+            )),
+        )
+        .await;
+    let cancellation_already_fenced =
+        matches!(runner_result, Err(ProcessRunnerClientError::Cancelled))
+            && if effect == EffectClass::Irreversible {
+                authoritative_plugin_effect_cancellation_already_fenced(
+                    runtime,
+                    attempt_id,
+                    attempt_lease_generation,
+                    envelope.id,
+                    http_execution.id,
+                    &http_execution,
+                )
+                .unwrap_or(false)
+            } else {
+                authoritative_plugin_cancellation_already_settled(
+                    runtime,
+                    attempt_id,
+                    attempt_lease_generation,
+                    envelope.id,
+                    http_execution.id,
+                    &http_execution,
+                )
+                .unwrap_or(false)
+            };
+    let outcome = if cancellation_already_fenced {
+        PluginCapabilityOutcome::Failed {
+            request_id: request.id.clone(),
+            error_code: if effect == EffectClass::Irreversible {
+                "capability_execution_uncertain".into()
+            } else {
+                "workflow_cancelled".into()
+            },
+        }
+    } else {
+        settle_plugin_http_result(
+            runtime,
+            dispatcher.runtime_actor,
+            &request.id,
+            &envelope,
+            &http_execution,
+            correlation_id,
+            request_id,
+            runner_result,
+        )?
+    };
     let mut sessions = dispatcher
         .capability_sessions
         .lock()
@@ -10667,6 +10764,12 @@ mod tests {
     struct ScriptedHttpGateway {
         calls: Arc<Mutex<Vec<HttpRunnerRequest>>>,
         outcomes: Mutex<VecDeque<HttpRunnerOutcome>>,
+        block_next: Mutex<Option<Arc<tokio::sync::Notify>>>,
+    }
+
+    struct BlockingHttpGateway {
+        started: Arc<tokio::sync::Notify>,
+        calls: Arc<Mutex<Vec<HttpRunnerRequest>>>,
     }
 
     struct ScriptedBrowserGateway {
@@ -10845,6 +10948,11 @@ mod tests {
             );
             assert!(!request.authorization.permit.capabilities.process_spawn);
             self.calls.lock().expect("HTTP calls").push(request.clone());
+            let blocking = self.block_next.lock().expect("HTTP blocking state").take();
+            if let Some(started) = blocking {
+                started.notify_one();
+                return std::future::pending().await;
+            }
             let outcome = self
                 .outcomes
                 .lock()
@@ -10916,6 +11024,27 @@ mod tests {
                 started_at: now,
                 finished_at: now,
             })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl GovernedHttpRunnerGateway for BlockingHttpGateway {
+        fn capability_evidence(
+            &self,
+        ) -> Result<HttpRunnerCapabilityEvidence, ProcessRunnerClientError> {
+            Ok(scripted_http_capability_evidence())
+        }
+
+        async fn invoke(
+            &self,
+            request: &HttpRunnerRequest,
+        ) -> Result<HttpRunnerResponse, ProcessRunnerClientError> {
+            self.calls
+                .lock()
+                .expect("blocking HTTP calls")
+                .push(request.clone());
+            self.started.notify_one();
+            std::future::pending().await
         }
     }
 
@@ -15011,6 +15140,196 @@ mod tests {
 
     #[tokio::test]
     #[allow(clippy::too_many_lines)]
+    async fn root_cancellation_stops_active_plugin_http_and_preserves_unknown_effect() {
+        let temporary = tempfile::tempdir().expect("temporary Root data directory");
+        let project_root = tempfile::tempdir().expect("plugin project root");
+        let config = AppConfig::default().with_data_directory(temporary.path());
+        let reopen_config = config.clone();
+        let runtime = Arc::new(AppRuntime::open(config).expect("runtime"));
+        let project_id = ProjectId::new();
+        runtime
+            .discover_project(project_root.path(), project_id)
+            .expect("discover plugin project");
+        let mut task = TaskEnvelope::new("cancel governed plugin HTTP");
+        task.project_id = Some(project_id);
+        runtime.create_task(&task).expect("create plugin task");
+        let identity = current_runtime_identity().expect("Root identity");
+        runtime
+            .initialize_root_ownership(
+                identity.clone(),
+                RootMigrationReceipt {
+                    schema_version: PROTOCOL_V1,
+                    from_storage_schema: STORAGE_SCHEMA_VERSION,
+                    to_storage_schema: STORAGE_SCHEMA_VERSION,
+                    backup_path: None,
+                    backup_sha256: None,
+                    migrated_at: Utc::now(),
+                },
+            )
+            .expect("Root ownership");
+        let plugin_gateway = Arc::new(ScriptedProtectedPluginGateway {
+            runner: SourceRef {
+                source_type: StableTypeId::parse("mcg.plugin_runner_executable.v1")
+                    .expect("runner type"),
+                locator: "mcg-plugin-runner".into(),
+                content_hash: ContentHash {
+                    algorithm: HashAlgorithm::Sha256,
+                    domain: "MetaCog.PluginRunnerExecutable".into(),
+                    digest_hex: "6".repeat(64),
+                },
+            },
+            requests: Arc::new(Mutex::new(Vec::new())),
+            turns: Mutex::new(VecDeque::from([PluginGuestTurn::CapabilityRequest {
+                request: PluginCapabilityRequest {
+                    schema_version: PLUGIN_SCHEMA_VERSION,
+                    id: "cancel-http".into(),
+                    operation: PluginCapabilityOperation::HttpRequest {
+                        method: "POST".into(),
+                        url: "https://api.example.test/mutate".into(),
+                        headers: Vec::new(),
+                        body: Some("{\"change\":true}".into()),
+                        max_response_bytes: 64 * 1024,
+                    },
+                },
+            }])),
+        });
+        let http_started = Arc::new(tokio::sync::Notify::new());
+        let http_calls = Arc::new(Mutex::new(Vec::new()));
+        runtime
+            .install_protected_plugin_dispatcher(Arc::new(RootPluginDispatcher {
+                runtime: Arc::downgrade(&runtime),
+                root_executable: PathBuf::from("unused-in-injected-test"),
+                runtime_actor: RuntimeActorId(identity.instance_id.0),
+                runtime_identity: identity,
+                capability_sessions: Mutex::new(BTreeMap::new()),
+                test_gateway: Some(plugin_gateway),
+                test_action_gateway: None,
+                test_process_gateway: None,
+                test_http_gateway: Some(Arc::new(BlockingHttpGateway {
+                    started: http_started.clone(),
+                    calls: http_calls.clone(),
+                })),
+                test_browser_gateway: None,
+                test_mcp_session_gateway: None,
+            }))
+            .expect("install protected plugin dispatcher");
+        let module = br#"(module (func (export "_start")))"#;
+        let revision = PluginRevision {
+            schema_version: PLUGIN_CATALOG_SCHEMA_VERSION,
+            id: PluginRevisionId::new(),
+            manifest: PluginManifest {
+                schema_version: PLUGIN_SCHEMA_VERSION,
+                id: "example.cancelled-http".into(),
+                display_name: "Cancelled HTTP fixture".into(),
+                version: "1.0.0".into(),
+                class: PluginClass::SandboxedWasi,
+                requested_capabilities: vec![PluginCapability::Network],
+            },
+            module_sha256: format!("{:x}", Sha256::digest(module)),
+            module_size_bytes: u64::try_from(module.len()).expect("module size"),
+            source: PluginInstallSource::LocalImport,
+            signature: PluginSignature {
+                state: PluginSignatureState::Unsigned,
+                scheme: None,
+                signer: None,
+                signature_sha256: None,
+            },
+            installed_at: Utc::now(),
+        };
+        let installation = runtime
+            .install_sandboxed_plugin(&revision, module)
+            .expect("install protected HTTP plugin");
+        let installation = runtime
+            .set_plugin_capability_grants(
+                &revision.manifest.id,
+                installation.revision,
+                vec![PluginCapabilityGrant {
+                    schema_version: PLUGIN_CATALOG_SCHEMA_VERSION,
+                    capability: PluginCapability::Network,
+                    scopes: vec![PluginCapabilityScope::NetworkOrigin {
+                        origin: "https://api.example.test".into(),
+                    }],
+                }],
+            )
+            .expect("grant exact plugin origin");
+        runtime
+            .set_plugin_enabled(&revision.manifest.id, installation.revision, true)
+            .expect("enable protected HTTP plugin");
+
+        let invocation_id = PluginInvocationId::new();
+        let invocation = runtime.invoke_sandboxed_plugin(
+            invocation_id,
+            &revision.manifest.id,
+            Some(task.id),
+            serde_json::json!({"goal": "cancel HTTP"}),
+        );
+        let cancellation = async {
+            tokio::time::timeout(std::time::Duration::from_secs(5), http_started.notified())
+                .await
+                .expect("HTTP runner did not start");
+            let workflow = runtime
+                .canonical_workflows()
+                .expect("plugin workflow")
+                .into_iter()
+                .next()
+                .expect("one plugin workflow");
+            runtime
+                .cancel_canonical_workflow(&WorkflowCancelRequest {
+                    attempt_id: workflow.attempt_id,
+                    expected_revision: workflow.revision,
+                    expected_generation: workflow.lease_generation,
+                    idempotency_key: "cancel-active-plugin-http".into(),
+                })
+                .expect("commit authoritative HTTP cancellation")
+        };
+        let (result, cancelling) = tokio::join!(invocation, cancellation);
+        let result = result.expect("cancelled HTTP invocation settles durably");
+        assert_eq!(cancelling.state, WorkflowState::CancelRequested);
+        assert_eq!(
+            result.invocation.state,
+            mcg_domain::PluginInvocationState::Uncertain
+        );
+        let calls = http_calls.lock().expect("HTTP calls");
+        assert_eq!(calls.len(), 1);
+        let execution_id = calls[0].execution_id;
+        drop(calls);
+        let (_, execution) = runtime
+            .canonical_action_for_execution(execution_id)
+            .expect("load cancelled HTTP action")
+            .expect("cancelled HTTP action");
+        assert_eq!(execution.state, ActionExecutionState::OutcomeUnknown);
+        assert_eq!(
+            runtime.canonical_workflows().expect("settled workflow")[0].state,
+            WorkflowState::Waiting(WaitReason::Reconciliation)
+        );
+        drop(runtime);
+
+        let reopened = AppRuntime::open(reopen_config).expect("reopen runtime");
+        assert_eq!(
+            reopened
+                .plugin_invocation(invocation_id)
+                .expect("reopened invocation")
+                .expect("durable invocation")
+                .state,
+            mcg_domain::PluginInvocationState::Uncertain
+        );
+        assert_eq!(
+            reopened
+                .canonical_action_for_execution(execution_id)
+                .expect("reopened action")
+                .expect("durable action")
+                .1
+                .state,
+            ActionExecutionState::OutcomeUnknown
+        );
+        assert_eq!(
+            reopened.canonical_workflows().expect("reopened workflow")[0].state,
+            WorkflowState::Waiting(WaitReason::Reconciliation)
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn root_governs_plugin_browser_and_never_redispatches_ambiguous_workflow() {
         let temporary = tempfile::tempdir().expect("temporary Root data directory");
         let project_root = tempfile::tempdir().expect("plugin project root");
@@ -15414,6 +15733,7 @@ mod tests {
         let http_gateway = Arc::new(ScriptedHttpGateway {
             calls: http_requests.clone(),
             outcomes: Mutex::new(VecDeque::from([HttpRunnerOutcome::Completed])),
+            block_next: Mutex::new(None),
         });
         runtime
             .install_protected_plugin_dispatcher(Arc::new(RootPluginDispatcher {
@@ -15790,6 +16110,7 @@ mod tests {
         let http_gateway = Arc::new(ScriptedHttpGateway {
             calls: http_requests.clone(),
             outcomes: Mutex::new(VecDeque::from([HttpRunnerOutcome::Completed])),
+            block_next: Mutex::new(None),
         });
         runtime
             .install_protected_plugin_dispatcher(Arc::new(RootPluginDispatcher {
@@ -15942,6 +16263,81 @@ mod tests {
             .into_iter()
             .find(|job| job.action_id == unknown_action.action_id)
             .expect("durable MCP reconciliation job");
+        let cancellation_started = Arc::new(tokio::sync::Notify::new());
+        *http_gateway.block_next.lock().expect("MCP blocking state") =
+            Some(cancellation_started.clone());
+        plugin_gateway
+            .turns
+            .lock()
+            .expect("plugin turns")
+            .push_back(PluginGuestTurn::CapabilityRequest {
+                request: PluginCapabilityRequest {
+                    schema_version: PLUGIN_SCHEMA_VERSION,
+                    id: "mcp-cancel".into(),
+                    operation: PluginCapabilityOperation::McpCall {
+                        connection_id: "governed-mcp".into(),
+                        tool_name: "change_state".into(),
+                        arguments: serde_json::json!({"value": 9}),
+                        max_response_bytes: 64 * 1024,
+                    },
+                },
+            });
+        let cancelled_invocation_id = PluginInvocationId::new();
+        let invocation = runtime.invoke_sandboxed_plugin(
+            cancelled_invocation_id,
+            &revision.manifest.id,
+            Some(task.id),
+            serde_json::json!({"goal": "cancel MCP"}),
+        );
+        let cancellation = async {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                cancellation_started.notified(),
+            )
+            .await
+            .expect("MCP HTTP runner did not start");
+            let workflow = runtime
+                .canonical_workflows()
+                .expect("MCP workflows")
+                .into_iter()
+                .find(|workflow| workflow.state == WorkflowState::Running)
+                .expect("active MCP workflow");
+            runtime
+                .cancel_canonical_workflow(&WorkflowCancelRequest {
+                    attempt_id: workflow.attempt_id,
+                    expected_revision: workflow.revision,
+                    expected_generation: workflow.lease_generation,
+                    idempotency_key: "cancel-active-modern-plugin-mcp".into(),
+                })
+                .expect("commit authoritative modern MCP cancellation")
+        };
+        let (cancelled, cancelling) = tokio::join!(invocation, cancellation);
+        let cancelled = cancelled.expect("cancelled MCP invocation settles durably");
+        assert_eq!(
+            cancelled.invocation.state,
+            mcg_domain::PluginInvocationState::Uncertain
+        );
+        let calls = http_requests.lock().expect("MCP HTTP requests");
+        assert_eq!(calls.len(), 3);
+        let cancelled_execution_id = calls[2].execution_id;
+        drop(calls);
+        assert_eq!(
+            runtime
+                .canonical_action_for_execution(cancelled_execution_id)
+                .expect("cancelled MCP action")
+                .expect("durable cancelled MCP action")
+                .1
+                .state,
+            ActionExecutionState::OutcomeUnknown
+        );
+        assert_eq!(
+            runtime
+                .canonical_workflow_attempt(cancelling.attempt_id)
+                .expect("cancelled MCP workflow")
+                .expect("durable cancelled MCP workflow")
+                .state,
+            WorkflowState::Waiting(WaitReason::Reconciliation)
+        );
         drop(runtime);
 
         let reopened = AppRuntime::open(config).expect("reopen MCP Root");
@@ -15956,7 +16352,24 @@ mod tests {
             .state,
             ActionExecutionState::OutcomeUnknown
         );
-        assert_eq!(http_requests.lock().expect("MCP HTTP requests").len(), 2);
+        assert_eq!(http_requests.lock().expect("MCP HTTP requests").len(), 3);
+        assert_eq!(
+            reopened
+                .plugin_invocation(cancelled_invocation_id)
+                .expect("reopened cancelled MCP invocation")
+                .expect("durable cancelled MCP invocation")
+                .state,
+            mcg_domain::PluginInvocationState::Uncertain
+        );
+        assert_eq!(
+            reopened
+                .canonical_action_for_execution(cancelled_execution_id)
+                .expect("reopened cancelled MCP action")
+                .expect("durable cancelled MCP action")
+                .1
+                .state,
+            ActionExecutionState::OutcomeUnknown
+        );
         let recovery = reopened
             .recover_action_reconciliations(job.deadline)
             .expect("escalate manual MCP reconciliation");
@@ -15969,7 +16382,7 @@ mod tests {
                 .state,
             mcg_contracts::ReconciliationJobState::UserActionRequired
         );
-        assert_eq!(http_requests.lock().expect("MCP HTTP requests").len(), 2);
+        assert_eq!(http_requests.lock().expect("MCP HTTP requests").len(), 3);
     }
 
     #[tokio::test]

@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeSet, HashSet},
+    future::Future,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::{Path, PathBuf},
     process::Stdio,
@@ -257,6 +258,125 @@ impl HttpRunnerClient {
         &self,
         request: &HttpRunnerRequest,
     ) -> Result<HttpRunnerResponse, ProcessRunnerClientError> {
+        self.invoke_with_cancellation(request, std::future::pending())
+            .await
+    }
+
+    /// Dispatches one exact request and terminates/reaps its child when cancellation becomes
+    /// authoritative.
+    ///
+    /// # Errors
+    /// Returns a categorical transport error for identity, launch, delivery, cancellation,
+    /// timeout, output, or response-contract failure.
+    pub async fn invoke_with_cancellation<C>(
+        &self,
+        request: &HttpRunnerRequest,
+        cancellation: C,
+    ) -> Result<HttpRunnerResponse, ProcessRunnerClientError>
+    where
+        C: Future<Output = ()>,
+    {
+        let bytes = self.encode_request(request)?;
+        let mut command = self.runner_command()?;
+        let mut child = command
+            .spawn()
+            .map_err(|_| ProcessRunnerClientError::Launch)?;
+        let (Some(mut stdin), Some(stdout), Some(stderr)) = (
+            child.stdin().take(),
+            child.stdout().take(),
+            child.stderr().take(),
+        ) else {
+            let _ = Box::into_pin(child.kill()).await;
+            let _ = child.wait().await;
+            return Err(ProcessRunnerClientError::Launch);
+        };
+        let mut stdout_task = tokio::spawn(read_bounded(stdout, HTTP_RUNNER_RESPONSE_MAX_BYTES));
+        let mut stderr_task = tokio::spawn(read_bounded(stderr, STDERR_MAX_BYTES));
+        let deadline = Instant::now() + self.outer_timeout;
+        tokio::pin!(cancellation);
+        let write = tokio::time::timeout_at(deadline, async {
+            stdin.write_all(&bytes).await?;
+            stdin.shutdown().await
+        });
+        tokio::pin!(write);
+        let write_result = tokio::select! {
+            result = &mut write => Some(result),
+            () = &mut cancellation => None,
+        };
+        let Some(write_result) = write_result else {
+            drop(stdin);
+            stop_child(child.as_mut(), &stdout_task, &stderr_task).await;
+            return Err(ProcessRunnerClientError::Cancelled);
+        };
+        match write_result {
+            Ok(Ok(())) => {}
+            Ok(Err(_)) => {
+                drop(stdin);
+                stop_child(child.as_mut(), &stdout_task, &stderr_task).await;
+                return Err(ProcessRunnerClientError::Delivery);
+            }
+            Err(_) => {
+                drop(stdin);
+                stop_child(child.as_mut(), &stdout_task, &stderr_task).await;
+                return Err(ProcessRunnerClientError::Timeout);
+            }
+        }
+        drop(stdin);
+        let wait_result = {
+            let wait = tokio::time::timeout_at(deadline, child.wait());
+            tokio::pin!(wait);
+            tokio::select! {
+                result = &mut wait => Some(result),
+                () = &mut cancellation => None,
+            }
+        };
+        let Some(wait_result) = wait_result else {
+            stop_child(child.as_mut(), &stdout_task, &stderr_task).await;
+            return Err(ProcessRunnerClientError::Cancelled);
+        };
+        let status = match wait_result {
+            Ok(Ok(status)) => status,
+            Ok(Err(_)) => {
+                stop_child(child.as_mut(), &stdout_task, &stderr_task).await;
+                return Err(ProcessRunnerClientError::Process);
+            }
+            Err(_) => {
+                stop_child(child.as_mut(), &stdout_task, &stderr_task).await;
+                return Err(ProcessRunnerClientError::Timeout);
+            }
+        };
+        let output_result = {
+            let output = tokio::time::timeout_at(deadline, async {
+                Ok::<_, ProcessRunnerClientError>((
+                    join_reader(&mut stdout_task).await?,
+                    join_reader(&mut stderr_task).await?,
+                ))
+            });
+            tokio::pin!(output);
+            tokio::select! {
+                result = &mut output => Some(result),
+                () = &mut cancellation => None,
+            }
+        };
+        let Some(output_result) = output_result else {
+            stdout_task.abort();
+            stderr_task.abort();
+            return Err(ProcessRunnerClientError::Cancelled);
+        };
+        let output = output_result.map_err(|_| ProcessRunnerClientError::Timeout)??;
+        if output.0.1 || output.1.1 {
+            return Err(ProcessRunnerClientError::ResponseTooLarge);
+        }
+        if !output.1.0.is_empty() {
+            return Err(ProcessRunnerClientError::DiagnosticOutput);
+        }
+        validate_http_client_response(status.success(), request, &output.0.0)
+    }
+
+    fn encode_request(
+        &self,
+        request: &HttpRunnerRequest,
+    ) -> Result<Vec<u8>, ProcessRunnerClientError> {
         require_regular_unlinked(&self.executable)?;
         if runner_executable_source(&self.executable)? != self.capability_evidence.runner {
             return Err(ProcessRunnerClientError::ExecutableChanged);
@@ -266,6 +386,10 @@ impl HttpRunnerClient {
         if bytes.len() > HTTP_RUNNER_REQUEST_MAX_BYTES {
             return Err(ProcessRunnerClientError::RequestTooLarge);
         }
+        Ok(bytes)
+    }
+
+    fn runner_command(&self) -> Result<CommandWrap, ProcessRunnerClientError> {
         let mut command = Command::new(&self.executable);
         command.env_clear();
         preserve_platform_runtime_environment(&mut command);
@@ -285,58 +409,7 @@ impl HttpRunnerClient {
         command.wrap(ProcessGroup::leader());
         #[cfg(windows)]
         command.wrap(JobObject);
-        let mut child = command
-            .spawn()
-            .map_err(|_| ProcessRunnerClientError::Launch)?;
-        let (Some(mut stdin), Some(stdout), Some(stderr)) = (
-            child.stdin().take(),
-            child.stdout().take(),
-            child.stderr().take(),
-        ) else {
-            let _ = Box::into_pin(child.kill()).await;
-            let _ = child.wait().await;
-            return Err(ProcessRunnerClientError::Launch);
-        };
-        let mut stdout_task = tokio::spawn(read_bounded(stdout, HTTP_RUNNER_RESPONSE_MAX_BYTES));
-        let mut stderr_task = tokio::spawn(read_bounded(stderr, STDERR_MAX_BYTES));
-        let deadline = Instant::now() + self.outer_timeout;
-        if tokio::time::timeout_at(deadline, async {
-            stdin.write_all(&bytes).await?;
-            stdin.shutdown().await
-        })
-        .await
-        .is_err()
-        {
-            stop_child(child.as_mut(), &stdout_task, &stderr_task).await;
-            return Err(ProcessRunnerClientError::Timeout);
-        }
-        drop(stdin);
-        let status = match tokio::time::timeout_at(deadline, child.wait()).await {
-            Ok(Ok(status)) => status,
-            Ok(Err(_)) => {
-                stop_child(child.as_mut(), &stdout_task, &stderr_task).await;
-                return Err(ProcessRunnerClientError::Process);
-            }
-            Err(_) => {
-                stop_child(child.as_mut(), &stdout_task, &stderr_task).await;
-                return Err(ProcessRunnerClientError::Timeout);
-            }
-        };
-        let output = tokio::time::timeout_at(deadline, async {
-            Ok::<_, ProcessRunnerClientError>((
-                join_reader(&mut stdout_task).await?,
-                join_reader(&mut stderr_task).await?,
-            ))
-        })
-        .await
-        .map_err(|_| ProcessRunnerClientError::Timeout)??;
-        if output.0.1 || output.1.1 {
-            return Err(ProcessRunnerClientError::ResponseTooLarge);
-        }
-        if !output.1.0.is_empty() {
-            return Err(ProcessRunnerClientError::DiagnosticOutput);
-        }
-        validate_http_client_response(status.success(), request, &output.0.0)
+        Ok(command)
     }
 }
 

@@ -11,7 +11,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use mcg_mcp::{McpCredential, McpCredentialStore, MemoryMcpCredentialStore};
 use mcg_process_runner::{
     GovernedHttpHeader, GovernedHttpHeaderValue, GovernedHttpOperation,
-    HttpRunnerCapabilityEvidence, HttpRunnerClient, HttpRunnerOutcome,
+    HttpRunnerCapabilityEvidence, HttpRunnerClient, HttpRunnerOutcome, ProcessRunnerClientError,
     decode_governed_http_observation, execute_http_request_with_store,
     execute_http_request_with_stores, http_qualification_request_with_evidence,
     http_runner_sandbox_profile, runner_executable_source,
@@ -205,6 +205,35 @@ async fn mutating_request_timeout_after_contact_is_outcome_unknown() {
         response.error_code.as_deref(),
         Some("request_timeout_unknown")
     );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn authoritative_cancellation_reaps_contacted_http_runner() {
+    let response =
+        b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec();
+    let (origin, calls) = delayed_response_server(Duration::from_secs(2), response).await;
+    let client = packaged_client();
+    let mut operation = operation("POST", &format!("{origin}/mutate"));
+    operation.timeout_ms = 5_000;
+    let request =
+        http_qualification_request_with_evidence(&operation, client.capability_evidence())
+            .expect("qualification request");
+    let observed_calls = calls.clone();
+
+    let result = client
+        .invoke_with_cancellation(&request, async move {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while observed_calls.load(Ordering::SeqCst) == 0 {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("HTTP runner did not contact the fixture");
+        })
+        .await;
+
+    assert_eq!(result, Err(ProcessRunnerClientError::Cancelled));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
 
