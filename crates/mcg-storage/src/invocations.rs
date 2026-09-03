@@ -447,44 +447,13 @@ impl SqliteEventStore {
         expected_revision: u64,
         recorded_at: DateTime<Utc>,
     ) -> Result<ModelRunRecord, StorageError> {
-        next.validate()
-            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
         let transaction = self.connection.transaction()?;
-        let current = load_model_run_head(&transaction, next.id)?
-            .ok_or_else(|| StorageError::Conflict("model-run head does not exist".into()))?;
-        if current.revision != expected_revision {
-            return Err(StorageError::Conflict(format!(
-                "stale model-run revision: expected {expected_revision}, current {}",
-                current.revision
-            )));
-        }
-        if !current.run.state.can_transition_to(next.state) {
-            return Err(StorageError::Conflict(format!(
-                "illegal model-run transition {:?} -> {:?}",
-                current.run.state, next.state
-            )));
-        }
-        validate_model_run_continuity(&current.run, next)?;
-        let revision = expected_revision
-            .checked_add(1)
-            .ok_or_else(|| StorageError::InvalidData("model-run revision overflow".into()))?;
-        let record = model_run_record(revision, next, recorded_at)?;
-        insert_model_run_version(&transaction, &record)?;
-        let changed = transaction.execute(
-            "UPDATE model_run_heads SET current_revision = ?1
-             WHERE model_run_id = ?2 AND invocation_id = ?3 AND current_revision = ?4",
-            params![
-                sql_u64(revision, "model-run revision")?,
-                next.id.to_string(),
-                next.invocation_id.to_string(),
-                sql_u64(expected_revision, "expected model-run revision")?,
-            ],
+        let record = transition_model_run_in_transaction(
+            &transaction,
+            next,
+            expected_revision,
+            recorded_at,
         )?;
-        if changed != 1 {
-            return Err(StorageError::Conflict(
-                "model-run head changed before commit".into(),
-            ));
-        }
         transaction.commit()?;
         Ok(record)
     }
@@ -1036,6 +1005,134 @@ fn insert_model_run_version(
     Ok(())
 }
 
+fn transition_model_run_in_transaction(
+    transaction: &Transaction<'_>,
+    next: &ModelRun,
+    expected_revision: u64,
+    recorded_at: DateTime<Utc>,
+) -> Result<ModelRunRecord, StorageError> {
+    next.validate()
+        .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+    let current = load_model_run_head(transaction, next.id)?
+        .ok_or_else(|| StorageError::Conflict("model-run head does not exist".into()))?;
+    if current.revision != expected_revision {
+        return Err(StorageError::Conflict(format!(
+            "stale model-run revision: expected {expected_revision}, current {}",
+            current.revision
+        )));
+    }
+    if !current.run.state.can_transition_to(next.state) {
+        return Err(StorageError::Conflict(format!(
+            "illegal model-run transition {:?} -> {:?}",
+            current.run.state, next.state
+        )));
+    }
+    validate_model_run_continuity(&current.run, next)?;
+    let revision = expected_revision
+        .checked_add(1)
+        .ok_or_else(|| StorageError::InvalidData("model-run revision overflow".into()))?;
+    let record = model_run_record(revision, next, recorded_at)?;
+    insert_model_run_version(transaction, &record)?;
+    let changed = transaction.execute(
+        "UPDATE model_run_heads SET current_revision = ?1
+         WHERE model_run_id = ?2 AND invocation_id = ?3 AND current_revision = ?4",
+        params![
+            sql_u64(revision, "model-run revision")?,
+            next.id.to_string(),
+            next.invocation_id.to_string(),
+            sql_u64(expected_revision, "expected model-run revision")?,
+        ],
+    )?;
+    if changed != 1 {
+        return Err(StorageError::Conflict(
+            "model-run head changed before commit".into(),
+        ));
+    }
+    Ok(record)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub(super) struct ModelRunCancellationPropagation {
+    pub cancelled_planned: u64,
+    pub dispatched_requiring_termination: u64,
+}
+
+/// Cancels every undispatched model child in the same transaction that fences its workflow.
+/// Dispatched children remain nonterminal until their exact process controller classifies the
+/// outcome, but are counted so the workflow event cannot imply that termination already happened.
+pub(super) fn propagate_workflow_cancellation_to_model_runs(
+    transaction: &Transaction<'_>,
+    attempt_id: AttemptId,
+    recorded_at: DateTime<Utc>,
+) -> Result<ModelRunCancellationPropagation, StorageError> {
+    let runs = {
+        let mut statement = transaction.prepare(
+            "SELECT version.revision, version.content_hash_json, version.run_json,
+                    version.recorded_at
+             FROM invocation_manifests AS invocation
+             JOIN model_run_heads AS head ON head.invocation_id = invocation.invocation_id
+             JOIN model_run_versions AS version
+               ON version.model_run_id = head.model_run_id
+              AND version.revision = head.current_revision
+             WHERE invocation.workflow_attempt_id = ?1
+               AND version.state IN ('planned', 'dispatched')
+             ORDER BY invocation.persisted_at, invocation.invocation_id, version.model_run_id",
+        )?;
+        statement
+            .query_map([attempt_id.to_string()], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .map(decode_model_run_record)
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    let mut propagation = ModelRunCancellationPropagation {
+        cancelled_planned: 0,
+        dispatched_requiring_termination: 0,
+    };
+    for current in runs {
+        match current.run.state {
+            ModelRunState::Planned => {
+                let mut cancelled = current.run;
+                cancelled.state = ModelRunState::Cancelled;
+                cancelled.finished_at = Some(recorded_at);
+                transition_model_run_in_transaction(
+                    transaction,
+                    &cancelled,
+                    current.revision,
+                    recorded_at,
+                )?;
+                propagation.cancelled_planned = propagation
+                    .cancelled_planned
+                    .checked_add(1)
+                    .ok_or_else(|| {
+                        StorageError::InvalidData(
+                            "cancelled model-run propagation count overflowed".into(),
+                        )
+                    })?;
+            }
+            ModelRunState::Dispatched => {
+                propagation.dispatched_requiring_termination = propagation
+                    .dispatched_requiring_termination
+                    .checked_add(1)
+                    .ok_or_else(|| {
+                        StorageError::InvalidData(
+                            "dispatched model-run propagation count overflowed".into(),
+                        )
+                    })?;
+            }
+            _ => unreachable!("the cancellation child query returns only live model runs"),
+        }
+    }
+    Ok(propagation)
+}
+
 fn load_model_run_head(
     connection: &Connection,
     run_id: ModelRunId,
@@ -1497,6 +1594,91 @@ mod tests {
             .transition_model_run(&completed, 2, now() + chrono::Duration::seconds(2))
             .unwrap();
         (context, invocation, record)
+    }
+
+    #[test]
+    fn workflow_cancellation_atomically_cancels_planned_model_children() {
+        let mut store = SqliteEventStore::open_in_memory().unwrap();
+        let (contract, attempt) = workflow_fixture();
+        store
+            .create_workflow(&contract, &attempt, CorrelationId::new(), now())
+            .unwrap();
+        let owner = RuntimeActorId::new();
+        let running = store
+            .claim_workflow_attempt(
+                attempt.attempt_id,
+                attempt.revision,
+                attempt.lease_generation,
+                owner,
+                now() + chrono::Duration::minutes(5),
+                CorrelationId::new(),
+                "claim-for-child-cancellation",
+                now(),
+            )
+            .unwrap();
+
+        let context = context(attempt.attempt_id, "cancellation");
+        let context_hash = store.persist_context_manifest(&context, now()).unwrap();
+        let planned_invocation = invocation(&attempt, InvocationRole::Work, context_hash.clone());
+        store
+            .persist_invocation_manifest(&planned_invocation, now())
+            .unwrap();
+        let planned = run(&planned_invocation);
+        store.create_model_run(&planned, now()).unwrap();
+
+        let dispatched_invocation = invocation(&attempt, InvocationRole::Verify, context_hash);
+        store
+            .persist_invocation_manifest(&dispatched_invocation, now())
+            .unwrap();
+        let dispatched = run(&dispatched_invocation);
+        store.create_model_run(&dispatched, now()).unwrap();
+        let mut dispatched_head = dispatched.clone();
+        dispatched_head.state = ModelRunState::Dispatched;
+        dispatched_head.provider_request_id = Some("provider-request-active".into());
+        store
+            .transition_model_run(&dispatched_head, 1, now() + chrono::Duration::seconds(1))
+            .unwrap();
+
+        let cancelled_at = now() + chrono::Duration::seconds(2);
+        let cancelling = store
+            .transition_workflow_attempt(
+                running.attempt_id,
+                running.revision,
+                running.lease_generation,
+                WorkflowState::CancelRequested,
+                CorrelationId::new(),
+                "cancel-with-model-children",
+                cancelled_at,
+            )
+            .unwrap();
+        assert_eq!(cancelling.state, WorkflowState::CancelRequested);
+        let planned_head = store.model_run(planned.id).unwrap().unwrap();
+        assert_eq!(planned_head.revision, 2);
+        assert_eq!(planned_head.run.state, ModelRunState::Cancelled);
+        assert_eq!(planned_head.run.finished_at, Some(cancelled_at));
+        let dispatched_head = store.model_run(dispatched.id).unwrap().unwrap();
+        assert_eq!(dispatched_head.revision, 2);
+        assert_eq!(dispatched_head.run.state, ModelRunState::Dispatched);
+        let event = store
+            .workflow_events(attempt.workflow_id)
+            .unwrap()
+            .into_iter()
+            .find(|event| event.idempotency_key == "cancel-with-model-children")
+            .unwrap();
+        let payload: serde_json::Value =
+            mcg_contracts::decode_canonical_cbor_v1(&event.payload.bytes).unwrap();
+        assert_eq!(
+            payload["cancellation_model_runs"]["cancelled_planned"],
+            serde_json::json!(1)
+        );
+        assert_eq!(
+            payload["cancellation_model_runs"]["dispatched_requiring_termination"],
+            serde_json::json!(1)
+        );
+        assert!(
+            !cancelling.accepts_worker_result(attempt.attempt_id, running.lease_generation),
+            "the parent generation fence rejects output while the exact process controller terminates the dispatched child"
+        );
     }
 
     #[test]

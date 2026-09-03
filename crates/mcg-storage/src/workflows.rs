@@ -27,6 +27,7 @@ use sha2::{Digest, Sha256};
 use crate::{
     SqliteEventStore, StorageError,
     actions::{cancellation_effect_status, fence_actions_for_workflow_cancellation},
+    invocations::propagate_workflow_cancellation_to_model_runs,
     plugins::{
         complete_plugin_invocation_in_transaction, load_plugin_installation,
         load_plugin_invocation, load_plugin_revision, validate_plugin_revision,
@@ -1687,6 +1688,15 @@ pub(crate) fn transition_workflow_attempt_in_transaction(
     }
 
     let previous_state = attempt.state;
+    let cancellation_model_runs = if next_state == WorkflowState::CancelRequested {
+        Some(propagate_workflow_cancellation_to_model_runs(
+            transaction,
+            attempt.attempt_id,
+            now,
+        )?)
+    } else {
+        None
+    };
     let cancellation_effects = if next_state == WorkflowState::CancelRequested {
         Some(fence_actions_for_workflow_cancellation(
             transaction,
@@ -1754,6 +1764,7 @@ pub(crate) fn transition_workflow_attempt_in_transaction(
             "attempt_id": attempt.attempt_id,
             "from": previous_state,
             "to": next_state,
+            "cancellation_model_runs": cancellation_model_runs,
             "cancellation_effects": cancellation_effects,
             "attempt": attempt,
         }),
