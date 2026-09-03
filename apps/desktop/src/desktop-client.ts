@@ -1248,6 +1248,17 @@ export interface CanonicalWorkflowInspection {
   events: CanonicalWorkflowEvent[];
 }
 
+export interface CanonicalWorkflowSourceLink {
+  schema_version: number;
+  source: { source_type: string; locator: string; content_hash: { algorithm: string; domain: string; digest_hex: string } };
+  source_snapshot: { type_id: string; schema_version: number; canonical_encoding: string; normalization: string; bytes: number[] };
+  primary_source: { source_type: string; locator: string; content_hash: { algorithm: string; domain: string; digest_hex: string } };
+  workflow_id: string;
+  attempt_id: string;
+  task_contract: { id: string; version: number; content_hash: { algorithm: string; domain: string; digest_hex: string } };
+  linked_at: string;
+}
+
 export interface CanonicalWorkflowInvocationActivity {
   workflow: CanonicalWorkflowInspection;
   invocations: CanonicalInvocationSummary[];
@@ -2270,6 +2281,10 @@ export function listProtectedRootWorkflows(): Promise<CanonicalWorkflowAttempt[]
 
 export function getProtectedRootWorkflow(workflowId: string): Promise<CanonicalWorkflowInspection | null> {
   return invoke("protected_root_workflow", { workflowId });
+}
+
+export function getProtectedRootWorkflowSourceLinks(sourceType: string, sourceLocator: string): Promise<CanonicalWorkflowSourceLink[]> {
+  return invoke("protected_root_workflow_source_links", { sourceType, sourceLocator });
 }
 
 export function getProtectedRootWorkflowActivity(workflowId: string, invocationLimit = 100): Promise<CanonicalWorkflowInvocationActivity | null> {

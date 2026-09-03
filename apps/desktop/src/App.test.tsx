@@ -216,6 +216,7 @@ const client = vi.hoisted(() => ({
   ,protectedRootStatus: vi.fn()
   ,protectedRootWorkflows: vi.fn()
   ,protectedRootWorkflow: vi.fn()
+  ,protectedRootWorkflowSourceLinks: vi.fn()
   ,protectedRootWorkflowActivity: vi.fn()
   ,protectedRootActions: vi.fn()
   ,protectedRootAction: vi.fn()
@@ -433,6 +434,7 @@ vi.mock("./desktop-client", () => ({
   getProtectedRootStatus: client.protectedRootStatus,
   listProtectedRootWorkflows: client.protectedRootWorkflows,
   getProtectedRootWorkflow: client.protectedRootWorkflow,
+  getProtectedRootWorkflowSourceLinks: client.protectedRootWorkflowSourceLinks,
   getProtectedRootWorkflowActivity: client.protectedRootWorkflowActivity,
   listProtectedRootActions: client.protectedRootActions,
   getProtectedRootAction: client.protectedRootAction,
@@ -984,6 +986,7 @@ beforeEach(() => {
   });
   client.protectedRootWorkflows.mockResolvedValue([]);
   client.protectedRootWorkflow.mockResolvedValue(null);
+  client.protectedRootWorkflowSourceLinks.mockResolvedValue([]);
   client.protectedRootWorkflowActivity.mockResolvedValue(null);
   client.protectedRootActions.mockResolvedValue([]);
   client.protectedRootAction.mockResolvedValue(null);
@@ -1205,6 +1208,16 @@ test("durable workflows progressively disclose Root evidence and fence cancellat
     }],
     invocations_truncated: false
   });
+  client.protectedRootWorkflowSourceLinks.mockResolvedValue([{
+    schema_version: 1,
+    source: { source_type: "mcg.compatibility_task_source.v1", locator: "00000000-0000-4000-8000-000000000539", content_hash: { algorithm: "blake3-256", domain: "MetaCog.WorkflowSourceSnapshot", digest_hex: "d".repeat(64) } },
+    source_snapshot: { type_id: "mcg.compatibility_task_source.v1", schema_version: 1, canonical_encoding: "cbor-v1", normalization: "nfc-v1", bytes: [1, 2, 3] },
+    primary_source: { source_type: "mcg.compatibility_agent_turn_lease_source.v1", locator: "00000000-0000-4000-8000-000000000540", content_hash: { algorithm: "blake3-256", domain: "MetaCog.WorkflowSourceSnapshot", digest_hex: "e".repeat(64) } },
+    workflow_id: attempt.workflow_id,
+    attempt_id: attempt.attempt_id,
+    task_contract: attempt.task_contract,
+    linked_at: attempt.updated_at
+  }]);
   client.cancelProtectedRootWorkflow.mockResolvedValue({ ...attempt, state: "cancel_requested", revision: 3, lease_generation: 2, lease_owner: null, lease_expires_at: null });
   const confirmation = vi.spyOn(window, "confirm").mockReturnValue(true);
 
@@ -1212,6 +1225,11 @@ test("durable workflows progressively disclose Root evidence and fence cancellat
   fireEvent.click(await screen.findByRole("link", { name: /Agents/ }));
   const workflows = await screen.findByRole("article", { name: "Governed workflow activity" });
   expect(within(workflows).getByText(/Working · attempt 1 · revision 2 · generation 1/)).toBeInTheDocument();
+  fireEvent.change(within(workflows).getByLabelText("Exact source ID"), { target: { value: "00000000-0000-4000-8000-000000000539" } });
+  fireEvent.click(within(workflows).getByRole("button", { name: "Resolve exact source" }));
+  await waitFor(() => expect(client.protectedRootWorkflowSourceLinks).toHaveBeenCalledWith("mcg.compatibility_task_source.v1", "00000000-0000-4000-8000-000000000539"));
+  expect(await within(workflows).findByRole("status", { name: "Source-linked workflows" })).toHaveTextContent("1 workflow linked to task");
+  expect(within(workflows).getByRole("button", { name: "Exact workflow source evidence" })).toBeInTheDocument();
   fireEvent.click(within(workflows).getByRole("button", { name: "Inspect activity" }));
   expect(await within(workflows).findByText("Recover a durable report")).toBeInTheDocument();
   expect(within(workflows).getByText("Verification")).toBeInTheDocument();

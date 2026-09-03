@@ -208,6 +208,7 @@ import {
   getProtectedRootStatus,
   listProtectedRootWorkflows,
   getProtectedRootWorkflow,
+  getProtectedRootWorkflowSourceLinks,
   getProtectedRootWorkflowActivity,
   listProtectedRootActions,
   getProtectedRootAction,
@@ -422,6 +423,7 @@ import {
   type ProtectedRootStatus,
   type CanonicalWorkflowAttempt,
   type CanonicalWorkflowInspection,
+  type CanonicalWorkflowSourceLink,
   type CanonicalWorkflowInvocationActivity,
   type CanonicalActionSummary,
   type CanonicalActionInspection,
@@ -2651,8 +2653,11 @@ export function App() {
   const [localService, setLocalService] = useState<LocalServiceStatus | null>(null);
   const [protectedRoot, setProtectedRoot] = useState<ProtectedRootStatus | null>(null);
   const [canonicalWorkflows, setCanonicalWorkflows] = useState<CanonicalWorkflowAttempt[]>([]);
-    const [workflowInspections, setWorkflowInspections] = useState<Record<string, CanonicalWorkflowInspection>>({});
-    const [workflowActivities, setWorkflowActivities] = useState<Record<string, CanonicalWorkflowInvocationActivity>>({});
+  const [workflowInspections, setWorkflowInspections] = useState<Record<string, CanonicalWorkflowInspection>>({});
+  const [workflowActivities, setWorkflowActivities] = useState<Record<string, CanonicalWorkflowInvocationActivity>>({});
+  const [workflowSourceFocus, setWorkflowSourceFocus] = useState<{ label: string; sourceType: string; sourceLocator: string; links: CanonicalWorkflowSourceLink[] } | null>(null);
+  const [workflowSourceType, setWorkflowSourceType] = useState("mcg.compatibility_task_source.v1");
+  const [workflowSourceLocator, setWorkflowSourceLocator] = useState("");
   const [workflowBusy, setWorkflowBusy] = useState<string | null>(null);
   const [workflowError, setWorkflowError] = useState<string | null>(null);
   const [canonicalActions, setCanonicalActions] = useState<CanonicalActionSummary[]>([]);
@@ -4101,6 +4106,34 @@ export function App() {
       if (!activity) throw new Error(`Canonical workflow ${workflowId} was not found.`);
       setWorkflowActivities((current) => ({ ...current, [workflowId]: activity }));
       setWorkflowInspections((current) => ({ ...current, [workflowId]: activity.workflow }));
+    } catch (error) {
+      setWorkflowError(errorMessage(error));
+    } finally {
+      setWorkflowBusy(null);
+    }
+  }
+
+  async function inspectWorkflowSource(sourceType: string, sourceLocator: string, label: string) {
+    const busyKey = `source:${sourceType}:${sourceLocator}`;
+    setWorkflowBusy(busyKey);
+    setWorkflowError(null);
+    try {
+      const links = await getProtectedRootWorkflowSourceLinks(sourceType, sourceLocator);
+      const inspections = (await Promise.all(links.map((link) => getProtectedRootWorkflow(link.workflow_id))))
+        .filter((inspection): inspection is CanonicalWorkflowInspection => inspection !== null);
+      setCanonicalWorkflows((current) => {
+        const byWorkflow = new Map(current.map((attempt) => [attempt.workflow_id, attempt]));
+        inspections.forEach((inspection) => byWorkflow.set(inspection.attempt.workflow_id, inspection.attempt));
+        return [...byWorkflow.values()];
+      });
+      setWorkflowInspections((current) => {
+        const next = { ...current };
+        inspections.forEach((inspection) => { next[inspection.attempt.workflow_id] = inspection; });
+        return next;
+      });
+      setWorkflowSourceFocus({ label, sourceType, sourceLocator, links });
+      setAgentTab("overview");
+      window.setTimeout(() => document.getElementById("governed-workflow-activity")?.scrollIntoView?.({ block: "start" }), 0);
     } catch (error) {
       setWorkflowError(errorMessage(error));
     } finally {
@@ -9213,22 +9246,38 @@ export function App() {
                     {advanced && <small>Session {session.session_id} · updated {new Date(session.updated_at).toLocaleString()}{session.model ? ` · ${session.model}` : ""}</small>}
                     {userSettings?.interface_complexity === "developer" && <small>Conversation {session.conversation_id} · role {session.role_id} · organization revision {session.organization_revision_id}{session.codex_thread_id ? ` · Codex thread ${session.codex_thread_id}` : ""}</small>}
                   </span>
-                  <div className="card-actions"><em className={`agent-state state-${session.state}`}>{session.state}</em><button className="secondary" type="button" onClick={() => openChat(session.conversation_id)}>Open conversation</button></div>
+                  <div className="card-actions">
+                    <em className={`agent-state state-${session.state}`}>{session.state}</em>
+                    {advanced && <button className="secondary" type="button" disabled={workflowBusy !== null} onClick={() => void inspectWorkflowSource("mcg.compatibility_conversation_source.v1", session.conversation_id, `Conversation ${session.conversation_title}`)}>Linked workflows</button>}
+                    <button className="secondary" type="button" onClick={() => openChat(session.conversation_id)}>Open conversation</button>
+                  </div>
                 </div>)}
               </div>}
             </article>
 
-            <article className="agent-section-card canonical-workflow-section" aria-label="Governed workflow activity">
+            <article className="agent-section-card canonical-workflow-section" id="governed-workflow-activity" aria-label="Governed workflow activity">
               <div className="section-heading compact-heading">
                 <div><h3>Governed workflow activity</h3><p className="muted">Drill from each Root-owned workflow into its exact current-attempt Work and Verification invocations.</p></div>
                 <button className="secondary" type="button" disabled={workflowBusy !== null} onClick={() => void refreshCanonicalWorkflows()}>{workflowBusy === "list" ? "Refreshing…" : "Refresh"}</button>
               </div>
               {workflowError && <p className="error-message" role="alert">{workflowError}</p>}
+              {userSettings?.interface_complexity === "developer" && <div className="advanced-fields" aria-label="Exact workflow source resolver">
+                <label>Compatibility source<select value={workflowSourceType} onChange={(event) => setWorkflowSourceType(event.target.value)}><option value="mcg.compatibility_task_source.v1">Task</option><option value="mcg.compatibility_agent_run_source.v1">Agent run</option><option value="mcg.compatibility_conversation_source.v1">Conversation</option></select></label>
+                <label>Exact source ID<input value={workflowSourceLocator} onChange={(event) => setWorkflowSourceLocator(event.target.value)} placeholder="UUID" /></label>
+                <button className="secondary" type="button" disabled={workflowBusy !== null || !workflowSourceLocator.trim()} onClick={() => void inspectWorkflowSource(workflowSourceType, workflowSourceLocator.trim(), `${workflowSourceType.replace("mcg.compatibility_", "").replace("_source.v1", "").replaceAll("_", " ")} ${workflowSourceLocator.trim()}`)}>{workflowBusy?.startsWith("source:") ? "Resolving…" : "Resolve exact source"}</button>
+              </div>}
+              {workflowSourceFocus && <div className="approval-invocation-focus" role="status" aria-label="Source-linked workflows">
+                <strong>{workflowSourceFocus.links.length} workflow{workflowSourceFocus.links.length === 1 ? "" : "s"} linked to {workflowSourceFocus.label}</strong>
+                {workflowSourceFocus.links.length === 0 ? <span>No canonical workflow is linked to this exact source.</span> : <div className="card-actions">{workflowSourceFocus.links.map((link) => <button className="link-button" type="button" key={link.workflow_id} disabled={workflowBusy !== null} onClick={() => void inspectCanonicalWorkflowActivity(link.workflow_id)}>Open {link.workflow_id.slice(0, 8)} →</button>)}</div>}
+                {userSettings?.interface_complexity === "developer" && <TechnicalDetails title="Exact workflow source evidence" summary={`${workflowSourceFocus.sourceType} · ${workflowSourceFocus.sourceLocator}`}><p className="form-note">Read-only Root-validated links. Source hashes and primary lease attachment hashes do not grant authority.</p><pre aria-label="Exact workflow source link evidence" aria-readonly="true" role="textbox" tabIndex={0}>{JSON.stringify(workflowSourceFocus.links, null, 2)}</pre></TechnicalDetails>}
+                <button className="link-button" type="button" onClick={() => setWorkflowSourceFocus(null)}>Clear source focus</button>
+              </div>}
               {canonicalWorkflows.length === 0 ? <p className="empty-state">No canonical workflows yet. Existing compatibility work remains available in its current views while migration proceeds.</p> : <div className="instance-list">
                   {canonicalWorkflows.map((attempt) => {
                     const inspection = workflowInspections[attempt.workflow_id];
                     const activity = workflowActivities[attempt.workflow_id];
-                  return <div className="instance-row canonical-workflow-row" key={attempt.workflow_id} data-workflow-state={workflowStateKey(attempt.state)}>
+                  const linkedToFocus = workflowSourceFocus?.links.some((link) => link.workflow_id === attempt.workflow_id) ?? false;
+                  return <div className={`instance-row canonical-workflow-row${linkedToFocus ? " source-linked" : ""}`} key={attempt.workflow_id} data-workflow-state={workflowStateKey(attempt.state)} data-source-linked={linkedToFocus || undefined}>
                     <span>
                       <strong>{inspection?.task_contract.objective ?? `Workflow ${attempt.workflow_id.slice(0, 8)}`}</strong>
                       <small>{workflowStateLabel(attempt.state)}{advanced ? ` · attempt ${attempt.attempt_number} · revision ${attempt.revision} · generation ${attempt.lease_generation}` : ""}</small>
@@ -9435,6 +9484,14 @@ export function App() {
             </article>}
           </div>}
 
+          {agentTab === "activity" && advanced && selectedAgentRun && <div className="approval-invocation-focus" role="region" aria-label="Canonical workflows for selected agent run">
+            <strong>Canonical workflow links</strong>
+            <span>Resolve this compatibility run or its parent task through Protected Root.</span>
+            <div className="card-actions">
+              <button className="secondary" type="button" disabled={workflowBusy !== null} onClick={() => void inspectWorkflowSource("mcg.compatibility_agent_run_source.v1", selectedAgentRun.run.id, `Agent run ${selectedAgentRun.run.id}`)}>Show run workflows</button>
+              {selectedAgentTask && <button className="secondary" type="button" disabled={workflowBusy !== null} onClick={() => void inspectWorkflowSource("mcg.compatibility_task_source.v1", selectedAgentTask.id, `Task ${selectedAgentTask.goal}`)}>Show task workflows</button>}
+            </div>
+          </div>}
           {agentTab === "activity" && <div className="activity-layout"><div className="agent-run-list" aria-label="Agent runs">{agentRuns.length === 0 ? <p className="empty-state">No agent runs yet.</p> : agentRuns.map((view) => <button className={`agent-run-row${selectedAgentRunId === view.run.id ? " active" : ""}`} type="button" onClick={() => setSelectedAgentRunId(view.run.id)} key={view.run.id}><span><strong>{tasks.find((task) => task.id === view.run.task_id)?.goal ?? "Agent run"}</strong><small>{new Date(view.run.updated_at).toLocaleString()} · {view.plan.selected_roles.length} roles</small></span><em className={`agent-state state-${view.run.state}`}>{view.run.state}</em></button>)}</div><article className="agent-section-card run-inspector">{!selectedAgentRun ? <div className="empty-state">Select a run to inspect its agents and evidence.</div> : <><div className="section-heading compact-heading"><div><h3>{selectedAgentTask?.goal ?? "Agent run"}</h3><p className="muted">Pinned revision <code>{selectedAgentRun.run.organization_revision_id}</code></p></div><div className="card-actions">{selectedAgentTask?.state === "blocked" && <button className="primary" type="button" disabled={taskBusy} onClick={() => void retryBlockedTask(selectedAgentTask.id)}>Retry task</button>}{selectedAgentTask?.state === "waiting_for_approval" && selectedAgentApproval && <button className="primary" type="button" disabled={taskBusy} onClick={() => void approveAndResume(selectedAgentTask.id, selectedAgentApproval.id)}>Approve and resume</button>}{["planned", "running", "waiting", "recovering"].includes(selectedAgentRun.run.state) && <button className="secondary" type="button" disabled={agentBusy} onClick={() => void cancelRun(selectedAgentRun.run.id)}>Cancel run</button>}</div></div><p>{selectedAgentRun.plan.selection_reason}</p><div className="run-metrics"><span><strong>{selectedAgentRun.instances.length}</strong><small>agents</small></span><span><strong>{selectedAgentRun.plan.items.length}</strong><small>work items</small></span><span><strong>{selectedAgentRun.usage.reduce((sum, usage) => sum + usage.input_tokens + usage.output_tokens, 0).toLocaleString()}</strong><small>tokens</small></span><span><strong>{selectedAgentRun.evaluations.length}</strong><small>evaluations</small></span></div><div className="instance-list">{selectedAgentRun.instances.map((instance) => { const role = organizations.flatMap((organization) => organization.roles).find((candidate) => candidate.id === instance.role_id); return <div className="instance-row" key={instance.id}><span><strong>{role?.name ?? instance.role_id}</strong><small>{instance.model ? `${instance.model.model_id} · ${instance.model.route_reason}` : "Model not routed yet"}</small></span><em>{instance.state}</em></div>; })}</div>{advanced && <><details><summary>Work plan and leases</summary><ul>{selectedAgentRun.plan.items.map((item) => <li key={item.id}><strong>{item.goal}</strong> · {item.state}</li>)}</ul><ul>{selectedAgentRun.leases.map((lease) => <li key={lease.id}><strong>{lease.goal}</strong> · {lease.state} · {lease.budget.consumed_tokens.toLocaleString()} tokens</li>)}</ul></details><details><summary>Evaluations and replay evidence</summary>{selectedAgentRun.evaluations.length === 0 ? <p className="muted">No evaluation recorded yet.</p> : selectedAgentRun.evaluations.map((evaluation) => <div className="evaluation-row" key={evaluation.id}><strong>{evaluation.outcome}</strong><span>{evaluation.confidence.basis_points / 100}% confidence</span>{evaluation.evidence.map((evidence, index) => <small key={`${evaluation.id}-${index}`}>{evidence.passed ? "Pass" : "Fail"} · {evidence.method}: {evidence.detail}</small>)}</div>)}</details></>}</>}</article></div>}
 
           {agentTab === "governor" && advanced && <div className="agents-stack">

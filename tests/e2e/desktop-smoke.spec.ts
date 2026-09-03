@@ -345,6 +345,19 @@ test.beforeEach(async ({ page }) => {
             if (args.workflowId !== canonicalWorkflowId) return null;
             return { attempt: canonicalWorkflow, task_contract: canonicalTaskContract, events: canonicalEvents };
           }
+          if (command === "protected_root_workflow_source_links") {
+            if (args.sourceType !== "mcg.compatibility_task_source.v1" || args.sourceLocator !== "00000000-0000-4000-8000-000000000609") return [];
+            return [{
+              schema_version: 1,
+              source: { source_type: args.sourceType, locator: args.sourceLocator, content_hash: { algorithm: "blake3-256", domain: "MetaCog.WorkflowSourceSnapshot", digest_hex: "9".repeat(64) } },
+              source_snapshot: { type_id: args.sourceType, schema_version: 1, canonical_encoding: "cbor-v1", normalization: "nfc-v1", bytes: [1, 2, 3] },
+              primary_source: { source_type: "mcg.compatibility_agent_turn_lease_source.v1", locator: "00000000-0000-4000-8000-000000000610", content_hash: { algorithm: "blake3-256", domain: "MetaCog.WorkflowSourceSnapshot", digest_hex: "8".repeat(64) } },
+              workflow_id: canonicalWorkflowId,
+              attempt_id: canonicalAttemptId,
+              task_contract: canonicalWorkflow.task_contract,
+              linked_at: now
+            }];
+          }
           if (command === "protected_root_workflow_activity") {
             if (args.workflowId !== canonicalWorkflowId) return null;
             return {
@@ -719,6 +732,12 @@ test("durable workflows keep one Root truth across Simple Advanced and Developer
   await page.getByRole("button", { name: "Back to app" }).click();
   await page.getByRole("link", { name: "Agents", exact: true }).click();
   workflows = page.getByRole("article", { name: "Governed workflow activity" });
+  await workflows.getByLabel("Exact source ID").fill("00000000-0000-4000-8000-000000000609");
+  await workflows.getByRole("button", { name: "Resolve exact source" }).click();
+  await expect(workflows.getByRole("status", { name: "Source-linked workflows" })).toContainText("1 workflow linked to task");
+  await workflows.getByRole("button", { name: "Exact workflow source evidence" }).click();
+  await expect(workflows.getByRole("textbox", { name: "Exact workflow source link evidence" })).toContainText("mcg.compatibility_task_source.v1");
+  await expect(workflows.getByRole("textbox", { name: "Exact workflow source link evidence" })).toContainText("00000000-0000-4000-8000-000000000610");
   const evidence = workflows.getByRole("button", { name: "Canonical workflow activity evidence" });
   await evidence.click();
   await expect(workflows.getByRole("textbox", { name: /Canonical workflow .* evidence/ })).toContainText("mcg.workflow.attempt.claimed");

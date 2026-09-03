@@ -200,6 +200,22 @@ async fn protected_root_workflow(
 }
 
 #[tauri::command]
+async fn protected_root_workflow_source_links(
+    source_type: String,
+    source_locator: String,
+) -> Result<Vec<mcg_contracts::WorkflowSourceLink>, String> {
+    let source_type = mcg_contracts::StableTypeId::parse(&source_type)
+        .map_err(|error| format!("Workflow source type is invalid: {error}"))?;
+    mcg_platform::query_root_workflow_source_links(
+        &AppConfig::default().data_directory,
+        &source_type,
+        &source_locator,
+    )
+    .await
+    .map_err(|error| format!("Protected Root workflow source links could not be loaded: {error}"))
+}
+
+#[tauri::command]
 async fn protected_root_workflow_activity(
     workflow_id: String,
     invocation_limit: usize,
@@ -4131,6 +4147,7 @@ pub fn run() {
             protected_root_status,
             protected_root_workflows,
             protected_root_workflow,
+            protected_root_workflow_source_links,
             protected_root_workflow_activity,
             protected_root_actions,
             protected_root_action,
