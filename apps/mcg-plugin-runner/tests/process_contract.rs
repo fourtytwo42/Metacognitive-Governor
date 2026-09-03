@@ -146,6 +146,46 @@ async fn parent_deadline_covers_request_pipe_and_child_lifetime() {
 }
 
 #[tokio::test]
+async fn authoritative_cancellation_terminates_and_reaps_the_active_child() {
+    let module = br#"(module (func (export "_start") (loop $forever (br $forever))))"#;
+    let request = PluginRunnerRequest {
+        schema_version: PLUGIN_SCHEMA_VERSION,
+        manifest: PluginManifest {
+            schema_version: PLUGIN_SCHEMA_VERSION,
+            id: "example.cancelled".into(),
+            display_name: "Cancellation fixture".into(),
+            version: "1.0.0".into(),
+            class: PluginClass::SandboxedWasi,
+            requested_capabilities: Vec::new(),
+        },
+        module_sha256: sha256_hex(module),
+        module_base64: STANDARD.encode(module),
+        input: json!({}),
+        limits: WasiPluginLimits {
+            fuel: 1_000_000_000,
+            maximum_wall_time_ms: 120_000,
+            ..WasiPluginLimits::default()
+        },
+        authorization: None,
+    };
+    let client = PluginRunnerClient::with_executable(
+        env!("CARGO_BIN_EXE_mcg-plugin-runner"),
+        std::time::Duration::from_secs(130),
+    )
+    .expect("trusted runner path");
+    let started = std::time::Instant::now();
+
+    let result = client
+        .invoke_with_cancellation(&request, async {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        })
+        .await;
+
+    assert!(matches!(result, Err(PluginRunnerClientError::Cancelled)));
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+}
+
+#[tokio::test]
 async fn parent_rejects_runner_replacement_before_plugin_execution() {
     let temporary = tempfile::tempdir().expect("temporary runner directory");
     let runner_name = if cfg!(windows) {

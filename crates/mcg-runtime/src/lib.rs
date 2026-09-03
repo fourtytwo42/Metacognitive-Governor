@@ -1789,6 +1789,7 @@ const fn plugin_runner_failure(
         | PluginRunnerClientError::Process => {
             (PluginInvocationState::Uncertain, "runner_uncertain")
         }
+        PluginRunnerClientError::Cancelled => (PluginInvocationState::Failed, "workflow_cancelled"),
     }
 }
 

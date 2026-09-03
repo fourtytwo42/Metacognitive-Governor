@@ -1035,6 +1035,17 @@ trait RootPluginRunnerGateway: Send + Sync {
         &self,
         request: &PluginRunnerRequest,
     ) -> Result<PluginRunnerResponse, PluginRunnerClientError>;
+
+    async fn invoke_with_cancellation(
+        &self,
+        request: &PluginRunnerRequest,
+        cancellation: Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
+    ) -> Result<PluginRunnerResponse, PluginRunnerClientError> {
+        tokio::select! {
+            result = self.invoke(request) => result,
+            () = cancellation => Err(PluginRunnerClientError::Cancelled),
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -1048,6 +1059,14 @@ impl RootPluginRunnerGateway for PluginRunnerClient {
         request: &PluginRunnerRequest,
     ) -> Result<PluginRunnerResponse, PluginRunnerClientError> {
         PluginRunnerClient::invoke(self, request).await
+    }
+
+    async fn invoke_with_cancellation(
+        &self,
+        request: &PluginRunnerRequest,
+        cancellation: Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
+    ) -> Result<PluginRunnerResponse, PluginRunnerClientError> {
+        PluginRunnerClient::invoke_with_cancellation(self, request, cancellation).await
     }
 }
 
@@ -1270,6 +1289,8 @@ impl ProtectedPluginDispatcher for RootPluginDispatcher {
         )
         .map_err(PluginRunnerClientError::Denied)?;
         let attempt = authority.workflow.attempt;
+        let attempt_id = attempt.attempt_id;
+        let attempt_lease_generation = attempt.lease_generation;
         let lease_expiry = attempt.lease_expires_at.ok_or_else(|| {
             PluginRunnerClientError::Denied("plugin workflow has no active lease".into())
         })?;
@@ -1398,16 +1419,37 @@ impl ProtectedPluginDispatcher for RootPluginDispatcher {
                 Utc::now(),
             )
             .map_err(protected_plugin_denied)?;
-        let response = client.invoke(&request).await;
-        if settle_observational_plugin_action(
-            &runtime,
-            action_id,
-            execution_id,
-            &dispatched,
-            response.as_ref().ok(),
-            response.as_ref().err(),
-        )
-        .is_err()
+        let response = client
+            .invoke_with_cancellation(
+                &request,
+                Box::pin(wait_for_plugin_workflow_cancellation(
+                    runtime.clone(),
+                    attempt_id,
+                    attempt_lease_generation,
+                )),
+            )
+            .await;
+        let cancellation_already_settled =
+            matches!(response, Err(PluginRunnerClientError::Cancelled))
+                && authoritative_plugin_cancellation_already_settled(
+                    &runtime,
+                    attempt_id,
+                    attempt_lease_generation,
+                    action_id,
+                    execution_id,
+                    &dispatched,
+                )
+                .unwrap_or(false);
+        if !cancellation_already_settled
+            && settle_observational_plugin_action(
+                &runtime,
+                action_id,
+                execution_id,
+                &dispatched,
+                response.as_ref().ok(),
+                response.as_ref().err(),
+            )
+            .is_err()
         {
             return Err(PluginRunnerClientError::Process);
         }
@@ -5597,6 +5639,57 @@ fn protected_plugin_denied(error: impl std::fmt::Display) -> PluginRunnerClientE
     PluginRunnerClientError::Denied(error.to_string())
 }
 
+async fn wait_for_plugin_workflow_cancellation(
+    runtime: Arc<AppRuntime>,
+    attempt_id: mcg_contracts::AttemptId,
+    lease_generation: u64,
+) {
+    loop {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let Ok(Some(attempt)) = runtime.canonical_workflow_attempt(attempt_id) else {
+            return;
+        };
+        if matches!(
+            attempt.state,
+            WorkflowState::CancelRequested | WorkflowState::Cancelled
+        ) && attempt.lease_generation > lease_generation
+            && attempt.lease_owner.is_none()
+            && attempt.lease_expires_at.is_none()
+        {
+            return;
+        }
+    }
+}
+
+fn authoritative_plugin_cancellation_already_settled(
+    runtime: &AppRuntime,
+    attempt_id: mcg_contracts::AttemptId,
+    lease_generation: u64,
+    action_id: ActionId,
+    execution_id: ActionExecutionId,
+    dispatched: &ActionExecution,
+) -> Result<bool, RuntimeError> {
+    let Some(attempt) = runtime.canonical_workflow_attempt(attempt_id)? else {
+        return Ok(false);
+    };
+    let Some((envelope, execution)) = runtime.canonical_action_for_execution(execution_id)? else {
+        return Ok(false);
+    };
+    Ok(matches!(
+        attempt.state,
+        WorkflowState::CancelRequested | WorkflowState::Cancelled
+    ) && attempt.lease_generation > lease_generation
+        && attempt.lease_owner.is_none()
+        && attempt.lease_expires_at.is_none()
+        && envelope.id == action_id
+        && envelope.attempt_id == attempt_id
+        && execution.id == execution_id
+        && execution.action_id == action_id
+        && execution.state == ActionExecutionState::NoEffectConfirmed
+        && execution.revision > dispatched.revision
+        && execution.lease_generation > dispatched.lease_generation)
+}
+
 fn settle_observational_plugin_action(
     runtime: &AppRuntime,
     action_id: ActionId,
@@ -5658,6 +5751,7 @@ const fn plugin_runner_client_error_code(error: &PluginRunnerClientError) -> &'s
         PluginRunnerClientError::DiagnosticOutput => "diagnostic_output",
         PluginRunnerClientError::InvalidResponse => "invalid_response",
         PluginRunnerClientError::Process => "process",
+        PluginRunnerClientError::Cancelled => "cancelled",
     }
 }
 
@@ -10466,6 +10560,11 @@ mod tests {
         requests: Arc<Mutex<Vec<PluginRunnerRequest>>>,
     }
 
+    struct BlockingPluginGateway {
+        runner: SourceRef,
+        started: Arc<tokio::sync::Notify>,
+    }
+
     struct ScriptedProtectedPluginGateway {
         runner: SourceRef,
         requests: Arc<Mutex<Vec<PluginRunnerRequest>>>,
@@ -10969,6 +11068,26 @@ mod tests {
                 error_code: None,
                 detail: None,
             })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl RootPluginRunnerGateway for BlockingPluginGateway {
+        fn runner_source(&self) -> &SourceRef {
+            &self.runner
+        }
+
+        async fn invoke(
+            &self,
+            request: &PluginRunnerRequest,
+        ) -> Result<PluginRunnerResponse, PluginRunnerClientError> {
+            if request.authorization.is_none() {
+                return Err(PluginRunnerClientError::Denied(
+                    "fixture received no Root authority".into(),
+                ));
+            }
+            self.started.notify_one();
+            std::future::pending().await
         }
     }
 
@@ -13933,6 +14052,150 @@ mod tests {
             0,
             "a capability invocation without a task/project is denied before canonical authority"
         );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn root_cancellation_stops_active_plugin_and_settles_without_redispatch() {
+        let temporary = tempfile::tempdir().expect("temporary Root data directory");
+        let config = AppConfig::default().with_data_directory(temporary.path());
+        let reopen_config = config.clone();
+        let runtime = Arc::new(AppRuntime::open(config).expect("runtime"));
+        let identity = current_runtime_identity().expect("Root identity");
+        runtime
+            .initialize_root_ownership(
+                identity.clone(),
+                RootMigrationReceipt {
+                    schema_version: PROTOCOL_V1,
+                    from_storage_schema: STORAGE_SCHEMA_VERSION,
+                    to_storage_schema: STORAGE_SCHEMA_VERSION,
+                    backup_path: None,
+                    backup_sha256: None,
+                    migrated_at: Utc::now(),
+                },
+            )
+            .expect("Root ownership");
+        let started = Arc::new(tokio::sync::Notify::new());
+        let runner = SourceRef {
+            source_type: StableTypeId::parse("mcg.plugin_runner_executable.v1")
+                .expect("runner type"),
+            locator: if cfg!(windows) {
+                "mcg-plugin-runner.exe".into()
+            } else {
+                "mcg-plugin-runner".into()
+            },
+            content_hash: ContentHash {
+                algorithm: HashAlgorithm::Sha256,
+                domain: "MetaCog.PluginRunnerExecutable".into(),
+                digest_hex: "e".repeat(64),
+            },
+        };
+        runtime
+            .install_protected_plugin_dispatcher(Arc::new(RootPluginDispatcher {
+                runtime: Arc::downgrade(&runtime),
+                root_executable: PathBuf::from("unused-in-injected-test"),
+                runtime_actor: RuntimeActorId(identity.instance_id.0),
+                runtime_identity: identity,
+                capability_sessions: Mutex::new(BTreeMap::new()),
+                test_gateway: Some(Arc::new(BlockingPluginGateway {
+                    runner,
+                    started: started.clone(),
+                })),
+                test_action_gateway: None,
+                test_process_gateway: None,
+                test_http_gateway: None,
+                test_browser_gateway: None,
+                test_mcp_session_gateway: None,
+            }))
+            .expect("install Root plugin dispatcher");
+        let module = br#"(module (func (export "_start")))"#;
+        let revision = PluginRevision {
+            schema_version: PLUGIN_CATALOG_SCHEMA_VERSION,
+            id: PluginRevisionId::new(),
+            manifest: PluginManifest {
+                schema_version: PLUGIN_SCHEMA_VERSION,
+                id: "example.root-cancelled".into(),
+                display_name: "Root cancelled plugin fixture".into(),
+                version: "1.0.0".into(),
+                class: PluginClass::SandboxedWasi,
+                requested_capabilities: Vec::new(),
+            },
+            module_sha256: format!("{:x}", Sha256::digest(module)),
+            module_size_bytes: u64::try_from(module.len()).expect("module size"),
+            source: PluginInstallSource::LocalImport,
+            signature: PluginSignature {
+                state: PluginSignatureState::Unsigned,
+                scheme: None,
+                signer: None,
+                signature_sha256: None,
+            },
+            installed_at: Utc::now(),
+        };
+        let installation = runtime
+            .install_sandboxed_plugin(&revision, module)
+            .expect("install plugin");
+        runtime
+            .set_plugin_enabled(&revision.manifest.id, installation.revision, true)
+            .expect("enable plugin");
+        let invocation_id = PluginInvocationId::new();
+        let invocation = runtime.invoke_sandboxed_plugin(
+            invocation_id,
+            &revision.manifest.id,
+            None,
+            serde_json::json!({"cancel": true}),
+        );
+        let cancellation = async {
+            tokio::time::timeout(std::time::Duration::from_secs(5), started.notified())
+                .await
+                .expect("plugin runner did not start");
+            let workflow = runtime
+                .canonical_workflows()
+                .expect("plugin workflow")
+                .into_iter()
+                .next()
+                .expect("one plugin workflow");
+            runtime
+                .cancel_canonical_workflow(&WorkflowCancelRequest {
+                    attempt_id: workflow.attempt_id,
+                    expected_revision: workflow.revision,
+                    expected_generation: workflow.lease_generation,
+                    idempotency_key: "cancel-active-plugin-runner".into(),
+                })
+                .expect("commit authoritative plugin cancellation")
+        };
+        let (result, cancelling) = tokio::join!(invocation, cancellation);
+        let result = result.expect("cancelled plugin invocation settles durably");
+
+        assert_eq!(cancelling.state, WorkflowState::CancelRequested);
+        assert_eq!(
+            result.invocation.state,
+            mcg_domain::PluginInvocationState::Failed
+        );
+        assert_eq!(
+            result.invocation.error_code.as_deref(),
+            Some("workflow_cancelled")
+        );
+        let workflows = runtime.canonical_workflows().expect("plugin workflows");
+        assert_eq!(workflows.len(), 1);
+        assert_eq!(workflows[0].state, WorkflowState::Cancelled);
+        let actions = runtime.canonical_actions(10).expect("actions");
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].state, ActionExecutionState::NoEffectConfirmed);
+        assert_eq!(actions[0].outcome, Some(EffectOutcome::NoEffectConfirmed));
+        drop(result);
+        drop(runtime);
+
+        let reopened = open(reopen_config).expect("reopen Root");
+        assert_eq!(
+            reopened.canonical_workflows().expect("reopened workflows")[0].state,
+            WorkflowState::Cancelled
+        );
+        let invocation = reopened
+            .plugin_invocation(invocation_id)
+            .expect("reopened invocation")
+            .expect("cancelled invocation");
+        assert_eq!(invocation.state, mcg_domain::PluginInvocationState::Failed);
+        assert_eq!(invocation.error_code.as_deref(), Some("workflow_cancelled"));
     }
 
     #[tokio::test]

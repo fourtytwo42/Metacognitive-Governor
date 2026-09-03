@@ -564,7 +564,22 @@ impl SqliteEventStore {
             ));
         }
         let effects = cancellation_effect_status(&transaction, attempt.attempt_id)?;
-        let target_state = if successful {
+        let cancellation_settlement = attempt.state == WorkflowState::CancelRequested;
+        if cancellation_settlement && successful {
+            return Err(StorageError::Conflict(
+                "a plugin result cannot succeed after its workflow cancellation fence".into(),
+            ));
+        }
+        let target_state = if cancellation_settlement && effects.unresolved == 0 {
+            WorkflowState::Cancelled
+        } else if cancellation_settlement
+            && effects.reconciliation_required > 0
+            && effects.quarantined == 0
+        {
+            WorkflowState::Waiting(WaitReason::Reconciliation)
+        } else if cancellation_settlement {
+            WorkflowState::Quarantined
+        } else if successful {
             WorkflowState::Succeeded
         } else if effects.unresolved == 0 {
             WorkflowState::Failed
@@ -578,16 +593,23 @@ impl SqliteEventStore {
                 || attempt.state == WorkflowState::Waiting(WaitReason::Reconciliation));
         if exact_state_replay {
             // Exact terminal/wait replay is validated by the plugin record mutation below.
-        } else if attempt.state != WorkflowState::Running
-            || attempt.lease_owner != Some(lease_owner)
-            || attempt
-                .lease_expires_at
-                .is_none_or(|expires_at| expires_at <= settled_at)
-            || completed.completed_at != Some(settled_at)
-        {
-            return Err(StorageError::Conflict(
-                "plugin workflow is not held by the settling Root actor".into(),
-            ));
+        } else {
+            let valid_cancel_settlement = cancellation_settlement
+                && attempt.lease_owner.is_none()
+                && attempt.lease_expires_at.is_none()
+                && completed.completed_at == Some(settled_at);
+            let valid_active_settlement = attempt.state == WorkflowState::Running
+                && attempt.lease_owner == Some(lease_owner)
+                && attempt
+                    .lease_expires_at
+                    .is_some_and(|expires_at| expires_at > settled_at)
+                && completed.completed_at == Some(settled_at);
+            if !valid_cancel_settlement && !valid_active_settlement {
+                return Err(StorageError::Conflict(
+                    "plugin workflow is not held by the settling Root actor or cancellation fence"
+                        .into(),
+                ));
+            }
         }
         if successful {
             validate_successful_plugin_action(&transaction, &workflow.attachment, &attempt)?;
@@ -5255,6 +5277,90 @@ mod tests {
                 .expect("exact terminal replay"),
             (completed, settled)
         );
+    }
+
+    #[test]
+    fn cancelled_plugin_invocation_settles_only_as_non_successful() {
+        let mut store = SqliteEventStore::open_in_memory().expect("store");
+        let at = now();
+        let revision = plugin_revision(at);
+        let installation = store
+            .install_unsigned_local_plugin_revision(&revision)
+            .expect("install plugin");
+        store
+            .set_plugin_enabled(
+                &revision.manifest.id,
+                installation.revision,
+                true,
+                at + chrono::Duration::seconds(1),
+            )
+            .expect("enable plugin");
+        let invocation = PluginInvocationRecord {
+            schema_version: PLUGIN_CATALOG_SCHEMA_VERSION,
+            id: PluginInvocationId::new(),
+            plugin_id: revision.manifest.id.clone(),
+            plugin_revision_id: revision.id,
+            task_id: None,
+            input_sha256: "d".repeat(64),
+            state: PluginInvocationState::Running,
+            result_sha256: None,
+            error_code: None,
+            started_at: at + chrono::Duration::seconds(2),
+            completed_at: None,
+        };
+        store
+            .begin_plugin_invocation(&invocation)
+            .expect("begin invocation");
+        let owner = RuntimeActorId::new();
+        let authority = store
+            .claim_active_plugin_invocation_workflow(
+                invocation.id,
+                owner,
+                300,
+                at + chrono::Duration::seconds(3),
+            )
+            .expect("claim plugin workflow");
+        let cancelling = store
+            .transition_workflow_attempt(
+                authority.workflow.attempt.attempt_id,
+                authority.workflow.attempt.revision,
+                authority.workflow.attempt.lease_generation,
+                WorkflowState::CancelRequested,
+                CorrelationId::new(),
+                "cancel-plugin-before-result",
+                at + chrono::Duration::seconds(4),
+            )
+            .expect("fence plugin workflow");
+        assert_eq!(cancelling.state, WorkflowState::CancelRequested);
+
+        let mut stale_success = invocation.clone();
+        stale_success.state = PluginInvocationState::Succeeded;
+        stale_success.result_sha256 = Some("e".repeat(64));
+        stale_success.completed_at = Some(at + chrono::Duration::seconds(5));
+        assert!(
+            store
+                .complete_plugin_invocation_workflow(
+                    &stale_success,
+                    owner,
+                    at + chrono::Duration::seconds(5),
+                )
+                .is_err()
+        );
+
+        let mut cancelled = invocation;
+        cancelled.state = PluginInvocationState::Failed;
+        cancelled.error_code = Some("workflow_cancelled".into());
+        cancelled.completed_at = Some(at + chrono::Duration::seconds(5));
+        let (stored, settled) = store
+            .complete_plugin_invocation_workflow(
+                &cancelled,
+                owner,
+                at + chrono::Duration::seconds(5),
+            )
+            .expect("settle cancelled plugin workflow");
+        assert_eq!(stored, cancelled);
+        assert_eq!(settled.state, WorkflowState::Cancelled);
+        assert_eq!(settled.lease_generation, cancelling.lease_generation);
     }
 
     #[test]

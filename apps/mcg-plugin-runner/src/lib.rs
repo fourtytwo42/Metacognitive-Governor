@@ -2,6 +2,7 @@
 
 use std::{
     fmt::Write as _,
+    future::Future,
     io::Read as _,
     path::{Path, PathBuf},
     process::Stdio,
@@ -28,7 +29,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tokio::{
     io::{AsyncRead, AsyncReadExt as _, AsyncWriteExt as _},
-    process::Command,
+    process::{Child, Command},
     time::Instant,
 };
 use uuid::Uuid;
@@ -119,6 +120,8 @@ pub enum PluginRunnerClientError {
     InvalidResponse,
     #[error("plugin runner process failed")]
     Process,
+    #[error("plugin runner was cancelled and reaped")]
+    Cancelled,
 }
 
 #[derive(Debug, Clone)]
@@ -186,19 +189,24 @@ impl PluginRunnerClient {
         &self,
         request: &PluginRunnerRequest,
     ) -> Result<PluginRunnerResponse, PluginRunnerClientError> {
-        if plugin_runner_executable_source(&self.executable)
-            .ok()
-            .as_ref()
-            != Some(&self.runner_source)
-        {
-            return Err(PluginRunnerClientError::ExecutableChanged);
-        }
-        let expected_plugin_id = request.manifest.id.clone();
-        let request =
-            serde_json::to_vec(request).map_err(|_| PluginRunnerClientError::InvalidResponse)?;
-        if request.len() > RUNNER_REQUEST_MAX_BYTES {
-            return Err(PluginRunnerClientError::RequestTooLarge);
-        }
+        self.invoke_with_cancellation(request, std::future::pending())
+            .await
+    }
+
+    /// Executes exactly one request and explicitly terminates/reaps the child when cancellation
+    /// becomes authoritative.
+    ///
+    /// # Errors
+    /// Returns bounded launch, pipe, cancellation, timeout, exit, or response-contract failures.
+    pub async fn invoke_with_cancellation<C>(
+        &self,
+        request: &PluginRunnerRequest,
+        cancellation: C,
+    ) -> Result<PluginRunnerResponse, PluginRunnerClientError>
+    where
+        C: Future<Output = ()>,
+    {
+        let (expected_plugin_id, request) = self.encode_request(request)?;
         let mut command = Command::new(&self.executable);
         command
             .env_clear()
@@ -224,19 +232,28 @@ impl PluginRunnerClient {
         let stdout_task = tokio::spawn(read_bounded(stdout, RUNNER_RESPONSE_MAX_BYTES));
         let stderr_task = tokio::spawn(read_bounded(stderr, RUNNER_STDERR_MAX_BYTES));
         let deadline = Instant::now() + self.outer_timeout;
-        match tokio::time::timeout_at(deadline, async {
-            stdin.write_all(&request).await?;
-            stdin.shutdown().await
-        })
-        .await
-        {
+        tokio::pin!(cancellation);
+        let write_result = {
+            let write = tokio::time::timeout_at(deadline, async {
+                stdin.write_all(&request).await?;
+                stdin.shutdown().await
+            });
+            tokio::pin!(write);
+            tokio::select! {
+                result = &mut write => Some(result),
+                () = &mut cancellation => None,
+            }
+        };
+        let Some(write_result) = write_result else {
+            drop(stdin);
+            stop_runner_child(&mut child, &stdout_task, &stderr_task).await;
+            return Err(PluginRunnerClientError::Cancelled);
+        };
+        match write_result {
             Ok(Ok(())) => {}
             write_result => {
                 drop(stdin);
-                let _ = child.kill().await;
-                let _ = child.wait().await;
-                let _ = stdout_task.await;
-                let _ = stderr_task.await;
+                stop_runner_child(&mut child, &stdout_task, &stderr_task).await;
                 return Err(if write_result.is_err() {
                     PluginRunnerClientError::Timeout
                 } else {
@@ -245,20 +262,26 @@ impl PluginRunnerClient {
             }
         }
         drop(stdin);
-        let status = match tokio::time::timeout_at(deadline, child.wait()).await {
+        let wait_result = {
+            let wait = tokio::time::timeout_at(deadline, child.wait());
+            tokio::pin!(wait);
+            tokio::select! {
+                result = &mut wait => Some(result),
+                () = &mut cancellation => None,
+            }
+        };
+        let Some(wait_result) = wait_result else {
+            stop_runner_child(&mut child, &stdout_task, &stderr_task).await;
+            return Err(PluginRunnerClientError::Cancelled);
+        };
+        let status = match wait_result {
             Ok(Ok(status)) => status,
             Ok(Err(_)) => {
-                let _ = child.kill().await;
-                let _ = child.wait().await;
-                let _ = stdout_task.await;
-                let _ = stderr_task.await;
+                stop_runner_child(&mut child, &stdout_task, &stderr_task).await;
                 return Err(PluginRunnerClientError::Process);
             }
             Err(_) => {
-                let _ = child.kill().await;
-                let _ = child.wait().await;
-                let _ = stdout_task.await;
-                let _ = stderr_task.await;
+                stop_runner_child(&mut child, &stdout_task, &stderr_task).await;
                 return Err(PluginRunnerClientError::Timeout);
             }
         };
@@ -278,6 +301,37 @@ impl PluginRunnerClient {
         }
         validate_response(status.success(), &expected_plugin_id, &stdout)
     }
+
+    fn encode_request(
+        &self,
+        request: &PluginRunnerRequest,
+    ) -> Result<(String, Vec<u8>), PluginRunnerClientError> {
+        if plugin_runner_executable_source(&self.executable)
+            .ok()
+            .as_ref()
+            != Some(&self.runner_source)
+        {
+            return Err(PluginRunnerClientError::ExecutableChanged);
+        }
+        let expected_plugin_id = request.manifest.id.clone();
+        let request =
+            serde_json::to_vec(request).map_err(|_| PluginRunnerClientError::InvalidResponse)?;
+        if request.len() > RUNNER_REQUEST_MAX_BYTES {
+            return Err(PluginRunnerClientError::RequestTooLarge);
+        }
+        Ok((expected_plugin_id, request))
+    }
+}
+
+async fn stop_runner_child(
+    child: &mut Child,
+    stdout_task: &tokio::task::JoinHandle<std::io::Result<(Vec<u8>, bool)>>,
+    stderr_task: &tokio::task::JoinHandle<std::io::Result<(Vec<u8>, bool)>>,
+) {
+    let _ = child.kill().await;
+    let _ = child.wait().await;
+    stdout_task.abort();
+    stderr_task.abort();
 }
 
 impl PluginRunnerResponse {
