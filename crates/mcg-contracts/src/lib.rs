@@ -821,6 +821,55 @@ impl WorkflowSourceAttachment {
     }
 }
 
+/// Immutable one-to-many lookup evidence from a compatibility source to a canonical workflow.
+///
+/// A task, run, or conversation may legitimately fan out into multiple work-item workflows. This
+/// link therefore supplements the unique primary attachment rather than pretending those broader
+/// sources own exactly one workflow.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowSourceLink {
+    pub schema_version: u32,
+    pub source: SourceRef,
+    pub source_snapshot: VersionedPayload,
+    pub primary_source: SourceRef,
+    pub workflow_id: WorkflowId,
+    pub attempt_id: AttemptId,
+    pub task_contract: VersionedRef<TaskContractId>,
+    pub linked_at: DateTime<Utc>,
+}
+
+impl WorkflowSourceLink {
+    pub const SCHEMA_VERSION: u32 = 1;
+    pub const TYPE_ID: &'static str = "mcg.workflow_source_link.v1";
+
+    /// Validates the exact source snapshot and primary-source identities.
+    ///
+    /// # Errors
+    /// Returns an invalid-contract error for malformed, substituted, or unsupported evidence.
+    pub fn validate(&self) -> Result<(), ContractError> {
+        if self.schema_version != Self::SCHEMA_VERSION || self.task_contract.version == 0 {
+            return Err(ContractError::InvalidContract(
+                "workflow source link version is unsupported",
+            ));
+        }
+        self.source.validate()?;
+        self.source_snapshot.validate()?;
+        self.primary_source.validate()?;
+        self.task_contract.content_hash.validate()?;
+        if self.source.source_type != self.source_snapshot.type_id
+            || self.source.content_hash
+                != self
+                    .source_snapshot
+                    .content_hash(WORKFLOW_SOURCE_SNAPSHOT_HASH_DOMAIN)?
+        {
+            return Err(ContractError::InvalidContract(
+                "workflow source link does not bind its exact snapshot",
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Immutable authority for one externally signalled workflow wait.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkflowWakeBinding {
@@ -3112,6 +3161,44 @@ mod tests {
         )
         .unwrap();
         assert!(attachment.validate().is_err());
+    }
+
+    #[test]
+    fn workflow_source_link_binds_broader_source_without_replacing_primary_authority() {
+        let source_type = StableTypeId::parse("mcg.compatibility_task_source.v1").unwrap();
+        let snapshot = VersionedPayload::canonical_v1(
+            source_type.clone(),
+            &json!({"task_id": "task-1", "task_sha256": "a".repeat(64)}),
+        )
+        .unwrap();
+        let mut link = WorkflowSourceLink {
+            schema_version: WorkflowSourceLink::SCHEMA_VERSION,
+            source: SourceRef {
+                source_type,
+                locator: "task-1".into(),
+                content_hash: snapshot
+                    .content_hash(WORKFLOW_SOURCE_SNAPSHOT_HASH_DOMAIN)
+                    .unwrap(),
+            },
+            source_snapshot: snapshot,
+            primary_source: SourceRef {
+                source_type: StableTypeId::parse("mcg.agent_turn_source.v1").unwrap(),
+                locator: "lease-1".into(),
+                content_hash: fixture_hash("primary-agent-lease"),
+            },
+            workflow_id: WorkflowId::new(),
+            attempt_id: AttemptId::new(),
+            task_contract: VersionedRef {
+                id: TaskContractId::new(),
+                version: 1,
+                content_hash: fixture_hash("linked-task-contract"),
+            },
+            linked_at: Utc::now(),
+        };
+        link.validate().unwrap();
+
+        link.source.content_hash = fixture_hash("substituted-task");
+        assert!(link.validate().is_err());
     }
 
     #[test]

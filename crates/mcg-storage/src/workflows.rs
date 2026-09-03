@@ -10,13 +10,13 @@ use mcg_contracts::{
     PolicyBinding, RetryPolicy, RuntimeActorId, SourceRef, StableTypeId, TaskContract,
     TaskContractId, TaskContractStatus, VersionedPayload, VersionedRef,
     WORKFLOW_SOURCE_SNAPSHOT_HASH_DOMAIN, WaitReason, WorkflowAttempt, WorkflowEvent, WorkflowId,
-    WorkflowSourceAttachment, WorkflowState, WorkflowWaitRequest, WorkflowWakeBinding,
-    WorkflowWakeRequest, decode_canonical_cbor_v1,
+    WorkflowSourceAttachment, WorkflowSourceLink, WorkflowState, WorkflowWaitRequest,
+    WorkflowWakeBinding, WorkflowWakeRequest, decode_canonical_cbor_v1,
 };
 use mcg_domain::{
-    AgentLeaseId, ApprovalId, PluginInstallation, PluginInvocationId, PluginInvocationRecord,
-    PluginInvocationState, PluginRevision, RunId, TaskEnvelope, TaskId, TaskState, ToolRequestId,
-    WorkItemId,
+    AgentLeaseId, ApprovalId, CodexThreadBinding, PluginInstallation, PluginInvocationId,
+    PluginInvocationRecord, PluginInvocationState, PluginRevision, RunId, TaskEnvelope, TaskId,
+    TaskState, ToolRequestId, WorkItemId,
 };
 use mcg_projects::ProjectModel;
 use mcg_tools::{ApprovalRequest, ApprovalState};
@@ -70,6 +70,7 @@ pub struct AgentTurnWorkflowAttachment {
     pub task_contract: TaskContract,
     pub attempt: WorkflowAttempt,
     pub attachment: WorkflowSourceAttachment,
+    pub source_links: Vec<WorkflowSourceLink>,
     pub creation_event: WorkflowEvent,
 }
 
@@ -86,6 +87,7 @@ pub struct PluginInvocationWorkflowAttachment {
     pub task_contract: TaskContract,
     pub attempt: WorkflowAttempt,
     pub attachment: WorkflowSourceAttachment,
+    pub source_links: Vec<WorkflowSourceLink>,
     pub creation_event: WorkflowEvent,
 }
 
@@ -359,6 +361,13 @@ impl SqliteEventStore {
         let mut workflow =
             attach_active_agent_lease_workflow_in_transaction(&transaction, lease_id, now)?;
         let source = load_active_agent_turn_source(&transaction, lease_id, now)?;
+        if workflow.source_links.is_empty() {
+            workflow.source_links =
+                derive_agent_turn_source_links(&source, &workflow.attachment, now)?;
+            for link in &workflow.source_links {
+                insert_or_replay_workflow_source_link(&transaction, link)?;
+            }
+        }
         let maximum_expiry = now
             .checked_add_signed(chrono::Duration::seconds(maximum_lease_seconds))
             .ok_or_else(|| {
@@ -846,6 +855,7 @@ fn attach_active_agent_lease_workflow_in_transaction(
     attempt.task_contract.content_hash = task_contract_content_hash(&task_contract)?;
     let mut attachment = attachment;
     attachment.task_contract = attempt.task_contract.clone();
+    let source_links = derive_agent_turn_source_links(&source, &attachment, now)?;
     let creation_event = create_workflow_in_transaction(
         transaction,
         &task_contract,
@@ -854,10 +864,14 @@ fn attach_active_agent_lease_workflow_in_transaction(
         now,
     )?;
     insert_or_replay_workflow_source_attachment(transaction, &attachment)?;
+    for link in &source_links {
+        insert_or_replay_workflow_source_link(transaction, link)?;
+    }
     Ok(AgentTurnWorkflowAttachment {
         task_contract,
         attempt,
         attachment,
+        source_links,
         creation_event,
     })
 }
@@ -879,6 +893,7 @@ fn attach_active_plugin_invocation_workflow_in_transaction(
             task_contract: workflow.task_contract,
             attempt: workflow.attempt,
             attachment: workflow.attachment,
+            source_links: workflow.source_links,
             creation_event: workflow.creation_event,
         });
     }
@@ -901,6 +916,7 @@ fn attach_active_plugin_invocation_workflow_in_transaction(
         task_contract,
         attempt,
         attachment,
+        source_links: Vec::new(),
         creation_event,
     })
 }
@@ -1911,6 +1927,21 @@ impl SqliteEventStore {
             .optional()?;
         row.map(|row| validate_loaded_workflow_source_attachment(&self.connection, row))
             .transpose()
+    }
+
+    /// Loads every canonical workflow linked to one broader compatibility source.
+    ///
+    /// One task, run, or conversation may return multiple child workflows. Results are bounded by
+    /// the durable number of links and ordered deterministically by attachment time and workflow.
+    ///
+    /// # Errors
+    /// Returns a storage error when stored evidence or its primary attachment is inconsistent.
+    pub fn workflow_source_links(
+        &self,
+        source_type: &StableTypeId,
+        source_locator: &str,
+    ) -> Result<Vec<WorkflowSourceLink>, StorageError> {
+        load_workflow_source_links_by_source(&self.connection, source_type.as_str(), source_locator)
     }
 
     /// Loads one authoritative task-contract version.
@@ -3023,6 +3054,15 @@ struct ActiveAgentTurnSource {
     instance_json: String,
     lease: AgentLease,
     lease_json: String,
+    conversation: Option<CompatibilityConversationSource>,
+}
+
+struct CompatibilityConversationSource {
+    conversation_id: String,
+    conversation_json: String,
+    turn_id: Option<String>,
+    turn_json: Option<String>,
+    binding_json: Option<String>,
 }
 
 type ActiveAgentTurnSourceRow = (String, String, String, String, String);
@@ -3056,7 +3096,86 @@ fn load_active_agent_turn_source(
         )
         .optional()?
         .ok_or(StorageError::AgentLeaseNotFound(lease_id))?;
-    decode_active_agent_turn_source(row, lease_id, now)
+    let mut source = decode_active_agent_turn_source(row, lease_id, now)?;
+    source.conversation = load_compatibility_conversation_source(
+        transaction,
+        source.task.thread_id.map(|id| id.to_string()).as_deref(),
+        source.run.id,
+    )?;
+    Ok(source)
+}
+
+fn load_compatibility_conversation_source(
+    connection: &Connection,
+    legacy_thread_id: Option<&str>,
+    run_id: RunId,
+) -> Result<Option<CompatibilityConversationSource>, StorageError> {
+    let mut rows = {
+        let mut statement = connection.prepare(
+            "SELECT DISTINCT bindings.conversation_id, conversations.conversation_json,
+                    bindings.conversation_turn_id, conversation_turns.turn_json,
+                    bindings.binding_json
+             FROM codex_thread_bindings AS bindings
+             INNER JOIN conversations
+                ON conversations.conversation_id = bindings.conversation_id
+             LEFT JOIN conversation_turns
+                ON conversation_turns.turn_id = bindings.conversation_turn_id
+             WHERE bindings.run_id = ?1 AND bindings.conversation_id IS NOT NULL
+             ORDER BY bindings.conversation_id, bindings.conversation_turn_id
+             LIMIT 2",
+        )?;
+        statement
+            .query_map([run_id.to_string()], |row| {
+                Ok(CompatibilityConversationSource {
+                    conversation_id: row.get(0)?,
+                    conversation_json: row.get(1)?,
+                    turn_id: row.get(2)?,
+                    turn_json: row.get(3)?,
+                    binding_json: row.get(4)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    if rows.len() > 1 {
+        return Err(StorageError::Conflict(
+            "agent run has ambiguous conversation source bindings".into(),
+        ));
+    }
+    if let Some(source) = rows.pop() {
+        let binding: CodexThreadBinding =
+            serde_json::from_str(source.binding_json.as_deref().ok_or_else(|| {
+                StorageError::InvalidData("conversation binding is missing".into())
+            })?)?;
+        if binding.conversation_id.map(|id| id.to_string()) != Some(source.conversation_id.clone())
+            || binding.conversation_turn_id.map(|id| id.to_string()) != source.turn_id
+            || binding.run_id != Some(run_id)
+        {
+            return Err(StorageError::InvalidData(
+                "conversation binding columns diverge from immutable evidence".into(),
+            ));
+        }
+        return Ok(Some(source));
+    }
+    let Some(legacy_thread_id) = legacy_thread_id else {
+        return Ok(None);
+    };
+    connection
+        .query_row(
+            "SELECT conversation_id, conversation_json
+             FROM conversations WHERE legacy_thread_id = ?1",
+            [legacy_thread_id],
+            |row| {
+                Ok(CompatibilityConversationSource {
+                    conversation_id: row.get(0)?,
+                    conversation_json: row.get(1)?,
+                    turn_id: None,
+                    turn_json: None,
+                    binding_json: None,
+                })
+            },
+        )
+        .optional()
+        .map_err(StorageError::from)
 }
 
 fn decode_active_agent_turn_source(
@@ -3107,6 +3226,7 @@ fn decode_active_agent_turn_source(
         instance_json,
         lease,
         lease_json,
+        conversation: None,
     })
 }
 
@@ -3315,6 +3435,101 @@ fn derive_agent_turn_workflow(
     Ok((task_contract, attempt, attachment))
 }
 
+fn derive_agent_turn_source_links(
+    source: &ActiveAgentTurnSource,
+    attachment: &WorkflowSourceAttachment,
+    now: DateTime<Utc>,
+) -> Result<Vec<WorkflowSourceLink>, StorageError> {
+    let mut snapshots = vec![
+        VersionedPayload::canonical_v1(
+            stable_type_id("mcg.compatibility_task_source.v1")?,
+            &serde_json::json!({
+                "task_id": source.task.id,
+                "task_schema_version": source.task.schema_version,
+                "task_sha256": sha256_text(&source.task_json),
+            }),
+        )
+        .map_err(|error| StorageError::InvalidData(error.to_string()))?,
+        VersionedPayload::canonical_v1(
+            stable_type_id("mcg.compatibility_agent_run_source.v1")?,
+            &serde_json::json!({
+                "run_id": source.run.id,
+                "run_schema_version": source.run.schema_version,
+                "run_sha256": sha256_text(&source.run_json),
+                "task_id": source.task.id,
+                "task_sha256": sha256_text(&source.task_json),
+                "plan_sha256": sha256_text(&source.plan_json),
+            }),
+        )
+        .map_err(|error| StorageError::InvalidData(error.to_string()))?,
+    ];
+    if let Some(conversation) = &source.conversation {
+        snapshots.push(
+            VersionedPayload::canonical_v1(
+                stable_type_id("mcg.compatibility_conversation_source.v1")?,
+                &serde_json::json!({
+                    "conversation_id": conversation.conversation_id,
+                    "conversation_sha256": sha256_text(&conversation.conversation_json),
+                    "turn_id": conversation.turn_id,
+                    "turn_sha256": conversation.turn_json.as_deref().map(sha256_text),
+                    "binding_sha256": conversation.binding_json.as_deref().map(sha256_text),
+                    "task_id": source.task.id,
+                    "run_id": source.run.id,
+                }),
+            )
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?,
+        );
+    }
+    let mut links: Vec<WorkflowSourceLink> = snapshots
+        .into_iter()
+        .map(|snapshot| {
+            let locator = match snapshot.type_id.as_str() {
+                "mcg.compatibility_task_source.v1" => source.task.id.to_string(),
+                "mcg.compatibility_agent_run_source.v1" => source.run.id.to_string(),
+                "mcg.compatibility_conversation_source.v1" => source
+                    .conversation
+                    .as_ref()
+                    .map(|conversation| conversation.conversation_id.clone())
+                    .ok_or_else(|| {
+                        StorageError::InvalidData(
+                            "conversation source snapshot has no conversation".into(),
+                        )
+                    })?,
+                _ => {
+                    return Err(StorageError::InvalidData(
+                        "unsupported compatibility workflow source type".into(),
+                    ));
+                }
+            };
+            let source_ref = SourceRef {
+                source_type: snapshot.type_id.clone(),
+                locator,
+                content_hash: snapshot
+                    .content_hash(WORKFLOW_SOURCE_SNAPSHOT_HASH_DOMAIN)
+                    .map_err(|error| StorageError::InvalidData(error.to_string()))?,
+            };
+            Ok(WorkflowSourceLink {
+                schema_version: WorkflowSourceLink::SCHEMA_VERSION,
+                source: source_ref,
+                source_snapshot: snapshot,
+                primary_source: attachment.source.clone(),
+                workflow_id: attachment.workflow_id,
+                attempt_id: attachment.attempt_id,
+                task_contract: attachment.task_contract.clone(),
+                linked_at: now,
+            })
+        })
+        .collect::<Result<_, _>>()?;
+    links.sort_by(|left, right| {
+        left.source
+            .source_type
+            .as_str()
+            .cmp(right.source.source_type.as_str())
+            .then_with(|| left.source.locator.cmp(&right.source.locator))
+    });
+    Ok(links)
+}
+
 fn agent_turn_policy(
     type_id: &str,
     hash_domain: &str,
@@ -3344,6 +3559,212 @@ fn f64_string(value: f64) -> Result<String, StorageError> {
 
 fn optional_f64_string(value: Option<f64>) -> Result<Option<String>, StorageError> {
     value.map(f64_string).transpose()
+}
+
+fn insert_or_replay_workflow_source_link(
+    transaction: &Transaction<'_>,
+    link: &WorkflowSourceLink,
+) -> Result<WorkflowSourceLink, StorageError> {
+    validate_workflow_source_link(transaction, link)?;
+    let existing = transaction
+        .query_row(
+            "SELECT source_type, source_locator, source_hash_json, workflow_id, attempt_id,
+                    task_contract_id, task_contract_version, task_contract_hash_json,
+                    primary_source_type, primary_source_locator, primary_source_hash_json,
+                    link_json, linked_at
+             FROM workflow_source_links
+             WHERE source_type = ?1 AND source_locator = ?2 AND workflow_id = ?3",
+            params![
+                link.source.source_type.as_str(),
+                link.source.locator.as_str(),
+                link.workflow_id.to_string()
+            ],
+            workflow_source_link_row,
+        )
+        .optional()?;
+    if let Some(existing) = existing {
+        let existing = validate_loaded_workflow_source_link(transaction, existing)?;
+        if existing != *link {
+            return Err(StorageError::Conflict(
+                "workflow source link was replayed with different evidence".into(),
+            ));
+        }
+        return Ok(existing);
+    }
+    transaction.execute(
+        "INSERT INTO workflow_source_links(
+            source_type, source_locator, source_hash_json, workflow_id, attempt_id,
+            task_contract_id, task_contract_version, task_contract_hash_json,
+            primary_source_type, primary_source_locator, primary_source_hash_json,
+            link_json, linked_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+        params![
+            link.source.source_type.as_str(),
+            link.source.locator.as_str(),
+            serde_json::to_string(&link.source.content_hash)?,
+            link.workflow_id.to_string(),
+            link.attempt_id.to_string(),
+            link.task_contract.id.to_string(),
+            sql_u64(link.task_contract.version, "task contract version")?,
+            serde_json::to_string(&link.task_contract.content_hash)?,
+            link.primary_source.source_type.as_str(),
+            link.primary_source.locator.as_str(),
+            serde_json::to_string(&link.primary_source.content_hash)?,
+            serde_json::to_string(link)?,
+            link.linked_at.to_rfc3339(),
+        ],
+    )?;
+    Ok(link.clone())
+}
+
+type WorkflowSourceLinkRow = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    i64,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+);
+
+fn workflow_source_link_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkflowSourceLinkRow> {
+    Ok((
+        row.get(0)?,
+        row.get(1)?,
+        row.get(2)?,
+        row.get(3)?,
+        row.get(4)?,
+        row.get(5)?,
+        row.get(6)?,
+        row.get(7)?,
+        row.get(8)?,
+        row.get(9)?,
+        row.get(10)?,
+        row.get(11)?,
+        row.get(12)?,
+    ))
+}
+
+fn load_workflow_source_links_by_source(
+    connection: &Connection,
+    source_type: &str,
+    source_locator: &str,
+) -> Result<Vec<WorkflowSourceLink>, StorageError> {
+    let mut statement = connection.prepare(
+        "SELECT source_type, source_locator, source_hash_json, workflow_id, attempt_id,
+                task_contract_id, task_contract_version, task_contract_hash_json,
+                primary_source_type, primary_source_locator, primary_source_hash_json,
+                link_json, linked_at
+         FROM workflow_source_links
+         WHERE source_type = ?1 AND source_locator = ?2
+         ORDER BY linked_at, workflow_id",
+    )?;
+    statement
+        .query_map(
+            params![source_type, source_locator],
+            workflow_source_link_row,
+        )?
+        .map(|row| validate_loaded_workflow_source_link(connection, row?))
+        .collect()
+}
+
+fn load_workflow_source_links_for_workflow(
+    connection: &Connection,
+    workflow_id: WorkflowId,
+) -> Result<Vec<WorkflowSourceLink>, StorageError> {
+    let mut statement = connection.prepare(
+        "SELECT source_type, source_locator, source_hash_json, workflow_id, attempt_id,
+                task_contract_id, task_contract_version, task_contract_hash_json,
+                primary_source_type, primary_source_locator, primary_source_hash_json,
+                link_json, linked_at
+         FROM workflow_source_links
+         WHERE workflow_id = ?1 ORDER BY source_type, source_locator",
+    )?;
+    statement
+        .query_map([workflow_id.to_string()], workflow_source_link_row)?
+        .map(|row| validate_loaded_workflow_source_link(connection, row?))
+        .collect()
+}
+
+fn validate_loaded_workflow_source_link(
+    connection: &Connection,
+    row: WorkflowSourceLinkRow,
+) -> Result<WorkflowSourceLink, StorageError> {
+    let (
+        source_type,
+        source_locator,
+        source_hash_json,
+        workflow_id,
+        attempt_id,
+        task_contract_id,
+        task_contract_version,
+        task_contract_hash_json,
+        primary_source_type,
+        primary_source_locator,
+        primary_source_hash_json,
+        link_json,
+        linked_at,
+    ) = row;
+    let link: WorkflowSourceLink = serde_json::from_str(&link_json)?;
+    link.validate()
+        .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+    let source_hash: ContentHash = serde_json::from_str(&source_hash_json)?;
+    let task_contract_hash: ContentHash = serde_json::from_str(&task_contract_hash_json)?;
+    let primary_source_hash: ContentHash = serde_json::from_str(&primary_source_hash_json)?;
+    let task_contract_version = u64::try_from(task_contract_version).map_err(|_| {
+        StorageError::InvalidData("negative workflow source-link contract version".into())
+    })?;
+    if source_type != link.source.source_type.as_str()
+        || source_locator != link.source.locator
+        || source_hash != link.source.content_hash
+        || workflow_id != link.workflow_id.to_string()
+        || attempt_id != link.attempt_id.to_string()
+        || task_contract_id != link.task_contract.id.to_string()
+        || task_contract_version != link.task_contract.version
+        || task_contract_hash != link.task_contract.content_hash
+        || primary_source_type != link.primary_source.source_type.as_str()
+        || primary_source_locator != link.primary_source.locator
+        || primary_source_hash != link.primary_source.content_hash
+        || linked_at != link.linked_at.to_rfc3339()
+    {
+        return Err(StorageError::InvalidData(
+            "workflow source-link columns diverge from immutable evidence".into(),
+        ));
+    }
+    validate_workflow_source_link(connection, &link)?;
+    Ok(link)
+}
+
+fn validate_workflow_source_link(
+    connection: &Connection,
+    link: &WorkflowSourceLink,
+) -> Result<(), StorageError> {
+    link.validate()
+        .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+    let primary = load_workflow_source_attachment_by_source(
+        connection,
+        link.primary_source.source_type.as_str(),
+        &link.primary_source.locator,
+    )?
+    .ok_or_else(|| {
+        StorageError::Conflict("workflow source link has no primary attachment".into())
+    })?;
+    if primary.source != link.primary_source
+        || primary.workflow_id != link.workflow_id
+        || primary.attempt_id != link.attempt_id
+        || primary.task_contract != link.task_contract
+    {
+        return Err(StorageError::Conflict(
+            "workflow source link does not bind its exact primary workflow".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn insert_or_replay_workflow_source_attachment(
@@ -3433,6 +3854,10 @@ fn load_agent_turn_workflow_attachment(
         task_contract,
         attempt,
         attachment,
+        source_links: load_workflow_source_links_for_workflow(
+            connection,
+            created_attempt.workflow_id,
+        )?,
         creation_event,
     })
 }
@@ -4055,7 +4480,7 @@ mod tests {
         RetryPolicy, RuntimeIdentity, RuntimeInstanceId, SourceRef, VersionedRef,
         WORKFLOW_SOURCE_SNAPSHOT_HASH_DOMAIN, WaitReason,
     };
-    use mcg_domain::{AgentInstanceId, RunId};
+    use mcg_domain::{AgentInstanceId, Conversation, RunId};
     use mcg_domain::{
         PLUGIN_CATALOG_SCHEMA_VERSION, PluginCapabilityGrant, PluginCapabilityScope,
         PluginInstallSource, PluginInvocationId, PluginInvocationRecord, PluginInvocationState,
@@ -4411,6 +4836,82 @@ mod tests {
             store
                 .connection
                 .execute("DELETE FROM workflow_source_attachments", [])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn broader_source_links_preserve_one_to_many_workflow_fanout() {
+        let mut store = SqliteEventStore::open_in_memory().unwrap();
+        let (first_contract, first_attempt) = fixture();
+        let first_attachment = source_attachment(&first_attempt, "lease:fanout-1");
+        store
+            .create_attached_workflow(
+                &first_contract,
+                &first_attempt,
+                &first_attachment,
+                CorrelationId::new(),
+                now(),
+            )
+            .unwrap();
+        let (second_contract, second_attempt) = fixture();
+        let second_attachment = source_attachment(&second_attempt, "lease:fanout-2");
+        store
+            .create_attached_workflow(
+                &second_contract,
+                &second_attempt,
+                &second_attachment,
+                CorrelationId::new(),
+                now(),
+            )
+            .unwrap();
+
+        let source_type = stable_type_id("mcg.compatibility_task_source.v1").unwrap();
+        let snapshot = VersionedPayload::canonical_v1(
+            source_type.clone(),
+            &serde_json::json!({"task_id": "task:fanout", "task_sha256": "a".repeat(64)}),
+        )
+        .unwrap();
+        let source = SourceRef {
+            source_type: source_type.clone(),
+            locator: "task:fanout".into(),
+            content_hash: snapshot
+                .content_hash(WORKFLOW_SOURCE_SNAPSHOT_HASH_DOMAIN)
+                .unwrap(),
+        };
+        let first_link = WorkflowSourceLink {
+            schema_version: WorkflowSourceLink::SCHEMA_VERSION,
+            source: source.clone(),
+            source_snapshot: snapshot.clone(),
+            primary_source: first_attachment.source.clone(),
+            workflow_id: first_attempt.workflow_id,
+            attempt_id: first_attempt.attempt_id,
+            task_contract: first_attempt.task_contract.clone(),
+            linked_at: now(),
+        };
+        let second_link = WorkflowSourceLink {
+            schema_version: WorkflowSourceLink::SCHEMA_VERSION,
+            source,
+            source_snapshot: snapshot,
+            primary_source: second_attachment.source.clone(),
+            workflow_id: second_attempt.workflow_id,
+            attempt_id: second_attempt.attempt_id,
+            task_contract: second_attempt.task_contract.clone(),
+            linked_at: now() + chrono::Duration::seconds(1),
+        };
+        let transaction = store.connection.transaction().unwrap();
+        insert_or_replay_workflow_source_link(&transaction, &first_link).unwrap();
+        insert_or_replay_workflow_source_link(&transaction, &second_link).unwrap();
+        transaction.commit().unwrap();
+
+        let links = store
+            .workflow_source_links(&source_type, "task:fanout")
+            .unwrap();
+        assert_eq!(links, vec![first_link, second_link]);
+        assert!(
+            store
+                .connection
+                .execute("DELETE FROM workflow_source_links", [])
                 .is_err()
         );
     }
@@ -4793,6 +5294,31 @@ mod tests {
             )
             .unwrap()
             .0;
+        let conversation = Conversation::new("compatibility conversation", None);
+        store.create_conversation(&conversation, None).unwrap();
+        store
+            .save_codex_thread_binding(&CodexThreadBinding {
+                conversation_id: Some(conversation.id),
+                conversation_turn_id: None,
+                run_id: Some(run.id),
+                agent_instance_id: None,
+                agent_session_id: None,
+                delegation_id: None,
+                role_id: None,
+                organization_revision_id: None,
+                workspace_id: None,
+                codex_thread_id: "codex-thread:workflow-source-link".into(),
+                codex_turn_id: None,
+                codex_item_id: None,
+                codex_session_id: None,
+                binary_version: "test".into(),
+                protocol_version: "test".into(),
+                ownership_source: Some("test".into()),
+                manageable: true,
+                last_reconciled_item_id: None,
+                recovery_state: Default::default(),
+            })
+            .unwrap();
         let instance = AgentInstance {
             schema_version: AGENT_RUN_SCHEMA_VERSION,
             id: AgentInstanceId::new(),
@@ -4859,6 +5385,56 @@ mod tests {
             "mcg.agent_turn_source.v1"
         );
         assert_eq!(receipt.attachment.source.locator, lease.id.to_string());
+        assert_eq!(receipt.source_links.len(), 3);
+        let task_source_type = stable_type_id("mcg.compatibility_task_source.v1").unwrap();
+        let run_source_type = stable_type_id("mcg.compatibility_agent_run_source.v1").unwrap();
+        let conversation_source_type =
+            stable_type_id("mcg.compatibility_conversation_source.v1").unwrap();
+        assert_eq!(
+            store
+                .workflow_source_links(&task_source_type, &task.id.to_string())
+                .unwrap(),
+            vec![
+                receipt
+                    .source_links
+                    .iter()
+                    .find(|link| link.source.source_type == task_source_type)
+                    .unwrap()
+                    .clone()
+            ]
+        );
+        assert_eq!(
+            store
+                .workflow_source_links(&conversation_source_type, &conversation.id.to_string(),)
+                .unwrap(),
+            vec![
+                receipt
+                    .source_links
+                    .iter()
+                    .find(|link| link.source.source_type == conversation_source_type)
+                    .unwrap()
+                    .clone()
+            ]
+        );
+        assert_eq!(
+            store
+                .workflow_source_links(&run_source_type, &run.id.to_string())
+                .unwrap(),
+            vec![
+                receipt
+                    .source_links
+                    .iter()
+                    .find(|link| link.source.source_type == run_source_type)
+                    .unwrap()
+                    .clone()
+            ]
+        );
+        assert!(
+            receipt
+                .source_links
+                .iter()
+                .all(|link| link.primary_source == receipt.attachment.source)
+        );
         assert_eq!(receipt.creation_event.sequence, 1);
         assert_eq!(
             store
@@ -4869,6 +5445,17 @@ mod tests {
                 .unwrap(),
             receipt
         );
+        store
+            .connection
+            .execute_batch(
+                "DROP TRIGGER workflow_source_links_no_delete;
+                 DELETE FROM workflow_source_links;
+                 CREATE TRIGGER workflow_source_links_no_delete
+                 BEFORE DELETE ON workflow_source_links BEGIN
+                     SELECT RAISE(FAIL, 'workflow source links are durable evidence');
+                 END;",
+            )
+            .unwrap();
 
         let owner = RuntimeActorId::new();
         let authority = store
@@ -4878,6 +5465,10 @@ mod tests {
         assert_eq!(authority.workflow.attempt.state, WorkflowState::Running);
         assert_eq!(authority.workflow.attempt.lease_owner, Some(owner));
         assert_eq!(authority.workflow.attempt.lease_generation, 1);
+        assert_eq!(
+            authority.workflow.source_links, receipt.source_links,
+            "the next authoritative claim backfills pre-schema-62 source links"
+        );
         assert_eq!(
             store
                 .claim_active_agent_lease_workflow(

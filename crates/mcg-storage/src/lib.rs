@@ -104,7 +104,7 @@ pub use workflows::{
 };
 
 type EventRow = (i64, String, i64, String, Option<String>, String, String);
-pub const STORAGE_SCHEMA_VERSION: i64 = 61;
+pub const STORAGE_SCHEMA_VERSION: i64 = 62;
 
 const MIGRATION_1: &str = r"
 CREATE TABLE IF NOT EXISTS events (
@@ -2364,6 +2364,42 @@ BEFORE DELETE ON tool_secret_handle_bindings BEGIN
 END;
 ";
 
+const MIGRATION_62: &str = r"
+CREATE TABLE IF NOT EXISTS workflow_source_links (
+    source_type TEXT NOT NULL,
+    source_locator TEXT NOT NULL,
+    source_hash_json TEXT NOT NULL,
+    workflow_id TEXT NOT NULL,
+    attempt_id TEXT NOT NULL,
+    task_contract_id TEXT NOT NULL,
+    task_contract_version INTEGER NOT NULL CHECK(task_contract_version > 0),
+    task_contract_hash_json TEXT NOT NULL,
+    primary_source_type TEXT NOT NULL,
+    primary_source_locator TEXT NOT NULL,
+    primary_source_hash_json TEXT NOT NULL,
+    link_json TEXT NOT NULL,
+    linked_at TEXT NOT NULL,
+    PRIMARY KEY(source_type, source_locator, workflow_id),
+    FOREIGN KEY(attempt_id) REFERENCES workflow_attempts(attempt_id),
+    FOREIGN KEY(task_contract_id, task_contract_version)
+        REFERENCES task_contract_versions(task_contract_id, version),
+    FOREIGN KEY(primary_source_type, primary_source_locator)
+        REFERENCES workflow_source_attachments(source_type, source_locator)
+);
+CREATE INDEX IF NOT EXISTS workflow_source_links_source
+    ON workflow_source_links(source_type, source_locator, linked_at, workflow_id);
+CREATE INDEX IF NOT EXISTS workflow_source_links_workflow
+    ON workflow_source_links(workflow_id, source_type, source_locator);
+CREATE TRIGGER IF NOT EXISTS workflow_source_links_no_update
+BEFORE UPDATE ON workflow_source_links BEGIN
+    SELECT RAISE(FAIL, 'workflow source links are immutable evidence');
+END;
+CREATE TRIGGER IF NOT EXISTS workflow_source_links_no_delete
+BEFORE DELETE ON workflow_source_links BEGIN
+    SELECT RAISE(FAIL, 'workflow source links are durable evidence');
+END;
+";
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RootOwnership {
     pub runtime_identity: RuntimeIdentity,
@@ -2641,6 +2677,7 @@ impl SqliteEventStore {
             (59_i64, MIGRATION_59),
             (60_i64, MIGRATION_60),
             (61_i64, MIGRATION_61),
+            (62_i64, MIGRATION_62),
         ] {
             let applied = self.connection.query_row(
                 "SELECT EXISTS(SELECT 1 FROM mcg_schema WHERE version = ?1)",
@@ -6529,6 +6566,7 @@ mod tests {
                      DROP TABLE skill_manifest_versions;
                      DROP TABLE tool_manifest_heads;
                      DROP TABLE tool_manifest_versions;
+                     DROP TABLE workflow_source_links;
                      DROP TABLE workflow_source_attachments;
                      DROP TABLE model_secret_handle_bindings;
                      DROP TABLE model_invocation_permits;
@@ -6551,7 +6589,7 @@ mod tests {
                      DROP TABLE task_contract_heads;
                      DROP TABLE task_contract_versions;
                      DROP TABLE root_ownership;
-                     DELETE FROM mcg_schema WHERE version IN (51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61);",
+                     DELETE FROM mcg_schema WHERE version IN (51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62);",
                 )
                 .expect("downgrade fixture to schema 50");
         }
