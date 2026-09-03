@@ -44,10 +44,10 @@ use mcg_contracts::{
     CompletionVerdict, ContentHash, ContextManifest, ContextManifestId, ContextSelection,
     ContractError, CorrelationId, DeterministicCriterionEvidence, DeterministicVerifyInput,
     EffectClass, EffectOutcome, FilesystemAccess, HashAlgorithm, InvocationId, InvocationManifest,
-    InvocationRole, ModelBudget, ModelDataClassification, ModelDestinationClass,
-    ModelDisclosureManifest, ModelEgressPolicy, ModelEgressRoute, ModelInvocationPermit,
-    ModelInvocationProposal, ModelRunCostProvenance, ModelRunErrorClass, ModelRunId, ModelUsage,
-    OwnerActionCompensationRequest, PROTOCOL_V1, PermitId, PolicyBinding,
+    InvocationRole, MAX_REFERENCE_LOCATOR_BYTES, ModelBudget, ModelDataClassification,
+    ModelDestinationClass, ModelDisclosureManifest, ModelEgressPolicy, ModelEgressRoute,
+    ModelInvocationPermit, ModelInvocationProposal, ModelRunCostProvenance, ModelRunErrorClass,
+    ModelRunId, ModelUsage, OwnerActionCompensationRequest, PROTOCOL_V1, PermitId, PolicyBinding,
     RUNTIME_INVOCATION_REQUEST_HASH_DOMAIN, ReconciliationJob, ReconciliationJobId,
     ReconciliationObservation, RequestId, RootStatus, RpcEnvelope, RuntimeActorId, RuntimeIdentity,
     RuntimeInstanceId, RuntimeInvocationRequest, RuntimeInvocationResult, SandboxCapabilityProfile,
@@ -79,7 +79,8 @@ use mcg_platform::{
     ROOT_WORKFLOW_CANCEL_RESPONSE_TYPE, ROOT_WORKFLOW_EVENTS_REQUEST_TYPE,
     ROOT_WORKFLOW_EVENTS_RESPONSE_TYPE, ROOT_WORKFLOW_LIST_REQUEST_TYPE,
     ROOT_WORKFLOW_LIST_RESPONSE_TYPE, ROOT_WORKFLOW_SHOW_REQUEST_TYPE,
-    ROOT_WORKFLOW_SHOW_RESPONSE_TYPE, RootIpcSession, create_root_ipc_session,
+    ROOT_WORKFLOW_SHOW_RESPONSE_TYPE, ROOT_WORKFLOW_SOURCE_LINKS_REQUEST_TYPE,
+    ROOT_WORKFLOW_SOURCE_LINKS_RESPONSE_TYPE, RootIpcSession, create_root_ipc_session,
     read_canonical_frame, remove_root_ipc_session, write_canonical_frame,
 };
 use mcg_plugin_protocol::{
@@ -9469,6 +9470,12 @@ struct WorkflowShowRequest {
 }
 
 #[derive(serde::Deserialize)]
+struct WorkflowSourceLinksRequest {
+    source_type: StableTypeId,
+    source_locator: String,
+}
+
+#[derive(serde::Deserialize)]
 struct WorkflowActivityRequest {
     workflow_id: WorkflowId,
     invocation_limit: usize,
@@ -9648,6 +9655,7 @@ where
         ROOT_STATUS_REQUEST_TYPE
             | ROOT_WORKFLOW_LIST_REQUEST_TYPE
             | ROOT_WORKFLOW_SHOW_REQUEST_TYPE
+            | ROOT_WORKFLOW_SOURCE_LINKS_REQUEST_TYPE
             | ROOT_WORKFLOW_ACTIVITY_REQUEST_TYPE
             | ROOT_WORKFLOW_EVENTS_REQUEST_TYPE
             | ROOT_WORKFLOW_CANCEL_REQUEST_TYPE
@@ -9740,6 +9748,25 @@ async fn dispatch_root_ipc_request(
             (
                 ROOT_WORKFLOW_SHOW_RESPONSE_TYPE,
                 serde_json::to_value(runtime.canonical_workflow(show.workflow_id)?)?,
+            )
+        }
+        ROOT_WORKFLOW_SOURCE_LINKS_REQUEST_TYPE => {
+            let source: WorkflowSourceLinksRequest = serde_json::from_value(request_value)?;
+            if source.source_locator.is_empty()
+                || source.source_locator.len() > MAX_REFERENCE_LOCATOR_BYTES
+                || source.source_locator.chars().any(char::is_control)
+            {
+                return Err(ContractError::InvalidContract(
+                    "workflow source-link locator is invalid",
+                )
+                .into());
+            }
+            (
+                ROOT_WORKFLOW_SOURCE_LINKS_RESPONSE_TYPE,
+                serde_json::to_value(runtime.canonical_workflow_source_links(
+                    &source.source_type,
+                    &source.source_locator,
+                )?)?,
             )
         }
         ROOT_WORKFLOW_ACTIVITY_REQUEST_TYPE => {
@@ -9984,8 +10011,8 @@ mod tests {
         cancel_root_workflow, exchange_root_rpc, query_root_action, query_root_actions,
         query_root_capabilities, query_root_capability, query_root_invocation,
         query_root_invocations, query_root_status, query_root_workflow,
-        query_root_workflow_activity, query_root_workflow_events, query_root_workflows,
-        root_ipc_session_path,
+        query_root_workflow_activity, query_root_workflow_events, query_root_workflow_source_links,
+        query_root_workflows, root_ipc_session_path,
     };
     use mcg_plugin_protocol::{
         PLUGIN_SCHEMA_VERSION, PluginCapability, PluginCapabilityOperation,
@@ -16579,6 +16606,18 @@ mod tests {
         assert_eq!(shown.task_contract, contract);
         assert_eq!(shown.attempt.state, WorkflowState::Running);
         assert_eq!(shown.events.len(), 2);
+        let source_type = StableTypeId::parse("mcg.compatibility_task_source.v1").unwrap();
+        assert!(
+            query_root_workflow_source_links(temporary.path(), &source_type, "unknown-task")
+                .await
+                .expect("bounded workflow source-link query")
+                .is_empty()
+        );
+        assert!(
+            query_root_workflow_source_links(temporary.path(), &source_type, "")
+                .await
+                .is_err()
+        );
         let first_page = query_root_workflow_events(temporary.path(), attempt.workflow_id, 0, 1)
             .await
             .expect("first workflow event page")

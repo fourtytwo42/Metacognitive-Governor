@@ -6,9 +6,9 @@ use mcg_agents::{
 use mcg_contracts::{
     ActionEnvelope, ActionExecution, ActionExecutionState, ArtifactRef, AttemptId, ConfigurationId,
     ContentHash, ContractClause, CorrelationId, EffectClass, EffectOutcome, EventId, InvocationId,
-    InvocationManifest, InvocationRole, MAX_WORKFLOW_EVENT_PAGE_SIZE, ModelRun, ModelRunState,
-    PolicyBinding, RetryPolicy, RuntimeActorId, SourceRef, StableTypeId, TaskContract,
-    TaskContractId, TaskContractStatus, VersionedPayload, VersionedRef,
+    InvocationManifest, InvocationRole, MAX_WORKFLOW_EVENT_PAGE_SIZE, MAX_WORKFLOW_SOURCE_LINKS,
+    ModelRun, ModelRunState, PolicyBinding, RetryPolicy, RuntimeActorId, SourceRef, StableTypeId,
+    TaskContract, TaskContractId, TaskContractStatus, VersionedPayload, VersionedRef,
     WORKFLOW_SOURCE_SNAPSHOT_HASH_DOMAIN, WaitReason, WorkflowAttempt, WorkflowEvent, WorkflowId,
     WorkflowSourceAttachment, WorkflowSourceLink, WorkflowState, WorkflowWaitRequest,
     WorkflowWakeBinding, WorkflowWakeRequest, decode_canonical_cbor_v1,
@@ -3656,6 +3656,9 @@ fn load_workflow_source_links_by_source(
     source_type: &str,
     source_locator: &str,
 ) -> Result<Vec<WorkflowSourceLink>, StorageError> {
+    let row_limit = i64::try_from(MAX_WORKFLOW_SOURCE_LINKS + 1).map_err(|_| {
+        StorageError::InvalidData("workflow source-link inspection bound overflowed".into())
+    })?;
     let mut statement = connection.prepare(
         "SELECT source_type, source_locator, source_hash_json, workflow_id, attempt_id,
                 task_contract_id, task_contract_version, task_contract_hash_json,
@@ -3663,15 +3666,22 @@ fn load_workflow_source_links_by_source(
                 link_json, linked_at
          FROM workflow_source_links
          WHERE source_type = ?1 AND source_locator = ?2
-         ORDER BY linked_at, workflow_id",
+         ORDER BY linked_at, workflow_id LIMIT ?3",
     )?;
-    statement
+    let mut links = statement
         .query_map(
-            params![source_type, source_locator],
+            params![source_type, source_locator, row_limit],
             workflow_source_link_row,
         )?
         .map(|row| validate_loaded_workflow_source_link(connection, row?))
-        .collect()
+        .collect::<Result<Vec<_>, _>>()?;
+    if links.len() > MAX_WORKFLOW_SOURCE_LINKS {
+        return Err(StorageError::InvalidData(
+            "workflow source-link result exceeds the bounded inspection limit".into(),
+        ));
+    }
+    links.shrink_to_fit();
+    Ok(links)
 }
 
 fn load_workflow_source_links_for_workflow(

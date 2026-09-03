@@ -13,12 +13,13 @@ use chrono::{DateTime, Duration, Utc};
 use mcg_contracts::{
     ActionCompensationReceipt, ActionId, ActionInspection, ActionSummary, AuthenticatedRpcRequest,
     ContentHash, ContractError, CorrelationId, InvocationId, InvocationInspection,
-    InvocationSummary, MAX_TOOL_CAPABILITY_SUMMARIES, MAX_WORKFLOW_ACTIVITY_INVOCATIONS,
-    MAX_WORKFLOW_EVENT_PAGE_SIZE, OwnerActionCompensationRequest, PROTOCOL_V1, RequestId,
-    RootStatus, RpcEnvelope, RuntimeInstanceId, RuntimeWorkerRole, SessionId, StableTypeId,
-    ToolAuthorizationInspection, ToolAuthorizationSummary, VersionedPayload, WorkflowAttempt,
-    WorkflowCancelRequest, WorkflowEventPage, WorkflowId, WorkflowInspection,
-    WorkflowInvocationActivity, canonical_cbor_v1, decode_canonical_cbor_v1,
+    InvocationSummary, MAX_REFERENCE_LOCATOR_BYTES, MAX_TOOL_CAPABILITY_SUMMARIES,
+    MAX_WORKFLOW_ACTIVITY_INVOCATIONS, MAX_WORKFLOW_EVENT_PAGE_SIZE, MAX_WORKFLOW_SOURCE_LINKS,
+    OwnerActionCompensationRequest, PROTOCOL_V1, RequestId, RootStatus, RpcEnvelope,
+    RuntimeInstanceId, RuntimeWorkerRole, SessionId, StableTypeId, ToolAuthorizationInspection,
+    ToolAuthorizationSummary, VersionedPayload, WorkflowAttempt, WorkflowCancelRequest,
+    WorkflowEventPage, WorkflowId, WorkflowInspection, WorkflowInvocationActivity,
+    WorkflowSourceLink, canonical_cbor_v1, decode_canonical_cbor_v1,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
@@ -43,6 +44,10 @@ pub const ROOT_WORKFLOW_LIST_REQUEST_TYPE: &str = "metacog.root.workflow_list.re
 pub const ROOT_WORKFLOW_LIST_RESPONSE_TYPE: &str = "metacog.root.workflow_list.response.v1";
 pub const ROOT_WORKFLOW_SHOW_REQUEST_TYPE: &str = "metacog.root.workflow_show.request.v1";
 pub const ROOT_WORKFLOW_SHOW_RESPONSE_TYPE: &str = "metacog.root.workflow_show.response.v1";
+pub const ROOT_WORKFLOW_SOURCE_LINKS_REQUEST_TYPE: &str =
+    "metacog.root.workflow_source_links.request.v1";
+pub const ROOT_WORKFLOW_SOURCE_LINKS_RESPONSE_TYPE: &str =
+    "metacog.root.workflow_source_links.response.v1";
 pub const ROOT_WORKFLOW_ACTIVITY_REQUEST_TYPE: &str = "metacog.root.workflow_activity.request.v1";
 pub const ROOT_WORKFLOW_ACTIVITY_RESPONSE_TYPE: &str = "metacog.root.workflow_activity.response.v1";
 pub const ROOT_WORKFLOW_EVENTS_REQUEST_TYPE: &str = "metacog.root.workflow_events.request.v1";
@@ -562,6 +567,46 @@ pub async fn query_root_workflow(
         &serde_json::json!({"workflow_id": workflow_id}),
     )
     .await
+}
+
+/// Loads the bounded canonical workflow links for one exact compatibility source.
+///
+/// # Errors
+/// Returns an error for unavailable transport, malformed source identity, excessive fan-out, or
+/// substituted response evidence.
+pub async fn query_root_workflow_source_links(
+    data_directory: &Path,
+    source_type: &StableTypeId,
+    source_locator: &str,
+) -> Result<Vec<WorkflowSourceLink>, PlatformError> {
+    if source_locator.is_empty()
+        || source_locator.len() > MAX_REFERENCE_LOCATOR_BYTES
+        || source_locator.chars().any(char::is_control)
+    {
+        return Err(
+            ContractError::InvalidContract("workflow source-link locator is invalid").into(),
+        );
+    }
+    let links: Vec<WorkflowSourceLink> = query_root(
+        data_directory,
+        ROOT_WORKFLOW_SOURCE_LINKS_REQUEST_TYPE,
+        ROOT_WORKFLOW_SOURCE_LINKS_RESPONSE_TYPE,
+        &serde_json::json!({"source_type": source_type, "source_locator": source_locator}),
+    )
+    .await?;
+    if links.len() > MAX_WORKFLOW_SOURCE_LINKS {
+        return Err(PlatformError::InvalidInspectionBound);
+    }
+    for link in &links {
+        link.validate()?;
+        if &link.source.source_type != source_type || link.source.locator != source_locator {
+            return Err(ContractError::InvalidContract(
+                "workflow source-link response does not match its request",
+            )
+            .into());
+        }
+    }
+    Ok(links)
 }
 
 /// Loads one canonical workflow and its bounded current-attempt invocation activity.

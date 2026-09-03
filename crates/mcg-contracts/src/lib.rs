@@ -21,6 +21,7 @@ pub const MAX_CANONICAL_PAYLOAD_BYTES: usize = 16 * 1024 * 1024;
 pub const MAX_MANIFEST_ITEMS: usize = 4_096;
 pub const MAX_WORKFLOW_ACTIVITY_INVOCATIONS: usize = 200;
 pub const MAX_WORKFLOW_EVENT_PAGE_SIZE: usize = 256;
+pub const MAX_WORKFLOW_SOURCE_LINKS: usize = 200;
 pub const MAX_CONTEXT_TRANSFORMATIONS: usize = 64;
 pub const MAX_CONTEXT_EXPANSION_STEPS: usize = 256;
 pub const MAX_MODEL_EGRESS_ROUTES: usize = 64;

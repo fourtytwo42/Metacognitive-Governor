@@ -1334,6 +1334,15 @@ enum WorkflowCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Find every canonical workflow linked to one exact compatibility source.
+    Source {
+        /// Stable source type such as mcg.compatibility_task_source.v1.
+        source_type: String,
+        /// Exact task, run, or conversation identifier.
+        source_locator: String,
+        #[arg(long)]
+        json: bool,
+    },
     /// Emit ordered immutable workflow events as newline-delimited JSON.
     Events {
         id: String,
@@ -11257,6 +11266,38 @@ async fn run_root_workflow(
                 println!("  events: {}", inspection.events.len());
             }
         }
+        WorkflowCommand::Source {
+            source_type,
+            source_locator,
+            json,
+        } => {
+            let source_type = mcg_contracts::StableTypeId::parse(source_type)?;
+            let links = mcg_platform::query_root_workflow_source_links(
+                data_directory,
+                &source_type,
+                source_locator,
+            )
+            .await?;
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&links)?);
+            } else if links.is_empty() {
+                println!("No canonical workflows are linked to this source.");
+            } else {
+                println!(
+                    "Canonical workflows linked to {}:{source_locator}",
+                    source_type.as_str()
+                );
+                for link in links {
+                    println!(
+                        "  {}  attempt {}  contract {}@{}",
+                        link.workflow_id,
+                        link.attempt_id,
+                        link.task_contract.id,
+                        link.task_contract.version
+                    );
+                }
+            }
+        }
         WorkflowCommand::Events {
             id,
             after_sequence,
@@ -16733,6 +16774,21 @@ mod tests {
             show.command.expect("command"),
             Command::Workflow {
                 command: WorkflowCommand::Show { json: false, .. }
+            }
+        ));
+        let source = Cli::try_parse_from([
+            "mcg",
+            "workflow",
+            "source",
+            "mcg.compatibility_task_source.v1",
+            "00000000-0000-4000-8000-000000000502",
+            "--json",
+        ])
+        .expect("workflow source command");
+        assert!(matches!(
+            source.command.expect("command"),
+            Command::Workflow {
+                command: WorkflowCommand::Source { json: true, .. }
             }
         ));
         let events = Cli::try_parse_from([

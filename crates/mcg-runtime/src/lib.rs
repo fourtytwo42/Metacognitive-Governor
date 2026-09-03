@@ -69,8 +69,9 @@ use mcg_contracts::{
     SkillManifestId, SourceRef, StableTypeId, ToolAuthorizationInspection,
     ToolAuthorizationSummary, ToolInvocationPermit, ToolInvocationProposal, ToolManifest,
     ToolManifestId, ToolPolicy, VersionedRef, WorkflowAttempt, WorkflowCancelRequest,
-    WorkflowEventPage, WorkflowId, WorkflowInspection, WorkflowInvocationActivity, WorkflowState,
-    WorkflowWaitRequest, WorkflowWakeBinding, WorkflowWakeRequest, canonical_contract_hash,
+    WorkflowEventPage, WorkflowId, WorkflowInspection, WorkflowInvocationActivity,
+    WorkflowSourceLink, WorkflowState, WorkflowWaitRequest, WorkflowWakeBinding,
+    WorkflowWakeRequest, canonical_contract_hash,
 };
 use mcg_domain::{
     AgentContextCheckpoint, AgentContextCheckpointCause, AgentContextCheckpointId,
@@ -4172,6 +4173,21 @@ impl AppRuntime {
     /// Returns a runtime error when workflow projections cannot be read.
     pub fn canonical_workflows(&self) -> Result<Vec<WorkflowAttempt>, RuntimeError> {
         Ok(self.store()?.workflow_attempts()?)
+    }
+
+    /// Loads the canonical workflows linked to one exact compatibility source identity.
+    ///
+    /// # Errors
+    /// Returns a runtime error for malformed source identity, excessive fan-out, or unreadable
+    /// authoritative evidence.
+    pub fn canonical_workflow_source_links(
+        &self,
+        source_type: &StableTypeId,
+        source_locator: &str,
+    ) -> Result<Vec<WorkflowSourceLink>, RuntimeError> {
+        Ok(self
+            .store()?
+            .workflow_source_links(source_type, source_locator)?)
     }
 
     /// Root-only binding of one exact external or protected-component workflow wait.
