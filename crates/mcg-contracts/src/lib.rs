@@ -772,6 +772,8 @@ impl WorkflowAttempt {
 }
 
 pub const WORKFLOW_SOURCE_SNAPSHOT_HASH_DOMAIN: &str = "MetaCog.WorkflowSourceSnapshot";
+pub const WORKFLOW_WAKE_BINDING_HASH_DOMAIN: &str = "MetaCog.WorkflowWakeBinding";
+pub const MAX_WORKFLOW_WAKE_SECONDS: i64 = 30 * 24 * 60 * 60;
 
 /// Immutable evidence that one pre-canonical product record was attached to one exact workflow.
 ///
@@ -817,6 +819,85 @@ impl WorkflowSourceAttachment {
         }
         Ok(())
     }
+}
+
+/// Immutable authority for one externally signalled workflow wait.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowWakeBinding {
+    pub schema_version: u32,
+    pub attempt_id: AttemptId,
+    pub wait_reason: WaitReason,
+    pub condition: SourceRef,
+    pub authorized_notifier: RuntimeActorId,
+    pub bound_revision: u64,
+    pub bound_generation: u64,
+    pub bound_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+}
+
+impl WorkflowWakeBinding {
+    pub const SCHEMA_VERSION: u32 = 1;
+    pub const TYPE_ID: &'static str = "mcg.workflow_wake_binding.v1";
+
+    /// Validates a bounded external or protected-component wake authority.
+    ///
+    /// # Errors
+    /// Returns an invalid-contract error for unsupported reasons, malformed source evidence, or
+    /// invalid revision/time bounds.
+    pub fn validate(&self) -> Result<(), ContractError> {
+        if self.schema_version != Self::SCHEMA_VERSION
+            || !matches!(
+                self.wait_reason,
+                WaitReason::External | WaitReason::ProtectedComponent
+            )
+            || self.bound_revision == 0
+            || self.expires_at <= self.bound_at
+            || self
+                .expires_at
+                .signed_duration_since(self.bound_at)
+                .num_seconds()
+                > MAX_WORKFLOW_WAKE_SECONDS
+        {
+            return Err(ContractError::InvalidContract(
+                "workflow wake binding metadata is invalid",
+            ));
+        }
+        self.condition.validate()
+    }
+
+    /// Computes the canonical immutable identity consumed by a wake signal.
+    ///
+    /// # Errors
+    /// Returns a contract error when the binding cannot be encoded canonically.
+    pub fn content_hash(&self) -> Result<ContentHash, ContractError> {
+        self.validate()?;
+        canonical_contract_hash(Self::TYPE_ID, WORKFLOW_WAKE_BINDING_HASH_DOMAIN, self)
+    }
+}
+
+/// Revision/generation-bound request to enter an externally signalled wait.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowWaitRequest {
+    pub attempt_id: AttemptId,
+    pub expected_revision: u64,
+    pub expected_generation: u64,
+    pub wait_reason: WaitReason,
+    pub condition: SourceRef,
+    pub authorized_notifier: RuntimeActorId,
+    pub expires_at: DateTime<Utc>,
+    pub idempotency_key: String,
+}
+
+/// Exact notification that a bound external or protected-component condition is satisfied.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowWakeRequest {
+    pub attempt_id: AttemptId,
+    pub expected_revision: u64,
+    pub expected_generation: u64,
+    pub binding_hash: ContentHash,
+    pub notifier: RuntimeActorId,
+    pub evidence: SourceRef,
+    pub idempotency_key: String,
 }
 
 /// Ordered Root-owned workflow evidence. Projection consumers never author these events.
@@ -2836,6 +2917,49 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn workflow_wake_binding_is_exact_bounded_and_reason_scoped() {
+        let bound_at = DateTime::parse_from_rfc3339("2026-09-03T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let condition = SourceRef {
+            source_type: StableTypeId::parse("test.external_completion.v1").unwrap(),
+            locator: "job:42".into(),
+            content_hash: ContentHash {
+                algorithm: HashAlgorithm::Blake3_256,
+                domain: "TestExternalCompletion".into(),
+                digest_hex: "a".repeat(64),
+            },
+        };
+        let binding = WorkflowWakeBinding {
+            schema_version: WorkflowWakeBinding::SCHEMA_VERSION,
+            attempt_id: AttemptId::new(),
+            wait_reason: WaitReason::External,
+            condition,
+            authorized_notifier: RuntimeActorId::new(),
+            bound_revision: 4,
+            bound_generation: 2,
+            bound_at,
+            expires_at: bound_at + chrono::Duration::minutes(5),
+        };
+        assert_eq!(
+            binding.content_hash().unwrap(),
+            binding.content_hash().unwrap()
+        );
+        let mut invalid = binding;
+        invalid.wait_reason = WaitReason::Approval;
+        assert!(matches!(
+            invalid.validate(),
+            Err(ContractError::InvalidContract(_))
+        ));
+        invalid.wait_reason = WaitReason::ProtectedComponent;
+        invalid.expires_at = invalid.bound_at + chrono::Duration::days(31);
+        assert!(matches!(
+            invalid.validate(),
+            Err(ContractError::InvalidContract(_))
+        ));
     }
 
     #[test]

@@ -10,7 +10,8 @@ use mcg_contracts::{
     PolicyBinding, RetryPolicy, RuntimeActorId, SourceRef, StableTypeId, TaskContract,
     TaskContractId, TaskContractStatus, VersionedPayload, VersionedRef,
     WORKFLOW_SOURCE_SNAPSHOT_HASH_DOMAIN, WaitReason, WorkflowAttempt, WorkflowEvent, WorkflowId,
-    WorkflowSourceAttachment, WorkflowState, decode_canonical_cbor_v1,
+    WorkflowSourceAttachment, WorkflowState, WorkflowWaitRequest, WorkflowWakeBinding,
+    WorkflowWakeRequest, decode_canonical_cbor_v1,
 };
 use mcg_domain::{
     AgentLeaseId, ApprovalId, PluginInstallation, PluginInvocationId, PluginInvocationRecord,
@@ -1653,6 +1654,14 @@ pub(crate) fn transition_workflow_attempt_in_transaction(
             attempt.state
         )));
     }
+    if matches!(
+        next_state,
+        WorkflowState::Waiting(WaitReason::External | WaitReason::ProtectedComponent)
+    ) {
+        return Err(StorageError::Conflict(
+            "external and protected-component waits require an immutable wake binding".into(),
+        ));
+    }
 
     let previous_state = attempt.state;
     let cancellation_effects = if next_state == WorkflowState::CancelRequested {
@@ -2370,6 +2379,232 @@ impl SqliteEventStore {
         Ok(attempt)
     }
 
+    /// Atomically enters an external or protected-component wait with exact notifier authority.
+    ///
+    /// # Errors
+    /// Returns a conflict for stale worker authority, unsupported wait reasons, invalid evidence,
+    /// expired bounds, or replay substitution.
+    #[allow(clippy::too_many_lines)]
+    pub fn bind_workflow_wait(
+        &mut self,
+        request: &WorkflowWaitRequest,
+        correlation_id: CorrelationId,
+        now: DateTime<Utc>,
+    ) -> Result<(WorkflowAttempt, WorkflowWakeBinding), StorageError> {
+        if request.idempotency_key.trim().is_empty()
+            || !matches!(
+                request.wait_reason,
+                WaitReason::External | WaitReason::ProtectedComponent
+            )
+            || request.expires_at <= now
+        {
+            return Err(StorageError::InvalidData(
+                "workflow wait request has invalid reason, expiry, or idempotency key".into(),
+            ));
+        }
+        request
+            .condition
+            .validate()
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        let transaction = self.connection.transaction()?;
+        let mut attempt = load_attempt(&transaction, request.attempt_id)?
+            .ok_or(StorageError::WorkflowAttemptNotFound(request.attempt_id))?;
+        if let Some(event) =
+            load_event_by_idempotency(&transaction, attempt.workflow_id, &request.idempotency_key)?
+        {
+            let original = event_attempt(&event)?;
+            let binding = workflow_wake_binding_from_event(&event)?;
+            let payload = event_payload_value(&event)?;
+            if event.type_id.as_str() != WORKFLOW_WAIT_BOUND_TYPE_ID
+                || payload.get("expected_revision")
+                    != Some(&serde_json::json!(request.expected_revision))
+                || payload.get("expected_generation")
+                    != Some(&serde_json::json!(request.expected_generation))
+                || binding.attempt_id != request.attempt_id
+                || binding.wait_reason != request.wait_reason
+                || binding.condition != request.condition
+                || binding.authorized_notifier != request.authorized_notifier
+                || binding.expires_at != request.expires_at
+            {
+                return Err(StorageError::Conflict(
+                    "workflow wait idempotency key was replayed with different authority".into(),
+                ));
+            }
+            transaction.commit()?;
+            return Ok((original, binding));
+        }
+        ensure_expected(
+            &attempt,
+            request.expected_revision,
+            request.expected_generation,
+        )?;
+        if attempt.state != WorkflowState::Running
+            || attempt.lease_owner.is_none()
+            || attempt.lease_expires_at.is_none_or(|expiry| expiry <= now)
+        {
+            return Err(StorageError::Conflict(
+                "only a live Running workflow authority may bind a wake condition".into(),
+            ));
+        }
+
+        let previous_state = attempt.state;
+        attempt.state = WorkflowState::Waiting(request.wait_reason);
+        attempt.revision = increment(attempt.revision, "workflow revision")?;
+        attempt.lease_owner = None;
+        attempt.lease_expires_at = None;
+        attempt.heartbeat_at = None;
+        attempt.updated_at = now;
+        let binding = WorkflowWakeBinding {
+            schema_version: WorkflowWakeBinding::SCHEMA_VERSION,
+            attempt_id: attempt.attempt_id,
+            wait_reason: request.wait_reason,
+            condition: request.condition.clone(),
+            authorized_notifier: request.authorized_notifier,
+            bound_revision: attempt.revision,
+            bound_generation: attempt.lease_generation,
+            bound_at: now,
+            expires_at: request.expires_at,
+        };
+        binding
+            .validate()
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        update_attempt_cas(
+            &transaction,
+            &attempt,
+            request.expected_revision,
+            request.expected_generation,
+        )?;
+        let (sequence, cause) = next_event_position(&transaction, attempt.workflow_id)?;
+        let event = workflow_event(
+            &attempt,
+            sequence,
+            correlation_id,
+            cause,
+            &request.idempotency_key,
+            WORKFLOW_WAIT_BOUND_TYPE_ID,
+            now,
+            &serde_json::json!({
+                "attempt_id": attempt.attempt_id,
+                "from": previous_state,
+                "to": attempt.state,
+                "wait_reason": request.wait_reason,
+                "expected_revision": request.expected_revision,
+                "expected_generation": request.expected_generation,
+                "workflow_wake": binding,
+                "attempt": attempt,
+            }),
+        )?;
+        insert_event(&transaction, &event)?;
+        transaction.commit()?;
+        Ok((attempt, binding))
+    }
+
+    /// Atomically wakes one exact external or protected-component wait from immutable evidence.
+    ///
+    /// # Errors
+    /// Returns a conflict for stale/substituted/expired authority, the wrong notifier, unmatched
+    /// evidence, or replay substitution.
+    #[allow(clippy::too_many_lines)]
+    pub fn wake_workflow(
+        &mut self,
+        request: &WorkflowWakeRequest,
+        correlation_id: CorrelationId,
+        now: DateTime<Utc>,
+    ) -> Result<WorkflowAttempt, StorageError> {
+        if request.idempotency_key.trim().is_empty() {
+            return Err(StorageError::InvalidData(
+                "workflow wake idempotency key cannot be empty".into(),
+            ));
+        }
+        request
+            .binding_hash
+            .validate()
+            .and_then(|()| request.evidence.validate())
+            .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+        let transaction = self.connection.transaction()?;
+        let mut attempt = load_attempt(&transaction, request.attempt_id)?
+            .ok_or(StorageError::WorkflowAttemptNotFound(request.attempt_id))?;
+        if let Some(event) =
+            load_event_by_idempotency(&transaction, attempt.workflow_id, &request.idempotency_key)?
+        {
+            let original = event_attempt(&event)?;
+            let payload = event_payload_value(&event)?;
+            if event.type_id.as_str() != WORKFLOW_WAIT_SATISFIED_TYPE_ID
+                || payload.get("expected_revision")
+                    != Some(&serde_json::json!(request.expected_revision))
+                || payload.get("expected_generation")
+                    != Some(&serde_json::json!(request.expected_generation))
+                || payload.get("binding_hash")
+                    != Some(&serde_json::to_value(&request.binding_hash)?)
+                || payload.get("notifier") != Some(&serde_json::json!(request.notifier))
+                || payload.get("evidence") != Some(&serde_json::to_value(&request.evidence)?)
+            {
+                return Err(StorageError::Conflict(
+                    "workflow wake idempotency key was replayed with different evidence".into(),
+                ));
+            }
+            transaction.commit()?;
+            return Ok(original);
+        }
+        ensure_expected(
+            &attempt,
+            request.expected_revision,
+            request.expected_generation,
+        )?;
+        let binding = load_current_workflow_wake_binding(&transaction, &attempt)?;
+        if binding.attempt_id != attempt.attempt_id
+            || binding.bound_revision != attempt.revision
+            || binding.bound_generation != attempt.lease_generation
+            || request.binding_hash
+                != binding
+                    .content_hash()
+                    .map_err(|error| StorageError::InvalidData(error.to_string()))?
+            || request.notifier != binding.authorized_notifier
+            || request.evidence != binding.condition
+            || now > binding.expires_at
+        {
+            return Err(StorageError::Conflict(
+                "workflow wake does not match the current immutable condition authority".into(),
+            ));
+        }
+
+        let previous_state = attempt.state;
+        attempt.state = WorkflowState::Ready;
+        attempt.revision = increment(attempt.revision, "workflow revision")?;
+        attempt.updated_at = now;
+        update_attempt_cas(
+            &transaction,
+            &attempt,
+            request.expected_revision,
+            request.expected_generation,
+        )?;
+        let (sequence, cause) = next_event_position(&transaction, attempt.workflow_id)?;
+        let event = workflow_event(
+            &attempt,
+            sequence,
+            correlation_id,
+            cause,
+            &request.idempotency_key,
+            WORKFLOW_WAIT_SATISFIED_TYPE_ID,
+            now,
+            &serde_json::json!({
+                "attempt_id": attempt.attempt_id,
+                "from": previous_state,
+                "to": attempt.state,
+                "wait_reason": binding.wait_reason,
+                "expected_revision": request.expected_revision,
+                "expected_generation": request.expected_generation,
+                "binding_hash": request.binding_hash,
+                "notifier": request.notifier,
+                "evidence": request.evidence,
+                "attempt": attempt,
+            }),
+        )?;
+        insert_event(&transaction, &event)?;
+        transaction.commit()?;
+        Ok(attempt)
+    }
+
     /// Creates a new Ready attempt instead of rewinding a terminal failed/cancelled attempt.
     ///
     /// # Errors
@@ -2673,6 +2908,66 @@ impl SqliteEventStore {
         }
         Ok(report)
     }
+}
+
+fn workflow_wake_binding_from_event(
+    event: &WorkflowEvent,
+) -> Result<WorkflowWakeBinding, StorageError> {
+    let payload = event_payload_value(event)?;
+    let binding: WorkflowWakeBinding =
+        serde_json::from_value(payload.get("workflow_wake").cloned().ok_or_else(|| {
+            StorageError::InvalidData("workflow wait has no wake binding".into())
+        })?)?;
+    binding
+        .validate()
+        .map_err(|error| StorageError::InvalidData(error.to_string()))?;
+    Ok(binding)
+}
+
+fn load_current_workflow_wake_binding(
+    connection: &rusqlite::Connection,
+    attempt: &WorkflowAttempt,
+) -> Result<WorkflowWakeBinding, StorageError> {
+    if !matches!(
+        attempt.state,
+        WorkflowState::Waiting(WaitReason::External | WaitReason::ProtectedComponent)
+    ) || attempt.lease_owner.is_some()
+        || attempt.lease_expires_at.is_some()
+    {
+        return Err(StorageError::Conflict(
+            "workflow is not in an externally signalled wait".into(),
+        ));
+    }
+    let event_json = connection
+        .query_row(
+            "SELECT event_json FROM workflow_events
+             WHERE workflow_id = ?1 ORDER BY sequence DESC LIMIT 1",
+            [attempt.workflow_id.to_string()],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .ok_or_else(|| StorageError::InvalidData("workflow wait has no event".into()))?;
+    let event: WorkflowEvent = serde_json::from_str(&event_json)?;
+    let payload = event_payload_value(&event)?;
+    let stored_attempt = event_attempt(&event)?;
+    let binding = workflow_wake_binding_from_event(&event)?;
+    if event.type_id.as_str() != WORKFLOW_WAIT_BOUND_TYPE_ID
+        || event.attempt_id != attempt.attempt_id
+        || event.attempt_revision != attempt.revision
+        || event.lease_generation != attempt.lease_generation
+        || stored_attempt != *attempt
+        || binding.attempt_id != attempt.attempt_id
+        || binding.bound_revision != attempt.revision
+        || binding.bound_generation != attempt.lease_generation
+        || attempt.state != WorkflowState::Waiting(binding.wait_reason)
+        || payload.get("from") != Some(&serde_json::json!(WorkflowState::Running))
+        || payload.get("to") != Some(&serde_json::json!(attempt.state))
+    {
+        return Err(StorageError::InvalidData(
+            "workflow wake binding does not match the current wait".into(),
+        ));
+    }
+    Ok(binding)
 }
 
 fn is_cancellation_reconciliation_wait(
@@ -3967,6 +4262,14 @@ mod tests {
             .unwrap()
     }
 
+    fn wake_condition(label: &str) -> SourceRef {
+        SourceRef {
+            source_type: StableTypeId::parse("test.workflow_wake_condition.v1").unwrap(),
+            locator: format!("condition:{label}"),
+            content_hash: hash(label),
+        }
+    }
+
     #[test]
     fn workflow_create_is_atomic_and_exact_replay_is_idempotent() {
         let mut store = SqliteEventStore::open_in_memory().unwrap();
@@ -5206,6 +5509,213 @@ mod tests {
             store.revise_task_contract(&stale, 1, "contract-revision-3"),
             Err(StorageError::Conflict(_))
         ));
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn external_wake_is_exact_restart_safe_and_replay_idempotent() {
+        let temporary = tempfile::tempdir().unwrap();
+        let database = temporary.path().join("external-wake.db");
+        let at = now();
+        let (contract, attempt) = fixture();
+        let notifier = RuntimeActorId::new();
+        let condition = wake_condition("external-complete");
+        let (waiting, binding) = {
+            let mut store = SqliteEventStore::open(&database).unwrap();
+            store
+                .create_workflow(&contract, &attempt, CorrelationId::new(), at)
+                .unwrap();
+            let claimed = store
+                .claim_workflow_attempt(
+                    attempt.attempt_id,
+                    attempt.revision,
+                    attempt.lease_generation,
+                    RuntimeActorId::new(),
+                    at + chrono::Duration::minutes(5),
+                    CorrelationId::new(),
+                    "external-wake-claim",
+                    at,
+                )
+                .unwrap();
+            assert!(matches!(
+                store.transition_workflow_attempt(
+                    claimed.attempt_id,
+                    claimed.revision,
+                    claimed.lease_generation,
+                    WorkflowState::Waiting(WaitReason::External),
+                    CorrelationId::new(),
+                    "unbound-external-wait",
+                    at,
+                ),
+                Err(StorageError::Conflict(_))
+            ));
+            let wait_request = WorkflowWaitRequest {
+                attempt_id: claimed.attempt_id,
+                expected_revision: claimed.revision,
+                expected_generation: claimed.lease_generation,
+                wait_reason: WaitReason::External,
+                condition: condition.clone(),
+                authorized_notifier: notifier,
+                expires_at: at + chrono::Duration::minutes(10),
+                idempotency_key: "bind-external-wake".into(),
+            };
+            let result = store
+                .bind_workflow_wait(&wait_request, CorrelationId::new(), at)
+                .unwrap();
+            assert_eq!(
+                store
+                    .bind_workflow_wait(&wait_request, CorrelationId::new(), at)
+                    .unwrap(),
+                result
+            );
+            let mut substituted = wait_request;
+            substituted.condition = wake_condition("substituted");
+            assert!(matches!(
+                store.bind_workflow_wait(&substituted, CorrelationId::new(), at),
+                Err(StorageError::Conflict(_))
+            ));
+            result
+        };
+        assert_eq!(waiting.state, WorkflowState::Waiting(WaitReason::External));
+        assert_eq!(binding.bound_revision, waiting.revision);
+
+        let mut store = SqliteEventStore::open(&database).unwrap();
+        let wake_request = WorkflowWakeRequest {
+            attempt_id: waiting.attempt_id,
+            expected_revision: waiting.revision,
+            expected_generation: waiting.lease_generation,
+            binding_hash: binding.content_hash().unwrap(),
+            notifier,
+            evidence: condition.clone(),
+            idempotency_key: "wake-external".into(),
+        };
+        let mut wrong_notifier = wake_request.clone();
+        wrong_notifier.notifier = RuntimeActorId::new();
+        assert!(matches!(
+            store.wake_workflow(
+                &wrong_notifier,
+                CorrelationId::new(),
+                at + chrono::Duration::seconds(1)
+            ),
+            Err(StorageError::Conflict(_))
+        ));
+        let mut wrong_evidence = wake_request.clone();
+        wrong_evidence.evidence = wake_condition("wrong-evidence");
+        assert!(matches!(
+            store.wake_workflow(
+                &wrong_evidence,
+                CorrelationId::new(),
+                at + chrono::Duration::seconds(1)
+            ),
+            Err(StorageError::Conflict(_))
+        ));
+        let mut wrong_binding = wake_request.clone();
+        wrong_binding.binding_hash.digest_hex = "b".repeat(64);
+        assert!(matches!(
+            store.wake_workflow(
+                &wrong_binding,
+                CorrelationId::new(),
+                at + chrono::Duration::seconds(1)
+            ),
+            Err(StorageError::Conflict(_))
+        ));
+        assert!(matches!(
+            store.wake_workflow(
+                &wake_request,
+                CorrelationId::new(),
+                at + chrono::Duration::minutes(11)
+            ),
+            Err(StorageError::Conflict(_))
+        ));
+        let ready = store
+            .wake_workflow(
+                &wake_request,
+                CorrelationId::new(),
+                at + chrono::Duration::seconds(2),
+            )
+            .unwrap();
+        assert_eq!(ready.state, WorkflowState::Ready);
+        assert_eq!(
+            store
+                .wake_workflow(
+                    &wake_request,
+                    CorrelationId::new(),
+                    at + chrono::Duration::seconds(3)
+                )
+                .unwrap(),
+            ready
+        );
+        let mut substituted_replay = wake_request;
+        substituted_replay.expected_revision += 1;
+        assert!(matches!(
+            store.wake_workflow(
+                &substituted_replay,
+                CorrelationId::new(),
+                at + chrono::Duration::seconds(3)
+            ),
+            Err(StorageError::Conflict(_))
+        ));
+        let events = store.workflow_events(ready.workflow_id).unwrap();
+        assert_eq!(
+            events.last().unwrap().type_id.as_str(),
+            WORKFLOW_WAIT_SATISFIED_TYPE_ID
+        );
+    }
+
+    #[test]
+    fn protected_component_wake_requires_the_bound_notifier_and_evidence() {
+        let mut store = SqliteEventStore::open_in_memory().unwrap();
+        let at = now();
+        let (contract, attempt) = fixture();
+        store
+            .create_workflow(&contract, &attempt, CorrelationId::new(), at)
+            .unwrap();
+        let claimed = store
+            .claim_workflow_attempt(
+                attempt.attempt_id,
+                attempt.revision,
+                attempt.lease_generation,
+                RuntimeActorId::new(),
+                at + chrono::Duration::minutes(5),
+                CorrelationId::new(),
+                "protected-wake-claim",
+                at,
+            )
+            .unwrap();
+        let notifier = RuntimeActorId::new();
+        let condition = wake_condition("protected-complete");
+        let (waiting, binding) = store
+            .bind_workflow_wait(
+                &WorkflowWaitRequest {
+                    attempt_id: claimed.attempt_id,
+                    expected_revision: claimed.revision,
+                    expected_generation: claimed.lease_generation,
+                    wait_reason: WaitReason::ProtectedComponent,
+                    condition: condition.clone(),
+                    authorized_notifier: notifier,
+                    expires_at: at + chrono::Duration::minutes(10),
+                    idempotency_key: "bind-protected-wake".into(),
+                },
+                CorrelationId::new(),
+                at,
+            )
+            .unwrap();
+        let ready = store
+            .wake_workflow(
+                &WorkflowWakeRequest {
+                    attempt_id: waiting.attempt_id,
+                    expected_revision: waiting.revision,
+                    expected_generation: waiting.lease_generation,
+                    binding_hash: binding.content_hash().unwrap(),
+                    notifier,
+                    evidence: condition,
+                    idempotency_key: "wake-protected".into(),
+                },
+                CorrelationId::new(),
+                at + chrono::Duration::seconds(1),
+            )
+            .unwrap();
+        assert_eq!(ready.state, WorkflowState::Ready);
     }
 
     #[test]

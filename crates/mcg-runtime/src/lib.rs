@@ -70,7 +70,7 @@ use mcg_contracts::{
     ToolAuthorizationSummary, ToolInvocationPermit, ToolInvocationProposal, ToolManifest,
     ToolManifestId, ToolPolicy, VersionedRef, WorkflowAttempt, WorkflowCancelRequest,
     WorkflowEventPage, WorkflowId, WorkflowInspection, WorkflowInvocationActivity, WorkflowState,
-    canonical_contract_hash,
+    WorkflowWaitRequest, WorkflowWakeBinding, WorkflowWakeRequest, canonical_contract_hash,
 };
 use mcg_domain::{
     AgentContextCheckpoint, AgentContextCheckpointCause, AgentContextCheckpointId,
@@ -4172,6 +4172,35 @@ impl AppRuntime {
     /// Returns a runtime error when workflow projections cannot be read.
     pub fn canonical_workflows(&self) -> Result<Vec<WorkflowAttempt>, RuntimeError> {
         Ok(self.store()?.workflow_attempts()?)
+    }
+
+    /// Root-only binding of one exact external or protected-component workflow wait.
+    ///
+    /// # Errors
+    /// Returns a runtime error for stale worker authority, malformed/expired source evidence, an
+    /// unsupported wait reason, or replay substitution.
+    pub fn bind_canonical_workflow_wait(
+        &self,
+        request: &WorkflowWaitRequest,
+        now: DateTime<Utc>,
+    ) -> Result<(WorkflowAttempt, WorkflowWakeBinding), RuntimeError> {
+        Ok(self
+            .store()?
+            .bind_workflow_wait(request, CorrelationId::new(), now)?)
+    }
+
+    /// Root-only consumption of an exact external or protected-component wake signal.
+    ///
+    /// # Errors
+    /// Returns a runtime error for stale, substituted, expired, or unauthorized wake evidence.
+    pub fn wake_canonical_workflow(
+        &self,
+        request: &WorkflowWakeRequest,
+        now: DateTime<Utc>,
+    ) -> Result<WorkflowAttempt, RuntimeError> {
+        Ok(self
+            .store()?
+            .wake_workflow(request, CorrelationId::new(), now)?)
     }
 
     /// Root-only compatibility cutover for one active agent lease.
