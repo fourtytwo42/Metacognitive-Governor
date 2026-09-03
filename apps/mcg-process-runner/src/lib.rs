@@ -1,5 +1,6 @@
 use std::{
     collections::BTreeSet,
+    future::Future,
     io::Read as _,
     path::{Component, Path, PathBuf},
     process::Stdio,
@@ -191,6 +192,8 @@ pub enum ProcessRunnerClientError {
     DiagnosticOutput,
     #[error("process runner returned an invalid response")]
     InvalidResponse,
+    #[error("process runner was cancelled and its process tree was reaped")]
+    Cancelled,
 }
 
 impl ProcessRunnerClientError {
@@ -272,12 +275,135 @@ impl ProcessRunnerClient {
         &self,
         request: &ProcessRunnerRequest,
     ) -> Result<ProcessRunnerResponse, ProcessRunnerClientError> {
+        self.invoke_with_cancellation(request, std::future::pending())
+            .await
+    }
+
+    /// Dispatches one request and terminates/reaps its complete process tree when cancellation
+    /// becomes authoritative.
+    ///
+    /// # Errors
+    /// Returns a categorical client error for prelaunch identity failure, bounded transport
+    /// failure, cancellation, timeout, diagnostic output, or an invalid child response.
+    pub async fn invoke_with_cancellation<C>(
+        &self,
+        request: &ProcessRunnerRequest,
+        cancellation: C,
+    ) -> Result<ProcessRunnerResponse, ProcessRunnerClientError>
+    where
+        C: Future<Output = ()>,
+    {
+        let bytes = self.encode_request(request)?;
+        let mut command = self.runner_command()?;
+        let mut child = command
+            .spawn()
+            .map_err(|_| ProcessRunnerClientError::Launch)?;
+        let (Some(mut stdin), Some(stdout), Some(stderr)) = (
+            child.stdin().take(),
+            child.stdout().take(),
+            child.stderr().take(),
+        ) else {
+            let _ = Box::into_pin(child.kill()).await;
+            let _ = child.wait().await;
+            return Err(ProcessRunnerClientError::Launch);
+        };
+        let mut stdout_task = tokio::spawn(read_bounded(stdout, PROCESS_RUNNER_RESPONSE_MAX_BYTES));
+        let mut stderr_task = tokio::spawn(read_bounded(stderr, STDERR_MAX_BYTES));
+        let deadline = Instant::now() + self.outer_timeout;
+        tokio::pin!(cancellation);
+        let write = tokio::time::timeout_at(deadline, async {
+            stdin.write_all(&bytes).await?;
+            stdin.shutdown().await
+        });
+        tokio::pin!(write);
+        let write_result = tokio::select! {
+            result = &mut write => Some(result),
+            () = &mut cancellation => None,
+        };
+        let Some(write_result) = write_result else {
+            drop(stdin);
+            stop_child(child.as_mut(), &stdout_task, &stderr_task).await;
+            return Err(ProcessRunnerClientError::Cancelled);
+        };
+        match write_result {
+            Ok(Ok(())) => {}
+            Ok(Err(_)) => {
+                drop(stdin);
+                stop_child(child.as_mut(), &stdout_task, &stderr_task).await;
+                return Err(ProcessRunnerClientError::Delivery);
+            }
+            Err(_) => {
+                drop(stdin);
+                stop_child(child.as_mut(), &stdout_task, &stderr_task).await;
+                return Err(ProcessRunnerClientError::Timeout);
+            }
+        }
+        drop(stdin);
+        let wait_result = {
+            let wait = tokio::time::timeout_at(deadline, child.wait());
+            tokio::pin!(wait);
+            tokio::select! {
+                result = &mut wait => Some(result),
+                () = &mut cancellation => None,
+            }
+        };
+        let Some(wait_result) = wait_result else {
+            stop_child(child.as_mut(), &stdout_task, &stderr_task).await;
+            return Err(ProcessRunnerClientError::Cancelled);
+        };
+        let status = match wait_result {
+            Ok(Ok(status)) => status,
+            Ok(Err(_)) => {
+                stop_child(child.as_mut(), &stdout_task, &stderr_task).await;
+                return Err(ProcessRunnerClientError::Process);
+            }
+            Err(_) => {
+                stop_child(child.as_mut(), &stdout_task, &stderr_task).await;
+                return Err(ProcessRunnerClientError::Timeout);
+            }
+        };
+        let output_result = {
+            let output = tokio::time::timeout_at(deadline, async {
+                Ok::<_, ProcessRunnerClientError>((
+                    join_reader(&mut stdout_task).await?,
+                    join_reader(&mut stderr_task).await?,
+                ))
+            });
+            tokio::pin!(output);
+            tokio::select! {
+                result = &mut output => Some(result),
+                () = &mut cancellation => None,
+            }
+        };
+        let Some(output_result) = output_result else {
+            stdout_task.abort();
+            stderr_task.abort();
+            return Err(ProcessRunnerClientError::Cancelled);
+        };
+        let output = output_result.map_err(|_| ProcessRunnerClientError::Timeout)??;
+        if output.0.1 || output.1.1 {
+            return Err(ProcessRunnerClientError::ResponseTooLarge);
+        }
+        if !output.1.0.is_empty() {
+            return Err(ProcessRunnerClientError::DiagnosticOutput);
+        }
+        validate_client_response(status.success(), request, &output.0.0)
+    }
+
+    fn encode_request(
+        &self,
+        request: &ProcessRunnerRequest,
+    ) -> Result<Vec<u8>, ProcessRunnerClientError> {
         self.validate_executable_identity()?;
         let bytes =
             serde_json::to_vec(request).map_err(|_| ProcessRunnerClientError::InvalidResponse)?;
         if bytes.len() > PROCESS_RUNNER_REQUEST_MAX_BYTES {
             return Err(ProcessRunnerClientError::RequestTooLarge);
         }
+        Ok(bytes)
+    }
+
+    fn runner_command(&self) -> Result<CommandWrap, ProcessRunnerClientError> {
         let mut command = Command::new(&self.executable);
         command
             .env_clear()
@@ -295,58 +421,7 @@ impl ProcessRunnerClient {
         command.wrap(ProcessGroup::leader());
         #[cfg(windows)]
         command.wrap(JobObject);
-        let mut child = command
-            .spawn()
-            .map_err(|_| ProcessRunnerClientError::Launch)?;
-        let (Some(mut stdin), Some(stdout), Some(stderr)) = (
-            child.stdin().take(),
-            child.stdout().take(),
-            child.stderr().take(),
-        ) else {
-            let _ = Box::into_pin(child.kill()).await;
-            let _ = child.wait().await;
-            return Err(ProcessRunnerClientError::Launch);
-        };
-        let mut stdout_task = tokio::spawn(read_bounded(stdout, PROCESS_RUNNER_RESPONSE_MAX_BYTES));
-        let mut stderr_task = tokio::spawn(read_bounded(stderr, STDERR_MAX_BYTES));
-        let deadline = Instant::now() + self.outer_timeout;
-        if tokio::time::timeout_at(deadline, async {
-            stdin.write_all(&bytes).await?;
-            stdin.shutdown().await
-        })
-        .await
-        .is_err()
-        {
-            stop_child(child.as_mut(), &stdout_task, &stderr_task).await;
-            return Err(ProcessRunnerClientError::Timeout);
-        }
-        drop(stdin);
-        let status = match tokio::time::timeout_at(deadline, child.wait()).await {
-            Ok(Ok(status)) => status,
-            Ok(Err(_)) => {
-                stop_child(child.as_mut(), &stdout_task, &stderr_task).await;
-                return Err(ProcessRunnerClientError::Process);
-            }
-            Err(_) => {
-                stop_child(child.as_mut(), &stdout_task, &stderr_task).await;
-                return Err(ProcessRunnerClientError::Timeout);
-            }
-        };
-        let output = tokio::time::timeout_at(deadline, async {
-            Ok::<_, ProcessRunnerClientError>((
-                join_reader(&mut stdout_task).await?,
-                join_reader(&mut stderr_task).await?,
-            ))
-        })
-        .await
-        .map_err(|_| ProcessRunnerClientError::Timeout)??;
-        if output.0.1 || output.1.1 {
-            return Err(ProcessRunnerClientError::ResponseTooLarge);
-        }
-        if !output.1.0.is_empty() {
-            return Err(ProcessRunnerClientError::DiagnosticOutput);
-        }
-        validate_client_response(status.success(), request, &output.0.0)
+        Ok(command)
     }
 
     fn validate_executable_identity(&self) -> Result<(), ProcessRunnerClientError> {

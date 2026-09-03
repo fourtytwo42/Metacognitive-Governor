@@ -1080,6 +1080,17 @@ trait GovernedProcessRunnerGateway: Send + Sync {
         &self,
         request: &ProcessRunnerRequest,
     ) -> Result<ProcessRunnerResponse, ProcessRunnerClientError>;
+
+    async fn invoke_with_cancellation(
+        &self,
+        request: &ProcessRunnerRequest,
+        cancellation: Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
+    ) -> Result<ProcessRunnerResponse, ProcessRunnerClientError> {
+        tokio::select! {
+            result = self.invoke(request) => result,
+            () = cancellation => Err(ProcessRunnerClientError::Cancelled),
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -1095,6 +1106,14 @@ impl GovernedProcessRunnerGateway for ProcessRunnerClient {
         request: &ProcessRunnerRequest,
     ) -> Result<ProcessRunnerResponse, ProcessRunnerClientError> {
         ProcessRunnerClient::invoke(self, request).await
+    }
+
+    async fn invoke_with_cancellation(
+        &self,
+        request: &ProcessRunnerRequest,
+        cancellation: Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
+    ) -> Result<ProcessRunnerResponse, ProcessRunnerClientError> {
+        ProcessRunnerClient::invoke_with_cancellation(self, request, cancellation).await
     }
 }
 
@@ -4573,6 +4592,8 @@ async fn execute_plugin_process(
     let (operation_payload, operation_hash) =
         governed_process_operation_payload(&operation).map_err(ToolError::Denied)?;
     let attempt = &authority.workflow.attempt;
+    let attempt_id = attempt.attempt_id;
+    let attempt_lease_generation = attempt.lease_generation;
     let lease_expiry = attempt
         .lease_expires_at
         .ok_or_else(|| ToolError::Denied("plugin process workflow has no active lease".into()))?;
@@ -4721,17 +4742,46 @@ async fn execute_plugin_process(
         now,
     )
     .map_err(|error| ToolError::Execution(error.to_string()))?;
-    let runner_result = client.invoke(&runner_request).await;
-    let outcome = settle_plugin_process_result(
-        runtime,
-        dispatcher.runtime_actor,
-        &request.id,
-        &envelope,
-        &process_execution,
-        correlation_id,
-        request_id,
-        runner_result,
-    )?;
+    let runner_result = client
+        .invoke_with_cancellation(
+            &runner_request,
+            Box::pin(wait_for_plugin_workflow_cancellation(
+                dispatcher.runtime.upgrade().ok_or_else(|| {
+                    ToolError::Execution("Protected Root runtime disappeared".into())
+                })?,
+                attempt_id,
+                attempt_lease_generation,
+            )),
+        )
+        .await;
+    let cancellation_already_fenced =
+        matches!(runner_result, Err(ProcessRunnerClientError::Cancelled))
+            && authoritative_plugin_effect_cancellation_already_fenced(
+                runtime,
+                attempt_id,
+                attempt_lease_generation,
+                envelope.id,
+                process_execution.id,
+                &process_execution,
+            )
+            .unwrap_or(false);
+    let outcome = if cancellation_already_fenced {
+        PluginCapabilityOutcome::Failed {
+            request_id: request.id.clone(),
+            error_code: "capability_execution_uncertain".into(),
+        }
+    } else {
+        settle_plugin_process_result(
+            runtime,
+            dispatcher.runtime_actor,
+            &request.id,
+            &envelope,
+            &process_execution,
+            correlation_id,
+            request_id,
+            runner_result,
+        )?
+    };
     let mut sessions = dispatcher
         .capability_sessions
         .lock()
@@ -5014,6 +5064,7 @@ const fn process_runner_client_error_code(error: ProcessRunnerClientError) -> &'
         ProcessRunnerClientError::ResponseTooLarge => "response_too_large",
         ProcessRunnerClientError::DiagnosticOutput => "diagnostic_output",
         ProcessRunnerClientError::InvalidResponse => "invalid_response",
+        ProcessRunnerClientError::Cancelled => "cancelled",
     }
 }
 
@@ -5686,6 +5737,38 @@ fn authoritative_plugin_cancellation_already_settled(
         && execution.id == execution_id
         && execution.action_id == action_id
         && execution.state == ActionExecutionState::NoEffectConfirmed
+        && execution.revision > dispatched.revision
+        && execution.lease_generation > dispatched.lease_generation)
+}
+
+fn authoritative_plugin_effect_cancellation_already_fenced(
+    runtime: &AppRuntime,
+    attempt_id: mcg_contracts::AttemptId,
+    lease_generation: u64,
+    action_id: ActionId,
+    execution_id: ActionExecutionId,
+    dispatched: &ActionExecution,
+) -> Result<bool, RuntimeError> {
+    let Some(attempt) = runtime.canonical_workflow_attempt(attempt_id)? else {
+        return Ok(false);
+    };
+    let Some((envelope, execution)) = runtime.canonical_action_for_execution(execution_id)? else {
+        return Ok(false);
+    };
+    Ok(attempt.state == WorkflowState::CancelRequested
+        && attempt.lease_generation > lease_generation
+        && attempt.lease_owner.is_none()
+        && attempt.lease_expires_at.is_none()
+        && envelope.id == action_id
+        && envelope.attempt_id == attempt_id
+        && execution.id == execution_id
+        && execution.action_id == action_id
+        && execution.state == ActionExecutionState::OutcomeUnknown
+        && matches!(
+            execution.outcome,
+            Some(EffectOutcome::OutcomeUnknown { .. })
+        )
+        && execution.executor.is_none()
         && execution.revision > dispatched.revision
         && execution.lease_generation > dispatched.lease_generation)
 }
@@ -10565,6 +10648,11 @@ mod tests {
         started: Arc<tokio::sync::Notify>,
     }
 
+    struct BlockingProcessGateway {
+        started: Arc<tokio::sync::Notify>,
+        calls: Arc<Mutex<Vec<ProcessRunnerRequest>>>,
+    }
+
     struct ScriptedProtectedPluginGateway {
         runner: SourceRef,
         requests: Arc<Mutex<Vec<PluginRunnerRequest>>>,
@@ -11086,6 +11174,27 @@ mod tests {
                     "fixture received no Root authority".into(),
                 ));
             }
+            self.started.notify_one();
+            std::future::pending().await
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl GovernedProcessRunnerGateway for BlockingProcessGateway {
+        fn capability_evidence(
+            &self,
+        ) -> Result<ProcessRunnerCapabilityEvidence, ProcessRunnerClientError> {
+            Ok(scripted_process_capability_evidence())
+        }
+
+        async fn invoke(
+            &self,
+            request: &ProcessRunnerRequest,
+        ) -> Result<ProcessRunnerResponse, ProcessRunnerClientError> {
+            self.calls
+                .lock()
+                .expect("blocking process calls")
+                .push(request.clone());
             self.started.notify_one();
             std::future::pending().await
         }
@@ -14683,6 +14792,221 @@ mod tests {
             mcg_contracts::ReconciliationJobState::UserActionRequired
         );
         assert_eq!(process_requests.lock().expect("process requests").len(), 2);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::too_many_lines)]
+    async fn root_cancellation_stops_active_plugin_process_and_preserves_unknown_effect() {
+        let temporary = tempfile::tempdir().expect("temporary Root data directory");
+        let project_root = tempfile::tempdir().expect("plugin project root");
+        let config = AppConfig::default().with_data_directory(temporary.path());
+        let reopen_config = config.clone();
+        let runtime = Arc::new(AppRuntime::open(config).expect("runtime"));
+        let project_id = ProjectId::new();
+        runtime
+            .discover_project(project_root.path(), project_id)
+            .expect("discover plugin project");
+        let mut task = TaskEnvelope::new("cancel a governed plugin process");
+        task.project_id = Some(project_id);
+        runtime.create_task(&task).expect("create plugin task");
+        let identity = current_runtime_identity().expect("Root identity");
+        runtime
+            .initialize_root_ownership(
+                identity.clone(),
+                RootMigrationReceipt {
+                    schema_version: PROTOCOL_V1,
+                    from_storage_schema: STORAGE_SCHEMA_VERSION,
+                    to_storage_schema: STORAGE_SCHEMA_VERSION,
+                    backup_path: None,
+                    backup_sha256: None,
+                    migrated_at: Utc::now(),
+                },
+            )
+            .expect("Root ownership");
+        let (executable, argv) = if cfg!(windows) {
+            (
+                r"C:\Windows\System32\cmd.exe".to_owned(),
+                vec!["/d".into(), "/c".into(), "echo never-returned".into()],
+            )
+        } else {
+            (
+                "/bin/sh".to_owned(),
+                vec!["-c".into(), "printf never-returned".into()],
+            )
+        };
+        let runner = SourceRef {
+            source_type: StableTypeId::parse("mcg.plugin_runner_executable.v1")
+                .expect("runner type"),
+            locator: "mcg-plugin-runner".into(),
+            content_hash: ContentHash {
+                algorithm: HashAlgorithm::Sha256,
+                domain: "MetaCog.PluginRunnerExecutable".into(),
+                digest_hex: "8".repeat(64),
+            },
+        };
+        let plugin_gateway = Arc::new(ScriptedProtectedPluginGateway {
+            runner,
+            requests: Arc::new(Mutex::new(Vec::new())),
+            turns: Mutex::new(VecDeque::from([PluginGuestTurn::CapabilityRequest {
+                request: PluginCapabilityRequest {
+                    schema_version: PLUGIN_SCHEMA_VERSION,
+                    id: "cancel-process".into(),
+                    operation: PluginCapabilityOperation::ProcessExec {
+                        executable: executable.clone(),
+                        argv,
+                        cwd: ".".into(),
+                        env: Vec::new(),
+                        stdin: None,
+                    },
+                },
+            }])),
+        });
+        let process_started = Arc::new(tokio::sync::Notify::new());
+        let process_calls = Arc::new(Mutex::new(Vec::new()));
+        runtime
+            .install_protected_plugin_dispatcher(Arc::new(RootPluginDispatcher {
+                runtime: Arc::downgrade(&runtime),
+                root_executable: PathBuf::from("unused-in-injected-test"),
+                runtime_actor: RuntimeActorId(identity.instance_id.0),
+                runtime_identity: identity,
+                capability_sessions: Mutex::new(BTreeMap::new()),
+                test_gateway: Some(plugin_gateway),
+                test_action_gateway: None,
+                test_process_gateway: Some(Arc::new(BlockingProcessGateway {
+                    started: process_started.clone(),
+                    calls: process_calls.clone(),
+                })),
+                test_http_gateway: None,
+                test_browser_gateway: None,
+                test_mcp_session_gateway: None,
+            }))
+            .expect("install protected plugin dispatcher");
+        let module = br#"(module (func (export "_start")))"#;
+        let revision = PluginRevision {
+            schema_version: PLUGIN_CATALOG_SCHEMA_VERSION,
+            id: PluginRevisionId::new(),
+            manifest: PluginManifest {
+                schema_version: PLUGIN_SCHEMA_VERSION,
+                id: "example.cancelled-process".into(),
+                display_name: "Cancelled process fixture".into(),
+                version: "1.0.0".into(),
+                class: PluginClass::SandboxedWasi,
+                requested_capabilities: vec![PluginCapability::Process],
+            },
+            module_sha256: format!("{:x}", Sha256::digest(module)),
+            module_size_bytes: u64::try_from(module.len()).expect("module size"),
+            source: PluginInstallSource::LocalImport,
+            signature: PluginSignature {
+                state: PluginSignatureState::Unsigned,
+                scheme: None,
+                signer: None,
+                signature_sha256: None,
+            },
+            installed_at: Utc::now(),
+        };
+        let installation = runtime
+            .install_sandboxed_plugin(&revision, module)
+            .expect("install protected process plugin");
+        let installation = runtime
+            .set_plugin_capability_grants(
+                &revision.manifest.id,
+                installation.revision,
+                vec![PluginCapabilityGrant {
+                    schema_version: PLUGIN_CATALOG_SCHEMA_VERSION,
+                    capability: PluginCapability::Process,
+                    scopes: vec![PluginCapabilityScope::Executable {
+                        executable: executable.clone(),
+                    }],
+                }],
+            )
+            .expect("grant exact plugin process");
+        runtime
+            .set_plugin_enabled(&revision.manifest.id, installation.revision, true)
+            .expect("enable protected process plugin");
+
+        let invocation_id = PluginInvocationId::new();
+        let invocation = runtime.invoke_sandboxed_plugin(
+            invocation_id,
+            &revision.manifest.id,
+            Some(task.id),
+            serde_json::json!({"goal": "cancel process"}),
+        );
+        let cancellation = async {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                process_started.notified(),
+            )
+            .await
+            .expect("process runner did not start");
+            let workflow = runtime
+                .canonical_workflows()
+                .expect("plugin workflow")
+                .into_iter()
+                .next()
+                .expect("one plugin workflow");
+            runtime
+                .cancel_canonical_workflow(&WorkflowCancelRequest {
+                    attempt_id: workflow.attempt_id,
+                    expected_revision: workflow.revision,
+                    expected_generation: workflow.lease_generation,
+                    idempotency_key: "cancel-active-plugin-process".into(),
+                })
+                .expect("commit authoritative process cancellation")
+        };
+        let (result, cancelling) = tokio::join!(invocation, cancellation);
+        let result = result.expect("cancelled process invocation settles durably");
+        assert_eq!(cancelling.state, WorkflowState::CancelRequested);
+        assert_eq!(
+            result.invocation.state,
+            mcg_domain::PluginInvocationState::Uncertain
+        );
+        assert_eq!(
+            result.invocation.error_code.as_deref(),
+            Some("runner_uncertain")
+        );
+        let calls = process_calls.lock().expect("process calls");
+        assert_eq!(calls.len(), 1);
+        let execution_id = calls[0].execution_id;
+        drop(calls);
+        let (_, execution) = runtime
+            .canonical_action_for_execution(execution_id)
+            .expect("load cancelled process action")
+            .expect("cancelled process action");
+        assert_eq!(execution.state, ActionExecutionState::OutcomeUnknown);
+        assert!(matches!(
+            execution.outcome,
+            Some(EffectOutcome::OutcomeUnknown { .. })
+        ));
+        let workflow = runtime
+            .canonical_workflows()
+            .expect("settled workflow")
+            .into_iter()
+            .next()
+            .expect("one workflow");
+        assert_eq!(
+            workflow.state,
+            WorkflowState::Waiting(WaitReason::Reconciliation)
+        );
+        drop(runtime);
+
+        let reopened = AppRuntime::open(reopen_config).expect("reopen runtime");
+        let invocation = reopened
+            .plugin_invocation(invocation_id)
+            .expect("reopened invocation")
+            .expect("durable invocation");
+        assert_eq!(
+            invocation.state,
+            mcg_domain::PluginInvocationState::Uncertain
+        );
+        let (_, execution) = reopened
+            .canonical_action_for_execution(execution_id)
+            .expect("reopened action")
+            .expect("durable action");
+        assert_eq!(execution.state, ActionExecutionState::OutcomeUnknown);
+        assert_eq!(
+            reopened.canonical_workflows().expect("reopened workflow")[0].state,
+            WorkflowState::Waiting(WaitReason::Reconciliation)
+        );
     }
 
     #[tokio::test]

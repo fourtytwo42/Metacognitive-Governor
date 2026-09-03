@@ -106,6 +106,33 @@ async fn timeout_terminates_late_work_and_is_never_reported_as_no_effect() {
 }
 
 #[tokio::test]
+async fn authoritative_cancellation_terminates_the_complete_process_tree() {
+    let root = tempfile::tempdir().expect("project root");
+    let runner = PathBuf::from(env!("CARGO_BIN_EXE_mcg-process-runner"));
+    let client = ProcessRunnerClient::with_executable(&runner, Duration::from_secs(10))
+        .expect("process runner client");
+    let request = qualification_request_with_evidence(
+        root.path(),
+        &operation(true, 5_000),
+        client.capability_evidence(),
+    )
+    .expect("qualification request");
+
+    let result = client
+        .invoke_with_cancellation(&request, async {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        })
+        .await;
+
+    assert_eq!(result, Err(ProcessRunnerClientError::Cancelled));
+    tokio::time::sleep(Duration::from_millis(1_000)).await;
+    assert!(
+        !root.path().join("late.txt").exists(),
+        "cancelled process work must not escape after the runner tree is reaped"
+    );
+}
+
+#[tokio::test]
 async fn changed_runner_identity_is_rejected_before_process_launch() {
     let root = tempfile::tempdir().expect("project root");
     let runner_root = tempfile::tempdir().expect("runner root");
