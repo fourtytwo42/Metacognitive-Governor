@@ -9,7 +9,10 @@ use mcg_contracts::{
 use rusqlite::{OptionalExtension, Transaction, params};
 use std::collections::BTreeSet;
 
-use crate::{SqliteEventStore, StorageError};
+use crate::{
+    SqliteEventStore, StorageError,
+    workflows::settle_reconciled_workflow_cancellation_in_transaction,
+};
 
 const ACTION_AUTHORIZED_TYPE_ID: &str = "mcg.action_authorized.v1";
 const ACTION_DISPATCHED_TYPE_ID: &str = "mcg.action_dispatched.v1";
@@ -1326,6 +1329,21 @@ impl SqliteEventStore {
                 }
                 _ => None,
             };
+            if original_job.state == ReconciliationJobState::Resolved {
+                let envelope = load_action_envelope(&transaction, original_execution.action_id)?
+                    .ok_or_else(|| {
+                        StorageError::InvalidData(
+                            "reconciled action execution has no envelope".into(),
+                        )
+                    })?;
+                settle_reconciled_workflow_cancellation_in_transaction(
+                    &transaction,
+                    envelope.attempt_id,
+                    original_job.id,
+                    correlation_id,
+                    now,
+                )?;
+            }
             transaction.commit()?;
             return Ok(ReconciliationResolutionReceipt {
                 job: original_job,
@@ -1446,6 +1464,19 @@ impl SqliteEventStore {
             }),
         )?;
         insert_action_event(&transaction, &event)?;
+        if job.state == ReconciliationJobState::Resolved {
+            let envelope =
+                load_action_envelope(&transaction, execution.action_id)?.ok_or_else(|| {
+                    StorageError::InvalidData("reconciled action execution has no envelope".into())
+                })?;
+            settle_reconciled_workflow_cancellation_in_transaction(
+                &transaction,
+                envelope.attempt_id,
+                job.id,
+                correlation_id,
+                now,
+            )?;
+        }
         transaction.commit()?;
         Ok(ReconciliationResolutionReceipt {
             job,
@@ -2880,6 +2911,46 @@ mod tests {
         (envelope, execution)
     }
 
+    fn resolve_reconciliation_as_not_occurred(
+        store: &mut SqliteEventStore,
+        execution_id: ActionExecutionId,
+        suffix: &str,
+    ) {
+        let unknown = store.action_execution(execution_id).unwrap().unwrap();
+        let job = load_reconciliation_job_for_execution(&store.connection, execution_id)
+            .unwrap()
+            .unwrap();
+        let worker = RuntimeActorId::new();
+        let claimed = store
+            .claim_reconciliation_job(
+                job.id,
+                job.revision,
+                job.lease_generation,
+                unknown.revision,
+                unknown.lease_generation,
+                worker,
+                now() + chrono::Duration::minutes(1),
+                CorrelationId::new(),
+                &format!("claim-multi-cancel-{suffix}"),
+                now(),
+            )
+            .unwrap();
+        store
+            .resolve_reconciliation_job(
+                claimed.job.id,
+                claimed.job.revision,
+                claimed.job.lease_generation,
+                claimed.execution.revision,
+                claimed.execution.lease_generation,
+                worker,
+                &ReconciliationObservation::ConfirmedNotOccurred,
+                CorrelationId::new(),
+                &format!("resolve-multi-cancel-{suffix}"),
+                now(),
+            )
+            .unwrap();
+    }
+
     fn authorize_and_confirm_action(
         store: &mut SqliteEventStore,
         workflow: &WorkflowAttempt,
@@ -3734,10 +3805,18 @@ mod tests {
                 .unwrap(),
             resolved
         );
+        assert_eq!(
+            store
+                .workflow_attempt(workflow.attempt_id)
+                .unwrap()
+                .unwrap()
+                .state,
+            WorkflowState::Cancelled
+        );
         let recovery = store
             .recover_expired_workflow_leases(CorrelationId::new(), now())
             .unwrap();
-        assert_eq!(recovery.settled_cancellations, 1);
+        assert_eq!(recovery.settled_cancellations, 0);
         assert_eq!(
             store
                 .workflow_attempt(workflow.attempt_id)
@@ -3758,6 +3837,82 @@ mod tests {
             ),
             Err(StorageError::Conflict(_))
         ));
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn cancellation_waits_for_every_reconciliation_before_atomic_settlement() {
+        let mut store = SqliteEventStore::open_in_memory().unwrap();
+        let (_contract, workflow, actor) = running_workflow(&mut store);
+        let (first_envelope, first_execution) =
+            action_fixture(&workflow, actor, EffectClass::Consequential);
+        let (mut second_envelope, second_execution) =
+            action_fixture(&workflow, actor, EffectClass::Consequential);
+        second_envelope.idempotency_key = "authorize-action-2".into();
+
+        for (envelope, execution) in [
+            (&first_envelope, &first_execution),
+            (&second_envelope, &second_execution),
+        ] {
+            store
+                .authorize_action(
+                    envelope,
+                    execution,
+                    workflow.revision,
+                    workflow.lease_generation,
+                    CorrelationId::new(),
+                    now(),
+                )
+                .unwrap();
+            store
+                .dispatch_action(
+                    execution.id,
+                    execution.revision,
+                    execution.lease_generation,
+                    RuntimeActorId::new(),
+                    CorrelationId::new(),
+                    &format!("dispatch-before-multi-cancel:{}", execution.id),
+                    now(),
+                )
+                .unwrap();
+        }
+        store
+            .transition_workflow_attempt(
+                workflow.attempt_id,
+                workflow.revision,
+                workflow.lease_generation,
+                WorkflowState::CancelRequested,
+                CorrelationId::new(),
+                "cancel-for-multiple-reconciliations",
+                now(),
+            )
+            .unwrap();
+
+        resolve_reconciliation_as_not_occurred(&mut store, first_execution.id, "first");
+        assert_eq!(
+            store
+                .workflow_attempt(workflow.attempt_id)
+                .unwrap()
+                .unwrap()
+                .state,
+            WorkflowState::Waiting(mcg_contracts::WaitReason::Reconciliation)
+        );
+        resolve_reconciliation_as_not_occurred(&mut store, second_execution.id, "second");
+        assert_eq!(
+            store
+                .workflow_attempt(workflow.attempt_id)
+                .unwrap()
+                .unwrap()
+                .state,
+            WorkflowState::Cancelled
+        );
+        assert_eq!(
+            store
+                .recover_expired_workflow_leases(CorrelationId::new(), now())
+                .unwrap()
+                .settled_cancellations,
+            0
+        );
     }
 
     #[test]

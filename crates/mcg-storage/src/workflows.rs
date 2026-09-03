@@ -1730,6 +1730,53 @@ pub(crate) fn transition_workflow_attempt_in_transaction(
     Ok(attempt)
 }
 
+/// Settles a cancellation-owned reconciliation wait immediately after the final effect is
+/// resolved. This runs in the same transaction as the authoritative reconciliation result so a
+/// crash cannot leave a fully reconciled cancellation dependent on a later startup scan.
+pub(super) fn settle_reconciled_workflow_cancellation_in_transaction(
+    transaction: &Transaction<'_>,
+    attempt_id: AttemptId,
+    reconciliation_job_id: mcg_contracts::ReconciliationJobId,
+    correlation_id: CorrelationId,
+    now: DateTime<Utc>,
+) -> Result<Option<WorkflowAttempt>, StorageError> {
+    let attempt = load_attempt(transaction, attempt_id)?
+        .ok_or(StorageError::WorkflowAttemptNotFound(attempt_id))?;
+    let cancellation_owned = attempt.state == WorkflowState::CancelRequested
+        || (attempt.state == WorkflowState::Waiting(WaitReason::Reconciliation)
+            && is_cancellation_reconciliation_wait(transaction, &attempt)?);
+    if !cancellation_owned {
+        return Ok(None);
+    }
+
+    let status = cancellation_effect_status(transaction, attempt.attempt_id)?;
+    let next_state = if status.quarantined > 0 {
+        Some(WorkflowState::Quarantined)
+    } else if status.unresolved == 0 {
+        Some(WorkflowState::Cancelled)
+    } else if attempt.state == WorkflowState::CancelRequested && status.reconciliation_required > 0
+    {
+        Some(WorkflowState::Waiting(WaitReason::Reconciliation))
+    } else {
+        None
+    };
+    let Some(next_state) = next_state else {
+        return Ok(None);
+    };
+
+    transition_workflow_attempt_in_transaction(
+        transaction,
+        attempt.attempt_id,
+        attempt.revision,
+        attempt.lease_generation,
+        next_state,
+        correlation_id,
+        &format!("settle-cancellation-reconciliation:{reconciliation_job_id}"),
+        now,
+    )
+    .map(Some)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn claim_workflow_attempt_in_transaction(
     transaction: &Transaction<'_>,
