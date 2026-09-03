@@ -1238,6 +1238,163 @@ async fn active_invocation_cancellation_kills_generation_and_rejects_late_result
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)] // One real-process external-cancel/kill/reopen proof.
+async fn externally_committed_cancellation_terminates_active_runtime_child() {
+    let directory = tempfile::tempdir().unwrap();
+    let config = AppConfig {
+        data_directory: directory.path().join("external-cancellation-profile"),
+        ..AppConfig::default()
+    };
+    let restart_config = config.clone();
+    std::fs::create_dir_all(&config.data_directory).unwrap();
+    let now = Utc::now();
+    let (contract, ready) = workflow_fixture(now);
+    let running = {
+        let mut store = SqliteEventStore::open(config.database_path()).unwrap();
+        store
+            .create_workflow(&contract, &ready, CorrelationId::new(), now)
+            .unwrap();
+        store
+            .claim_workflow_attempt(
+                ready.attempt_id,
+                ready.revision,
+                ready.lease_generation,
+                RuntimeActorId::new(),
+                now + Duration::minutes(5),
+                CorrelationId::new(),
+                "external-cancellation-claim",
+                now,
+            )
+            .unwrap()
+    };
+    let runtime = AppRuntime::open(config).unwrap();
+    let generation = runtime.allocate_runtime_worker_generation().unwrap();
+    let fixture = env!("CARGO_BIN_EXE_mcg-runtime-worker-delayed-fixture");
+    let mut client = RuntimeWorkerClient::launch(
+        fixture,
+        directory.path(),
+        generation,
+        std::time::Duration::from_secs(5),
+        std::time::Duration::from_secs(35),
+        std::time::Duration::from_secs(60),
+    )
+    .await
+    .unwrap();
+    let input = VersionedPayload::canonical_v1(
+        StableTypeId::parse("test.work_input.v1").unwrap(),
+        &serde_json::json!({"task": "cancel-through-authoritative-root-state"}),
+    )
+    .unwrap();
+    let request = invocation_request_for(
+        client.hello(),
+        client.worker_generation(),
+        InvocationRole::Work,
+        input,
+        running.attempt_id,
+        running.task_contract.clone(),
+        running.revision,
+        running.lease_generation,
+    );
+    let cancel = WorkflowCancelRequest {
+        attempt_id: running.attempt_id,
+        expected_revision: running.revision,
+        expected_generation: running.lease_generation,
+        idempotency_key: "externally-cancel-active-runtime-invocation".into(),
+    };
+
+    let started = std::time::Instant::now();
+    let execution = execute_runtime_invocation(&runtime, &mut client, &request, Utc::now());
+    let external_cancellation = async {
+        timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let dispatched = runtime
+                    .runtime_invocation(request.invocation_manifest.id, 10)
+                    .unwrap()
+                    .is_some_and(|inspection| {
+                        inspection.model_runs.iter().any(|record| {
+                            record.run.state == mcg_contracts::ModelRunState::Dispatched
+                        })
+                    });
+                if dispatched {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("Runtime invocation did not persist dispatch before cancellation");
+        runtime.cancel_canonical_workflow(&cancel).unwrap()
+    };
+    let (execution, cancelled_workflow) = tokio::join!(execution, external_cancellation);
+
+    assert!(execution.is_err());
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    assert_eq!(cancelled_workflow.state, WorkflowState::CancelRequested);
+    assert_eq!(cancelled_workflow.revision, running.revision + 1);
+    assert_eq!(
+        cancelled_workflow.lease_generation,
+        running.lease_generation + 1
+    );
+    assert!(matches!(
+        client.invoke(&request).await,
+        Err(mcg_protected_root::RuntimeWorkerClientError::Unavailable)
+    ));
+    assert!(
+        runtime
+            .runtime_response(request.model_run_id)
+            .unwrap()
+            .is_none()
+    );
+    let inspection = runtime
+        .runtime_invocation(request.invocation_manifest.id, 10)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        inspection
+            .model_runs
+            .iter()
+            .map(|record| record.run.state)
+            .collect::<Vec<_>>(),
+        [
+            mcg_contracts::ModelRunState::Planned,
+            mcg_contracts::ModelRunState::Dispatched,
+            mcg_contracts::ModelRunState::Cancelled,
+        ]
+    );
+    drop(client);
+    drop(runtime);
+
+    let reopened = open_protected_root(restart_config).unwrap();
+    assert_eq!(
+        reopened
+            .canonical_workflow(running.workflow_id)
+            .unwrap()
+            .unwrap()
+            .attempt
+            .state,
+        WorkflowState::Cancelled
+    );
+    assert_eq!(
+        reopened
+            .runtime_invocation(request.invocation_manifest.id, 10)
+            .unwrap()
+            .unwrap()
+            .model_runs
+            .last()
+            .unwrap()
+            .run
+            .state,
+        mcg_contracts::ModelRunState::Cancelled
+    );
+    assert!(
+        reopened
+            .runtime_response(request.model_run_id)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[tokio::test]
 #[allow(clippy::too_many_lines)] // One ordered process/restart scenario retains causal evidence.
 async fn protected_root_persists_real_worker_plan_dispatch_result_and_response() {
     let directory = tempfile::tempdir().unwrap();

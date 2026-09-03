@@ -59,14 +59,14 @@ use mcg_config::{
 };
 use mcg_contracts::{
     ActionEnvelope, ActionExecution, ActionExecutionId, ActionId, ActionInspection, ActionReceipt,
-    ActionSummary, ActionValidation, ArtifactRef, CapabilityProfile, CompletionCertificate,
-    ContentHash, ContextManifest, CorrelationId, EffectOutcome, InvocationId, InvocationInspection,
-    InvocationManifest, InvocationSummary, ModelEgressPolicy, ModelInvocationPermit,
-    ModelInvocationProposal, ModelRun, ModelRunCostProvenance, ModelRunErrorClass, ModelRunId,
-    ModelRunOutcomeEvidence, ModelRunState, ModelUsage, PermitId, ReconciliationJob,
-    ReconciliationJobId, ReconciliationObservation, RuntimeActorId, RuntimeIdentity,
-    RuntimeInvocationRequest, RuntimeInvocationResult, SecretHandleId, SkillManifest,
-    SkillManifestId, SourceRef, StableTypeId, ToolAuthorizationInspection,
+    ActionSummary, ActionValidation, ArtifactRef, AttemptId, CapabilityProfile,
+    CompletionCertificate, ContentHash, ContextManifest, CorrelationId, EffectOutcome,
+    InvocationId, InvocationInspection, InvocationManifest, InvocationSummary, ModelEgressPolicy,
+    ModelInvocationPermit, ModelInvocationProposal, ModelRun, ModelRunCostProvenance,
+    ModelRunErrorClass, ModelRunId, ModelRunOutcomeEvidence, ModelRunState, ModelUsage, PermitId,
+    ReconciliationJob, ReconciliationJobId, ReconciliationObservation, RuntimeActorId,
+    RuntimeIdentity, RuntimeInvocationRequest, RuntimeInvocationResult, SecretHandleId,
+    SkillManifest, SkillManifestId, SourceRef, StableTypeId, ToolAuthorizationInspection,
     ToolAuthorizationSummary, ToolInvocationPermit, ToolInvocationProposal, ToolManifest,
     ToolManifestId, ToolPolicy, VersionedRef, WorkflowAttempt, WorkflowCancelRequest,
     WorkflowEventPage, WorkflowId, WorkflowInspection, WorkflowInvocationActivity,
@@ -4387,6 +4387,17 @@ impl AppRuntime {
             task_contract,
             events,
         }))
+    }
+
+    /// Loads one exact authoritative workflow attempt for process-control observation.
+    ///
+    /// # Errors
+    /// Returns a runtime error when authoritative workflow evidence cannot be read.
+    pub fn canonical_workflow_attempt(
+        &self,
+        attempt_id: AttemptId,
+    ) -> Result<Option<WorkflowAttempt>, RuntimeError> {
+        Ok(self.store()?.workflow_attempt(attempt_id)?)
     }
 
     /// Loads one bounded contiguous page from a workflow's immutable event history.
